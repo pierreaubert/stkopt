@@ -369,10 +369,75 @@ async fn main() {
                     }
                 }
             }
+
+            // Test People chain connection and identity fetching
+            println!("\n\n=== PEOPLE CHAIN TEST ===");
+            test_people_chain(Network::Polkadot).await;
         }
         Err(e) => {
             println!("Failed to connect: {}", e);
             println!("\n✗ Connection test FAILED");
+        }
+    }
+}
+
+async fn test_people_chain(network: Network) {
+    println!("Connecting to {} People chain...", network);
+
+    match stkopt_chain::connect_people_chain(network).await {
+        Ok(subxt_client) => {
+            println!("✓ Connected to People chain");
+
+            let people_client = stkopt_chain::PeopleChainClient::new(subxt_client);
+
+            // Test with Polkadot treasury address (has identity)
+            let test_address: subxt::utils::AccountId32 =
+                "13UVJyLnbVp9RBZYFwFGyDvVd1y27Tt8tkntv6Q7JVPhFsTB"
+                    .parse()
+                    .expect("valid address");
+
+            println!("Testing identity fetch for: {}", test_address);
+
+            match people_client.get_identity(&test_address).await {
+                Ok(Some(identity)) => {
+                    println!("✓ Identity found!");
+                    println!("  Display name: {:?}", identity.display_name);
+                    println!("  Verified: {}", identity.verified);
+                    println!("  Sub-identity: {:?}", identity.sub_identity);
+                }
+                Ok(None) => {
+                    println!("  No identity found for this address");
+                }
+                Err(e) => {
+                    println!("✗ Failed to fetch identity: {}", e);
+                }
+            }
+
+            // Test batch fetch - just use the same address multiple times to avoid checksum issues
+            println!("\nTesting batch identity fetch (3 addresses)...");
+            let addresses: Vec<subxt::utils::AccountId32> = vec![
+                test_address.clone(),
+                test_address.clone(),
+                test_address.clone(),
+            ];
+
+            match people_client.get_identities(&addresses).await {
+                Ok(identities) => {
+                    let with_names = identities.iter().filter(|i| i.display_name.is_some()).count();
+                    println!("✓ Batch fetch complete: {} identities, {} with names", identities.len(), with_names);
+                    for id in identities {
+                        if let Some(name) = &id.display_name {
+                            println!("  {} => {}", &id.address.to_string()[..8], name);
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("✗ Batch fetch failed: {}", e);
+                }
+            }
+        }
+        Err(e) => {
+            println!("✗ Failed to connect to People chain: {}", e);
         }
     }
 }

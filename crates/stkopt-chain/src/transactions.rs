@@ -3,7 +3,7 @@
 use crate::error::ChainError;
 use crate::ChainClient;
 use subxt::dynamic::{At, Value};
-use subxt::utils::AccountId32;
+pub use subxt::utils::AccountId32;
 
 /// Unsigned extrinsic payload for QR code signing.
 #[derive(Debug, Clone)]
@@ -167,10 +167,40 @@ impl ChainClient {
 }
 
 /// Encode payload for Polkadot Vault QR code.
-/// Format: compact_length ++ payload_bytes
-pub fn encode_for_qr(payload: &UnsignedPayload) -> Vec<u8> {
+///
+/// Polkadot Vault QR format:
+/// - `0x53` (ASCII 'S') - Substrate prefix
+/// - `0x02` - Payload type (mortal transaction)
+/// - `0x01` - Crypto type (Sr25519, most common for Polkadot)
+/// - 32 bytes - Public key of signer
+/// - Signing payload bytes
+pub fn encode_for_qr(payload: &UnsignedPayload, signer: &AccountId32) -> Vec<u8> {
+    let mut qr_payload = Vec::new();
+
+    // Polkadot Vault header
+    qr_payload.push(0x53); // 'S' for Substrate
+
+    // Payload type: 0x02 = mortal, 0x03 = immortal
+    match payload.era {
+        Era::Immortal => qr_payload.push(0x03),
+        Era::Mortal { .. } => qr_payload.push(0x02),
+    }
+
+    // Crypto type: 0x01 = Sr25519 (default for Polkadot)
+    qr_payload.push(0x01);
+
+    // Signer's public key (32 bytes)
+    qr_payload.extend_from_slice(signer.as_ref());
+
     // Build the signing payload
-    // This is a simplified version - real implementation needs proper extensions
+    let signing_payload = build_signing_payload(payload);
+    qr_payload.extend_from_slice(&signing_payload);
+
+    qr_payload
+}
+
+/// Build the signing payload (the data that gets signed).
+fn build_signing_payload(payload: &UnsignedPayload) -> Vec<u8> {
     let mut data = Vec::new();
 
     // Call data
@@ -181,7 +211,6 @@ pub fn encode_for_qr(payload: &UnsignedPayload) -> Vec<u8> {
     match payload.era {
         Era::Immortal => data.push(0x00),
         Era::Mortal { period, phase } => {
-            // Encode mortal era (simplified)
             let encoded = encode_mortal_era(period, phase);
             data.extend_from_slice(&encoded);
         }

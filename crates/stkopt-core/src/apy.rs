@@ -122,6 +122,62 @@ mod tests {
     }
 
     #[test]
+    fn test_get_era_apy_realistic_polkadot() {
+        // Realistic Polkadot values: ~14% APY
+        // With 24h eras, ~0.036% per era = ~14% APY compounded
+        let era_duration_ms = 86_400_000u64; // 24 hours
+        // 0.036% per era = 0.00036
+        let reward = 36u128;
+        let invested = 100_000u128;
+
+        let apy = get_era_apy(reward, invested, era_duration_ms);
+
+        // Expected ~14% APY for Polkadot (0.00036 daily compounded)
+        assert!(apy > 0.12 && apy < 0.16, "APY was {}", apy);
+    }
+
+    #[test]
+    fn test_get_nominator_apy() {
+        let era_duration_ms = 86_400_000u64;
+        let total_reward = 1000u128;
+        let commission = 0.10; // 10% commission
+        let invested = 10_000u128;
+
+        let nominator_apy = get_nominator_apy(total_reward, commission, invested, era_duration_ms);
+        let total_apy = get_era_apy(total_reward, invested, era_duration_ms);
+
+        // Nominator APY should be less than total APY due to commission
+        assert!(nominator_apy < total_apy);
+        // With compound interest, 90% of reward doesn't equal 90% of APY
+        // But nominator APY should be positive and reasonably close
+        assert!(nominator_apy > 0.0);
+    }
+
+    #[test]
+    fn test_get_nominator_apy_zero_commission() {
+        let era_duration_ms = 86_400_000u64;
+        let total_reward = 1000u128;
+        let invested = 10_000u128;
+
+        let nominator_apy = get_nominator_apy(total_reward, 0.0, invested, era_duration_ms);
+        let total_apy = get_era_apy(total_reward, invested, era_duration_ms);
+
+        assert_relative_eq!(nominator_apy, total_apy, epsilon = 0.0001);
+    }
+
+    #[test]
+    fn test_get_nominator_apy_full_commission() {
+        let era_duration_ms = 86_400_000u64;
+        let total_reward = 1000u128;
+        let invested = 10_000u128;
+
+        let nominator_apy = get_nominator_apy(total_reward, 1.0, invested, era_duration_ms);
+
+        // With 100% commission, nominator gets nothing
+        assert_eq!(nominator_apy, 0.0);
+    }
+
+    #[test]
     fn test_simple_moving_average() {
         let values = vec![10.0, 20.0, 30.0, 40.0, 50.0];
         assert_relative_eq!(simple_moving_average(&values), 30.0);
@@ -133,10 +189,58 @@ mod tests {
     }
 
     #[test]
+    fn test_simple_moving_average_single() {
+        assert_relative_eq!(simple_moving_average(&[42.0]), 42.0);
+    }
+
+    #[test]
     fn test_exponential_moving_average() {
         let values = vec![10.0, 20.0, 30.0];
         let ema = exponential_moving_average(&values);
         // EMA gives more weight to recent values
         assert!(ema > 20.0);
+    }
+
+    #[test]
+    fn test_exponential_moving_average_empty() {
+        assert_eq!(exponential_moving_average(&[]), 0.0);
+    }
+
+    #[test]
+    fn test_exponential_moving_average_single() {
+        assert_relative_eq!(exponential_moving_average(&[42.0]), 42.0);
+    }
+
+    #[test]
+    fn test_exponential_moving_average_trending_up() {
+        let values = vec![10.0, 20.0, 30.0, 40.0, 50.0];
+        let ema = exponential_moving_average(&values);
+        let sma = simple_moving_average(&values);
+        // EMA should be higher than SMA for upward trend
+        assert!(ema > sma, "EMA {} should be > SMA {}", ema, sma);
+    }
+
+    #[test]
+    fn test_exponential_moving_average_trending_down() {
+        let values = vec![50.0, 40.0, 30.0, 20.0, 10.0];
+        let ema = exponential_moving_average(&values);
+        let sma = simple_moving_average(&values);
+        // EMA should be lower than SMA for downward trend
+        assert!(ema < sma, "EMA {} should be < SMA {}", ema, sma);
+    }
+
+    #[test]
+    fn test_moving_average_type_default() {
+        assert_eq!(MovingAverageType::default(), MovingAverageType::Simple);
+    }
+
+    #[test]
+    fn test_constants() {
+        assert_eq!(MAX_NOMINATIONS, 16);
+        assert!((DEFAULT_MAX_COMMISSION - 0.15).abs() < 0.001);
+        assert_eq!(HISTORY_DEPTH, 21);
+        // MS_PER_YEAR should be approximately 31.5M seconds * 1000
+        assert!(MS_PER_YEAR > 31_000_000_000.0);
+        assert!(MS_PER_YEAR < 32_000_000_000.0);
     }
 }

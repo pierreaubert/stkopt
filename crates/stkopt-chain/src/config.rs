@@ -3,6 +3,7 @@
 //! Since the Polkadot 2.0 migration (Nov 2025), staking data has moved to Asset Hub.
 //! - Relay chain endpoints: For block/session data only
 //! - Asset Hub endpoints: For all staking data (validators, pools, nominations)
+//! - People chain endpoints: For identity data
 
 use stkopt_core::Network;
 
@@ -68,5 +69,44 @@ pub fn get_rpc_endpoints(network: Network) -> &'static [&'static str] {
             "wss://paseo-rpc.dwellir.com",
             "wss://pas-rpc.stakeworld.io",
         ],
+    }
+}
+
+/// Get the People chain RPC endpoints for a network.
+/// This is where identity data lives.
+pub fn get_people_chain_endpoints(network: Network) -> &'static [&'static str] {
+    match network {
+        Network::Polkadot => &[
+            "wss://polkadot-people-rpc.polkadot.io",
+            "wss://sys.ibp.network/people-polkadot",
+            "wss://people-polkadot.dotters.network",
+            "wss://rpc-people-polkadot.luckyfriday.io",
+        ],
+        Network::Kusama => &[
+            "wss://kusama-people-rpc.polkadot.io",
+            "wss://sys.ibp.network/people-kusama",
+            "wss://people-kusama.dotters.network",
+            "wss://rpc-people-kusama.luckyfriday.io",
+        ],
+        Network::Westend => &[
+            "wss://westend-people-rpc.polkadot.io",
+            "wss://sys.ibp.network/people-westend",
+            "wss://people-westend.dotters.network",
+        ],
+        Network::Paseo => &[
+            "wss://sys.ibp.network/people-paseo",
+            "wss://people-paseo.dotters.network",
+        ],
+    }
+}
+
+/// Indexer URL for staking history data.
+/// Light clients don't have historical state, so we use an indexer.
+pub fn get_staking_indexer_url(network: Network) -> &'static str {
+    match network {
+        Network::Polkadot => "https://staking-eras.usepapi.app/dot",
+        Network::Kusama => "https://staking-eras.usepapi.app/ksm",
+        Network::Westend => "https://staking-eras.usepapi.app/wnd",
+        Network::Paseo => "https://staking-eras.usepapi.app/pas",
     }
 }

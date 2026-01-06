@@ -1,7 +1,8 @@
 //! Application state and logic.
 
-use crate::action::{AccountStatus, Action, DisplayPool, DisplayValidator};
+use crate::action::{AccountStatus, Action, DisplayPool, DisplayValidator, StakingHistoryPoint};
 use crate::log_buffer::LogBuffer;
+use crate::theme::{Palette, Theme};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::TableState;
 use stkopt_core::{ConnectionStatus, Network, OptimizationResult};
@@ -25,11 +26,12 @@ pub enum View {
     Pools,
     Nominate,
     Account,
+    History,
 }
 
 impl View {
     pub fn all() -> &'static [View] {
-        &[View::Validators, View::Pools, View::Nominate, View::Account]
+        &[View::Validators, View::Pools, View::Nominate, View::Account, View::History]
     }
 
     pub fn label(&self) -> &'static str {
@@ -38,6 +40,7 @@ impl View {
             View::Pools => "Pools",
             View::Nominate => "Nominate",
             View::Account => "Account",
+            View::History => "History",
         }
     }
 
@@ -47,6 +50,7 @@ impl View {
             View::Pools => 1,
             View::Nominate => 2,
             View::Account => 3,
+            View::History => 4,
         }
     }
 
@@ -56,6 +60,7 @@ impl View {
             1 => View::Pools,
             2 => View::Nominate,
             3 => View::Account,
+            4 => View::History,
             _ => View::Validators,
         }
     }
@@ -63,6 +68,10 @@ impl View {
 
 /// Application state.
 pub struct App {
+    /// Current theme.
+    pub theme: Theme,
+    /// Color palette for rendering.
+    pub palette: Palette,
     /// Current network.
     pub network: Network,
     /// Connection status.
@@ -103,6 +112,8 @@ pub struct App {
     pub nominate_table_state: TableState,
     /// QR code data to display (if any).
     pub qr_data: Option<Vec<u8>>,
+    /// Current QR frame for animated multipart display.
+    pub qr_frame: usize,
     /// Whether showing QR code modal.
     pub showing_qr: bool,
     /// Whether showing help overlay.
@@ -115,12 +126,21 @@ pub struct App {
     pub log_buffer: LogBuffer,
     /// Log scroll offset (0 = bottom/most recent).
     pub log_scroll: usize,
+    /// Staking history for the watched account (last 30 eras).
+    pub staking_history: Vec<StakingHistoryPoint>,
+    /// Whether staking history is currently loading.
+    pub loading_history: bool,
+    /// Total eras to load for history.
+    pub history_total_eras: u32,
 }
 
 impl App {
     /// Create a new application instance.
-    pub fn new(network: Network, log_buffer: LogBuffer) -> Self {
+    pub fn new(network: Network, log_buffer: LogBuffer, theme: Theme) -> Self {
+        let palette = theme.palette();
         Self {
+            theme,
+            palette,
             network,
             connection_status: ConnectionStatus::Disconnected,
             current_view: View::default(),
@@ -141,12 +161,16 @@ impl App {
             selected_validators: HashSet::new(),
             nominate_table_state: TableState::default(),
             qr_data: None,
+            qr_frame: 0,
             showing_qr: false,
             showing_help: false,
             should_quit: false,
             tick_count: 0,
             log_buffer,
             log_scroll: 0,
+            staking_history: Vec::new(),
+            loading_history: false,
+            history_total_eras: 30,
         }
     }
 
@@ -171,6 +195,11 @@ impl App {
     /// Handle tick events for animations and updates.
     pub fn tick(&mut self) {
         self.tick_count = self.tick_count.wrapping_add(1);
+
+        // Advance QR animation frame every ~500ms (5 ticks at 10fps)
+        if self.showing_qr && self.tick_count.is_multiple_of(5) {
+            self.qr_frame = self.qr_frame.wrapping_add(1);
+        }
     }
 
     /// Handle keyboard input.
@@ -189,6 +218,7 @@ impl App {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
                     self.showing_qr = false;
                     self.qr_data = None;
+                    self.qr_frame = 0;
                 }
                 _ => {}
             }
@@ -214,6 +244,7 @@ impl App {
             KeyCode::Char('2') => self.current_view = View::Pools,
             KeyCode::Char('3') => self.current_view = View::Nominate,
             KeyCode::Char('4') => self.current_view = View::Account,
+            KeyCode::Char('5') => self.current_view = View::History,
             KeyCode::Char('n') => self.next_network(),
             KeyCode::Up | KeyCode::Char('k') => self.select_previous(),
             KeyCode::Down | KeyCode::Char('j') => self.select_next(),
@@ -239,6 +270,17 @@ impl App {
             KeyCode::Char('g') if self.current_view == View::Nominate => {
                 if !self.selected_validators.is_empty() && self.watched_account.is_some() {
                     return Some(Action::GenerateNominationQR);
+                }
+            }
+            // History view keys
+            KeyCode::Char('l') if self.current_view == View::History => {
+                if !self.loading_history && self.watched_account.is_some() {
+                    return Some(Action::LoadStakingHistory);
+                }
+            }
+            KeyCode::Char('c') if self.current_view == View::History => {
+                if self.loading_history {
+                    return Some(Action::CancelLoadingHistory);
                 }
             }
             KeyCode::Char('?') => {
@@ -415,7 +457,33 @@ impl App {
             }
             Action::SetQRData(data) => {
                 self.qr_data = data;
+                self.qr_frame = 0; // Reset animation frame for new QR
                 self.showing_qr = self.qr_data.is_some();
+            }
+            Action::SetStakingHistory(history) => {
+                self.staking_history = history;
+                self.loading_history = false;
+            }
+            Action::AddStakingHistoryPoint(point) => {
+                // Insert in era order (oldest first)
+                let pos = self
+                    .staking_history
+                    .iter()
+                    .position(|p| p.era > point.era)
+                    .unwrap_or(self.staking_history.len());
+                self.staking_history.insert(pos, point);
+            }
+            Action::LoadStakingHistory => {
+                // Clear previous history and start loading
+                self.staking_history.clear();
+                self.loading_history = true;
+                // Actual loading is handled in main.rs
+            }
+            Action::CancelLoadingHistory => {
+                self.loading_history = false;
+            }
+            Action::HistoryLoadingComplete => {
+                self.loading_history = false;
             }
             Action::SwitchNetwork(network) => {
                 self.network = network;

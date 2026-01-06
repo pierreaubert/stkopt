@@ -11,6 +11,8 @@ use subxt::utils::AccountId32;
 #[derive(Debug, Clone)]
 pub struct DisplayValidator {
     pub address: String,
+    /// Display name from identity (if available).
+    pub name: Option<String>,
     pub commission: f64,
     pub blocked: bool,
     pub total_stake: u128,
@@ -41,6 +43,21 @@ pub struct AccountStatus {
     pub staking_ledger: Option<StakingLedger>,
     pub nominations: Option<NominatorInfo>,
     pub pool_membership: Option<PoolMembership>,
+}
+
+/// A single point in staking history.
+#[derive(Debug, Clone)]
+pub struct StakingHistoryPoint {
+    /// Era index.
+    pub era: u32,
+    /// Estimated date string (YYYYMMDD format).
+    pub date: String,
+    /// Reward earned in this era (in planck).
+    pub reward: u128,
+    /// Total bonded amount at start of era.
+    pub bonded: u128,
+    /// APY for this era (as a ratio, e.g., 0.15 for 15%).
+    pub apy: f64,
 }
 
 /// Actions that can update application state.
@@ -85,6 +102,16 @@ pub enum Action {
     GenerateNominationQR,
     /// Set QR code data to display.
     SetQRData(Option<Vec<u8>>),
+    /// Set staking history for the watched account (replaces all).
+    SetStakingHistory(Vec<StakingHistoryPoint>),
+    /// Add a single staking history point (streaming).
+    AddStakingHistoryPoint(StakingHistoryPoint),
+    /// Start loading staking history.
+    LoadStakingHistory,
+    /// Cancel loading staking history.
+    CancelLoadingHistory,
+    /// Mark history loading as complete.
+    HistoryLoadingComplete,
     /// Switch network.
     #[allow(dead_code)]
     SwitchNetwork(Network),

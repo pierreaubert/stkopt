@@ -10,7 +10,7 @@ members = [
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-license = "MIT OR Apache-2.0"
+license = "ISC"
 
 [workspace.dependencies]
 # Internal crates
@@ -51,8 +51,17 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # CLI
 clap = { version = "4.5", features = ["derive"] }
 
+# HTTP client
+reqwest = { version = "0.12", features = ["json"] }
+
+# Database
+rusqlite = { version = "0.33", features = ["bundled"] }
+
 # Utilities
 async-trait = "0.1"
+base64 = "0.22"
+directories = "5.0"
+terminal-light = "1.0"
 
 [profile.release]
 lto = true

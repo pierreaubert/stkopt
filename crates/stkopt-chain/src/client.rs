@@ -96,3 +96,47 @@ impl ChainClient {
         Ok((number, hash))
     }
 }
+
+/// Connect to a network's People chain using WebSocket RPC.
+/// Returns a subxt client that can be used with PeopleChainClient.
+pub async fn connect_people_chain(
+    network: Network,
+) -> Result<OnlineClient<PolkadotConfig>, ChainError> {
+    use crate::config::get_people_chain_endpoints;
+
+    let endpoints = get_people_chain_endpoints(network);
+
+    if endpoints.is_empty() {
+        return Err(ChainError::Connection(
+            "No People chain endpoints configured".to_string(),
+        ));
+    }
+
+    let mut last_error = None;
+    for endpoint in endpoints {
+        tracing::info!("Trying {} People chain via {}", network, endpoint);
+
+        match RpcClient::from_url(endpoint).await {
+            Ok(rpc_client) => {
+                match OnlineClient::<PolkadotConfig>::from_rpc_client(rpc_client).await {
+                    Ok(client) => {
+                        tracing::info!("Connected to {} People chain via {}", network, endpoint);
+                        return Ok(client);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to create People client from {}: {}", endpoint, e);
+                        last_error = Some(e.to_string());
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to connect to People chain {}: {}", endpoint, e);
+                last_error = Some(e.to_string());
+            }
+        }
+    }
+
+    Err(ChainError::Connection(
+        last_error.unwrap_or_else(|| "All People chain endpoints failed".to_string()),
+    ))
+}

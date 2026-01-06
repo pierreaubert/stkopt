@@ -10,6 +10,7 @@ pub use error::*;
 pub use queries::account::{
     AccountBalance, NominatorInfo, PoolMembership, StakingLedger, UnlockChunk,
 };
+pub use queries::identity::{PeopleChainClient, ValidatorIdentity};
 pub use queries::pools::{
     derive_pool_account, PoolAccountType, PoolInfo, PoolMetadata, PoolNominations, PoolRoles,
     PoolState,

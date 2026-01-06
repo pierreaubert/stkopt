@@ -202,4 +202,10 @@ impl ChainClient {
 
         Ok(exposures)
     }
+
+    /// Get total staked amount for an era (sum of all validator stakes).
+    pub async fn get_era_total_staked(&self, era: EraIndex) -> Result<Balance, ChainError> {
+        let exposures = self.get_era_stakers_overview(era).await?;
+        Ok(exposures.iter().map(|e| e.total).sum())
+    }
 }

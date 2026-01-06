@@ -170,3 +170,67 @@ pub enum ConnectionStatus {
     Connected,
     Error(String),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_network_token_symbols() {
+        assert_eq!(Network::Polkadot.token_symbol(), "DOT");
+        assert_eq!(Network::Kusama.token_symbol(), "KSM");
+        assert_eq!(Network::Westend.token_symbol(), "WND");
+        assert_eq!(Network::Paseo.token_symbol(), "PAS");
+    }
+
+    #[test]
+    fn test_network_token_decimals() {
+        assert_eq!(Network::Polkadot.token_decimals(), 10);
+        assert_eq!(Network::Kusama.token_decimals(), 12);
+        assert_eq!(Network::Westend.token_decimals(), 12);
+        assert_eq!(Network::Paseo.token_decimals(), 10);
+    }
+
+    #[test]
+    fn test_network_ss58_format() {
+        assert_eq!(Network::Polkadot.ss58_format(), 0);
+        assert_eq!(Network::Kusama.ss58_format(), 2);
+        assert_eq!(Network::Westend.ss58_format(), 42);
+        assert_eq!(Network::Paseo.ss58_format(), 0);
+    }
+
+    #[test]
+    fn test_network_all() {
+        let all = Network::all();
+        assert_eq!(all.len(), 4);
+        assert!(all.contains(&Network::Polkadot));
+        assert!(all.contains(&Network::Kusama));
+        assert!(all.contains(&Network::Westend));
+        assert!(all.contains(&Network::Paseo));
+    }
+
+    #[test]
+    fn test_network_display() {
+        assert_eq!(format!("{}", Network::Polkadot), "Polkadot");
+        assert_eq!(format!("{}", Network::Kusama), "Kusama");
+        assert_eq!(format!("{}", Network::Westend), "Westend");
+        assert_eq!(format!("{}", Network::Paseo), "Paseo");
+    }
+
+    #[test]
+    fn test_pool_state_equality() {
+        assert_eq!(PoolState::Open, PoolState::Open);
+        assert_ne!(PoolState::Open, PoolState::Blocked);
+        assert_ne!(PoolState::Blocked, PoolState::Destroying);
+    }
+
+    #[test]
+    fn test_connection_status_equality() {
+        assert_eq!(ConnectionStatus::Connected, ConnectionStatus::Connected);
+        assert_ne!(ConnectionStatus::Connected, ConnectionStatus::Disconnected);
+        assert_eq!(
+            ConnectionStatus::Error("test".into()),
+            ConnectionStatus::Error("test".into())
+        );
+    }
+}
