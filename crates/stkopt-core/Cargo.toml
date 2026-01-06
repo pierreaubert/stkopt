@@ -1,0 +1,10 @@
+[package]
+name = "stkopt-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+[dev-dependencies]
+approx = "0.5"

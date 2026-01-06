@@ -1,0 +1,24 @@
+[package]
+name = "stkopt-tui"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "stkopt"
+path = "src/main.rs"
+
+[dependencies]
+stkopt-chain.workspace = true
+stkopt-core.workspace = true
+subxt.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+ratatui-image.workspace = true
+qrcode.workspace = true
+clap.workspace = true
+color-eyre.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

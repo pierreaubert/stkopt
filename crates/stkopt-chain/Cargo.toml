@@ -1,0 +1,19 @@
+[package]
+name = "stkopt-chain"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+stkopt-core.workspace = true
+tokio.workspace = true
+subxt.workspace = true
+sp-crypto-hashing.workspace = true
+parity-scale-codec.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true
+hex = "0.4"
