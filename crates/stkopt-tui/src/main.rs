@@ -13,8 +13,8 @@ mod ui;
 use action::{AccountStatus, Action};
 use app::App;
 use clap::Parser;
-use config::AppConfig;
 use color_eyre::Result;
+use config::AppConfig;
 use event::{Event, EventHandler};
 use log_buffer::{LogBuffer, LogBufferLayer};
 use ratatui::crossterm::event::KeyCode;
@@ -34,9 +34,17 @@ struct Args {
     #[arg(short, long, default_value = "polkadot")]
     network: NetworkArg,
 
-    /// Custom RPC endpoint URL (overrides default endpoints)
-    #[arg(short = 'u', long = "url")]
-    rpc_url: Option<String>,
+    /// Custom Asset Hub RPC endpoint URL (for staking data queries)
+    #[arg(long = "asset-hub-url")]
+    asset_hub_url: Option<String>,
+
+    /// Custom relay chain RPC endpoint URL (for staking transactions)
+    #[arg(long = "relay-url")]
+    relay_url: Option<String>,
+
+    /// Custom People chain RPC endpoint URL (for identity data)
+    #[arg(long = "people-url")]
+    people_url: Option<String>,
 
     /// Update mode: fetch missing history data and store to database, then exit.
     /// Use with --address to specify which account to update.
@@ -52,6 +60,9 @@ struct Args {
     #[arg(long, default_value = "30")]
     eras: u32,
 }
+
+// Re-export RpcEndpoints from stkopt_chain
+use stkopt_chain::RpcEndpoints;
 
 /// Network argument that can be parsed from string.
 #[derive(Debug, Clone)]
@@ -97,30 +108,39 @@ async fn main() -> Result<()> {
         .init();
 
     let network = args.network.0;
-    let custom_rpc = args.rpc_url.clone();
+    let rpc_endpoints = RpcEndpoints {
+        asset_hub: args.asset_hub_url.clone(),
+        relay: args.relay_url.clone(),
+        people: args.people_url.clone(),
+    };
 
     // Handle update mode (batch mode for cron jobs)
     if args.update {
-        return run_update_mode(network, custom_rpc, args.address, args.eras).await;
+        return run_update_mode(network, rpc_endpoints.clone(), args.address, args.eras).await;
     }
 
-    // Create action channel
-    let (action_tx, mut action_rx) = mpsc::unbounded_channel::<Action>();
+    // Create action channel (bounded to prevent memory exhaustion from slow UI)
+    const ACTION_CHANNEL_CAPACITY: usize = 100;
+    let (action_tx, mut action_rx) = mpsc::channel::<Action>(ACTION_CHANNEL_CAPACITY);
 
-    // Create account request channel
-    let (account_tx, account_rx) = mpsc::unbounded_channel::<subxt::utils::AccountId32>();
+    // Create account request channel (bounded, single account is typical)
+    const ACCOUNT_CHANNEL_CAPACITY: usize = 10;
+    let (account_tx, account_rx) =
+        mpsc::channel::<subxt::utils::AccountId32>(ACCOUNT_CHANNEL_CAPACITY);
 
-    // Create QR generation request channel
-    // (account, validator addresses)
-    let (qr_tx, qr_rx) = mpsc::unbounded_channel::<(
+    // Create QR generation request channel (bounded, single QR at a time)
+    const QR_CHANNEL_CAPACITY: usize = 10;
+    let (qr_tx, qr_rx) = mpsc::channel::<(subxt::utils::AccountId32, Vec<subxt::utils::AccountId32>)>(
+        QR_CHANNEL_CAPACITY,
+    );
+
+    // Create history loading request channel (bounded, single history load at a time)
+    const HISTORY_CHANNEL_CAPACITY: usize = 5;
+    let (history_tx, history_rx) = mpsc::channel::<(
         subxt::utils::AccountId32,
-        Vec<subxt::utils::AccountId32>,
-    )>();
-
-    // Create history loading request channel
-    // (account, num_eras, cancellation receiver)
-    let (history_tx, history_rx) =
-        mpsc::unbounded_channel::<(subxt::utils::AccountId32, u32, tokio::sync::watch::Receiver<bool>)>();
+        u32,
+        tokio::sync::watch::Receiver<bool>,
+    )>(HISTORY_CHANNEL_CAPACITY);
 
     // Cancellation sender for history loading
     let (history_cancel_tx, history_cancel_rx) = tokio::sync::watch::channel(false);
@@ -130,21 +150,21 @@ async fn main() -> Result<()> {
 
     // Load configuration
     let mut app_config = AppConfig::load();
-    tracing::info!(
-        "Loaded {} saved account(s)",
-        app_config.accounts.len()
-    );
+    tracing::info!("Loaded {} saved account(s)", app_config.accounts.len());
 
     // Create application state
     let mut app = App::new(network, log_buffer, theme);
 
     // Load last saved account if available
-    if let Some(last_addr) = app_config.last_account()
+    let restored_account = if let Some(last_addr) = app_config.last_account()
         && let Ok(account) = last_addr.parse::<subxt::utils::AccountId32>()
     {
         tracing::info!("Restoring last used account: {}", last_addr);
-        app.watched_account = Some(account);
-    }
+        app.watched_account = Some(account.clone());
+        Some(account)
+    } else {
+        None
+    };
 
     // Initialize terminal
     let mut tui = Tui::new()?;
@@ -161,7 +181,7 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         chain_task(
             network,
-            custom_rpc,
+            rpc_endpoints,
             chain_action_tx,
             account_rx,
             account_action_tx,
@@ -172,6 +192,11 @@ async fn main() -> Result<()> {
         )
         .await;
     });
+
+    // Send restored account request (will be processed once chain connects)
+    if let Some(account) = restored_account {
+        let _ = account_tx.send(account).await;
+    }
 
     // Main loop
     loop {
@@ -190,7 +215,7 @@ async fn main() -> Result<()> {
                             break;
                         }
                         if let Some(action) = app.handle_key(key_event) {
-                            let _ = action_tx.send(action);
+                            let _ = action_tx.send(action).await;
                         }
                     }
                     Event::Resize(_, _) => {
@@ -213,9 +238,18 @@ async fn main() -> Result<()> {
                         if let Err(e) = app_config.save() {
                             tracing::warn!("Failed to save config: {}", e);
                         }
+                        // Auto-load staking history in background
+                        let _ = history_cancel_tx.send(false);
+                        let _ = history_tx.send((
+                            account.clone(),
+                            app.history_total_eras,
+                            history_cancel_rx.clone(),
+                        ));
+                        // Mark history as loading (will be handled by LoadStakingHistory action in app)
+                        let _ = action_tx.send(Action::LoadStakingHistory).await;
                     }
                     Action::RunOptimization => {
-                        // Run optimization with current validators
+                        // Run optimization with default strategy (TopApy)
                         let candidates: Vec<_> = app.validators.iter().map(|v| {
                             stkopt_core::ValidatorCandidate {
                                 address: v.address.clone(),
@@ -228,6 +262,33 @@ async fn main() -> Result<()> {
                         }).collect();
 
                         let criteria = stkopt_core::OptimizationCriteria::default();
+                        let result = stkopt_core::select_validators(&candidates, &criteria);
+                        let _ = action_tx.send(Action::SetOptimizationResult(result));
+                    }
+                    Action::RunOptimizationWithStrategy(strategy_idx) => {
+                        // Run optimization with selected strategy
+                        let candidates: Vec<_> = app.validators.iter().map(|v| {
+                            stkopt_core::ValidatorCandidate {
+                                address: v.address.clone(),
+                                commission: v.commission,
+                                blocked: v.blocked,
+                                apy: v.apy,
+                                total_stake: v.total_stake,
+                                nominator_count: v.nominator_count,
+                            }
+                        }).collect();
+
+                        let strategy = match strategy_idx {
+                            0 => stkopt_core::SelectionStrategy::TopApy,
+                            1 => stkopt_core::SelectionStrategy::RandomFromTop,
+                            2 => stkopt_core::SelectionStrategy::DiversifyByStake,
+                            _ => stkopt_core::SelectionStrategy::TopApy,
+                        };
+
+                        let criteria = stkopt_core::OptimizationCriteria {
+                            strategy,
+                            ..stkopt_core::OptimizationCriteria::default()
+                        };
                         let result = stkopt_core::select_validators(&candidates, &criteria);
                         let _ = action_tx.send(Action::SetOptimizationResult(result));
                     }
@@ -265,6 +326,59 @@ async fn main() -> Result<()> {
                         // Signal cancellation
                         let _ = history_cancel_tx.send(true);
                     }
+                    Action::SelectAddressBookEntry(idx) => {
+                        // Get address from address book
+                        let known_addresses = [
+                            "13UVJyLnbVp9RBZYFwCNuGnK87JYJ2nb7jMwaVe4vQ2UNCzN",
+                            "16SpacegeUTft9v3ts27CEC3tJaxgvE4uZeCctThFH3Vb24p",
+                            "13cKp89Nt7t1hZVWnqhKW9LY7Udhxk2BmLwKi3snVgUAjZGE",
+                        ];
+
+                        // Determine the actual index (accounting for "My Account")
+                        let idx = *idx;
+                        let actual_idx = if app.watched_account.is_some() {
+                            if idx == 0 {
+                                // "My Account" selected - no action needed
+                                continue;
+                            }
+                            idx - 1
+                        } else {
+                            idx
+                        };
+
+                        if let Some(&addr_str) = known_addresses.get(actual_idx) {
+                            use std::str::FromStr;
+                            if let Ok(account) = subxt::utils::AccountId32::from_str(addr_str) {
+                                let _ = action_tx.send(Action::SetWatchedAccount(account));
+                            }
+                        }
+                    }
+                    Action::RemoveAccount(address) => {
+                        // Remove account from config
+                        app_config.remove_account(address);
+                        if let Err(e) = app_config.save() {
+                            tracing::warn!("Failed to save config after removing account: {}", e);
+                        }
+
+                        // Purge history from database
+                        let db_path = get_db_path();
+                        if let Ok(db) = db::HistoryDb::open(&db_path) {
+                            match db.delete_address_history(address) {
+                                Ok(deleted) => {
+                                    tracing::info!(
+                                        "Removed account {} and purged {} history entries",
+                                        address, deleted
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Failed to purge history for {}: {}",
+                                        address, e
+                                    );
+                                }
+                            }
+                        }
+                    }
                     _ => {}
                 }
                 app.handle_action(action);
@@ -286,39 +400,39 @@ async fn main() -> Result<()> {
 #[allow(clippy::too_many_arguments)]
 async fn chain_task(
     network: Network,
-    custom_rpc: Option<String>,
-    action_tx: mpsc::UnboundedSender<Action>,
-    mut account_rx: mpsc::UnboundedReceiver<subxt::utils::AccountId32>,
-    account_action_tx: mpsc::UnboundedSender<Action>,
-    mut qr_rx: mpsc::UnboundedReceiver<(
-        subxt::utils::AccountId32,
-        Vec<subxt::utils::AccountId32>,
-    )>,
-    qr_action_tx: mpsc::UnboundedSender<Action>,
-    mut history_rx: mpsc::UnboundedReceiver<(
+    rpc_endpoints: RpcEndpoints,
+    action_tx: mpsc::Sender<Action>,
+    mut account_rx: mpsc::Receiver<subxt::utils::AccountId32>,
+    account_action_tx: mpsc::Sender<Action>,
+    mut qr_rx: mpsc::Receiver<(subxt::utils::AccountId32, Vec<subxt::utils::AccountId32>)>,
+    qr_action_tx: mpsc::Sender<Action>,
+    mut history_rx: mpsc::Receiver<(
         subxt::utils::AccountId32,
         u32,
         tokio::sync::watch::Receiver<bool>,
     )>,
-    history_action_tx: mpsc::UnboundedSender<Action>,
+    history_action_tx: mpsc::Sender<Action>,
 ) {
     use crate::action::{DisplayPool, DisplayValidator};
-    use stkopt_core::get_era_apy;
     use std::collections::HashMap;
+    use stkopt_core::get_era_apy;
 
-    // Create status channel for connection updates
-    let (status_tx, mut status_rx) = mpsc::unbounded_channel::<ConnectionStatus>();
+    // Create status channel for connection updates (bounded for backpressure)
+    const STATUS_CHANNEL_CAPACITY: usize = 10;
+    let (status_tx, mut status_rx) = mpsc::channel::<ConnectionStatus>(STATUS_CHANNEL_CAPACITY);
 
     // Forward status updates to action channel
-    let action_tx_clone = action_tx.clone();
+    let action_tx_for_status = action_tx.clone();
     tokio::spawn(async move {
         while let Some(status) = status_rx.recv().await {
-            let _ = action_tx_clone.send(Action::UpdateConnectionStatus(status));
+            let _ = action_tx_for_status
+                .send(Action::UpdateConnectionStatus(status))
+                .await;
         }
     });
 
     // Connect to Asset Hub
-    let client = match ChainClient::connect_rpc(network, custom_rpc.as_deref(), status_tx).await {
+    let client = match ChainClient::connect_rpc(network, &rpc_endpoints, status_tx).await {
         Ok(client) => {
             tracing::info!(
                 "Connected to {} Asset Hub (genesis: {:?})",
@@ -336,14 +450,21 @@ async fn chain_task(
         }
     };
 
+    // Send chain info for UI display and validation
+    let chain_info = client.get_chain_info();
+    let _ = action_tx.send(Action::SetChainInfo(chain_info));
+
     // Connect to People chain for identity queries
-    let people_client = match stkopt_chain::connect_people_chain(network).await {
+    let people_client = match stkopt_chain::connect_people_chain(network, rpc_endpoints.people.as_deref()).await {
         Ok(subxt_client) => {
             tracing::info!("Connected to {} People chain", network);
             Some(stkopt_chain::PeopleChainClient::new(subxt_client))
         }
         Err(e) => {
-            tracing::warn!("Failed to connect to People chain (identities unavailable): {}", e);
+            tracing::warn!(
+                "Failed to connect to People chain (identities unavailable): {}",
+                e
+            );
             None
         }
     };
@@ -412,7 +533,11 @@ async fn chain_task(
     let query_era = era_info.index.saturating_sub(1);
     let exposures = match client.get_era_stakers_overview(query_era).await {
         Ok(e) => {
-            tracing::info!("Found {} validator exposures for era {}", e.len(), query_era);
+            tracing::info!(
+                "Found {} validator exposures for era {}",
+                e.len(),
+                query_era
+            );
             e
         }
         Err(e) => {
@@ -439,16 +564,39 @@ async fn chain_task(
         }
     };
 
+    // Fetch era reward points
+    let (_, validator_points) = match client.get_era_reward_points(query_era).await {
+        Ok((total, points)) => {
+            tracing::info!(
+                "Fetched points for {} validators (total: {})",
+                points.len(),
+                total
+            );
+            (total, points)
+        }
+        Err(e) => {
+            tracing::warn!("Failed to fetch reward points: {}", e);
+            (0, Vec::new())
+        }
+    };
+
+    // Map points for quick lookup
+    let points_map: HashMap<[u8; 32], u32> = validator_points
+        .into_iter()
+        .map(|vp| (*vp.address.as_ref(), vp.points))
+        .collect();
+
     let _ = action_tx.send(Action::SetLoadingProgress(0.7));
 
     // Fetch validator identities from People chain
     let identity_map: HashMap<String, String> = if let Some(ref people) = people_client {
-        let addresses: Vec<subxt::utils::AccountId32> = validators
-            .iter()
-            .map(|v| v.address.clone())
-            .collect();
+        let addresses: Vec<subxt::utils::AccountId32> =
+            validators.iter().map(|v| v.address.clone()).collect();
 
-        tracing::info!("Fetching identities for {} validators from People chain...", addresses.len());
+        tracing::info!(
+            "Fetching identities for {} validators from People chain...",
+            addresses.len()
+        );
 
         match people.get_identities(&addresses).await {
             Ok(identities) => {
@@ -463,9 +611,7 @@ async fn chain_task(
                 );
                 identities
                     .into_iter()
-                    .filter_map(|id| {
-                        id.display_name.map(|name| (id.address.to_string(), name))
-                    })
+                    .filter_map(|id| id.display_name.map(|name| (id.address.to_string(), name)))
                     .collect()
             }
             Err(e) => {
@@ -519,6 +665,7 @@ async fn chain_task(
 
             let address_str = v.address.to_string();
             let name = identity_map.get(&address_str).cloned();
+            let points = points_map.get(&addr_bytes).copied().unwrap_or(0);
 
             Some(DisplayValidator {
                 address: address_str,
@@ -528,20 +675,29 @@ async fn chain_task(
                 total_stake,
                 own_stake,
                 nominator_count,
-                points: 0, // TODO: fetch from reward points
+                points,
                 apy,
             })
         })
         .collect();
 
     // Sort by APY descending
-    display_validators.sort_by(|a, b| b.apy.partial_cmp(&a.apy).unwrap_or(std::cmp::Ordering::Equal));
+    display_validators.sort_by(|a, b| {
+        b.apy
+            .partial_cmp(&a.apy)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // Build validator APY map for pool APY calculation (before sending)
     let validator_apy_map: HashMap<String, f64> = display_validators
         .iter()
         .map(|v| (v.address.clone(), v.apy))
         .collect();
+
+    tracing::info!(
+        "Built validator APY map with {} entries for pool APY calculation",
+        validator_apy_map.len()
+    );
 
     let _ = action_tx.send(Action::SetLoadingProgress(0.9));
     let _ = action_tx.send(Action::SetDisplayValidators(display_validators));
@@ -571,11 +727,43 @@ async fn chain_task(
 
     // Build metadata map for name lookup
     let metadata_map: HashMap<u32, String> = metadata.into_iter().map(|m| (m.id, m.name)).collect();
+    tracing::info!(
+        "Built pool metadata map with {} entries (pool IDs: {:?})",
+        metadata_map.len(),
+        metadata_map.keys().take(10).collect::<Vec<_>>()
+    );
 
     // Build display pools with APY calculation
+    // Note: We fetch nominations in batches to avoid overwhelming the RPC
     let mut display_pools: Vec<DisplayPool> = Vec::with_capacity(pools.len());
-    for p in pools {
+
+    // First pass: build pools with names only (no RPC calls)
+    for p in &pools {
         let name = metadata_map.get(&p.id).cloned().unwrap_or_default();
+        display_pools.push(DisplayPool {
+            id: p.id,
+            name,
+            state: p.state,
+            member_count: p.member_count,
+            points: p.points,
+            apy: None, // Will be filled in second pass
+        });
+    }
+
+    // Send pools immediately so UI shows them (without APY)
+    let _ = action_tx.send(Action::SetDisplayPools(display_pools.clone()));
+    tracing::info!(
+        "Sent {} pools to UI (fetching APY in background)",
+        display_pools.len()
+    );
+
+    // Second pass: fetch APY for top pools only (limit RPC calls)
+    let max_pools_to_query = 30.min(pools.len()); // Reduced to avoid connection issues
+    for (idx, p) in pools.iter().take(max_pools_to_query).enumerate() {
+        // Small delay to avoid overwhelming RPC endpoint
+        if idx > 0 && idx % 5 == 0 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
 
         // Calculate APY based on nominated validators
         let apy = match client.get_pool_nominations(p.id).await {
@@ -584,38 +772,68 @@ async fn chain_task(
                 let mut total_apy = 0.0;
                 let mut count = 0;
                 for target in &nominations.targets {
-                    if let Some(&validator_apy) = validator_apy_map.get(&target.to_string()) {
+                    let target_str = target.to_string();
+                    if let Some(&validator_apy) = validator_apy_map.get(&target_str) {
                         total_apy += validator_apy;
                         count += 1;
+                    } else {
+                        tracing::debug!(
+                            "Pool {} nominated validator {} not in validator list",
+                            p.id,
+                            target_str
+                        );
                     }
                 }
                 if count > 0 {
+                    tracing::debug!(
+                        "Pool {} has {} nominated validators with APY, avg: {:.2}%",
+                        p.id,
+                        count,
+                        (total_apy / count as f64) * 100.0
+                    );
                     Some(total_apy / count as f64)
                 } else {
+                    tracing::debug!(
+                        "Pool {} has {} nominations but none found in validator map",
+                        p.id,
+                        nominations.targets.len()
+                    );
                     None
                 }
             }
-            _ => None,
+            Ok(Some(_)) => {
+                tracing::debug!("Pool {} has empty nominations", p.id);
+                None
+            }
+            Ok(None) => {
+                tracing::debug!("Pool {} has no nominations", p.id);
+                None
+            }
+            Err(e) => {
+                tracing::warn!("Failed to get nominations for pool {}: {}", p.id, e);
+                // Connection might be failing, stop querying more pools
+                break;
+            }
         };
 
-        display_pools.push(DisplayPool {
-            id: p.id,
-            name,
-            state: p.state,
-            member_count: p.member_count,
-            points: p.points,
-            apy,
-        });
+        // Update APY for this pool
+        display_pools[idx].apy = apy;
+
+        // Send progress update every 10 pools
+        if (idx + 1) % 10 == 0 {
+            let _ = action_tx.send(Action::SetDisplayPools(display_pools.clone()));
+            tracing::debug!("Updated APY for {} pools", idx + 1);
+        }
     }
 
     // Sort pools: by APY descending (pools with APY first, then by member count)
-    display_pools.sort_by(|a, b| {
-        match (a.apy, b.apy) {
-            (Some(a_apy), Some(b_apy)) => b_apy.partial_cmp(&a_apy).unwrap_or(std::cmp::Ordering::Equal),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => b.member_count.cmp(&a.member_count),
-        }
+    display_pools.sort_by(|a, b| match (a.apy, b.apy) {
+        (Some(a_apy), Some(b_apy)) => b_apy
+            .partial_cmp(&a_apy)
+            .unwrap_or(std::cmp::Ordering::Equal),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => b.member_count.cmp(&a.member_count),
     });
 
     let _ = action_tx.send(Action::SetLoadingProgress(1.0));
@@ -634,7 +852,12 @@ async fn chain_task(
                     Ok(b) => b,
                     Err(e) => {
                         tracing::error!("Failed to get account balance: {}", e);
-                        continue;
+                        // Use default zero balance on error - still update UI
+                        stkopt_chain::AccountBalance {
+                            free: 0,
+                            reserved: 0,
+                            frozen: 0,
+                        }
                     }
                 };
 
@@ -680,12 +903,24 @@ async fn chain_task(
                     Ok(payload) => {
                         let qr_data = stkopt_chain::encode_for_qr(&payload, &signer);
                         let qr_len = qr_data.len();
-                        let _ = qr_action_tx.send(Action::SetQRData(Some(qr_data)));
+
+                        // Build transaction info for display
+                        let tx_info = crate::action::TransactionInfo {
+                            signer: signer.to_string(),
+                            call: "Staking.nominate".to_string(),
+                            targets: targets.iter().map(|t| t.to_string()).collect(),
+                            call_data_size: payload.call_data.len(),
+                            spec_version: payload.spec_version,
+                            tx_version: payload.tx_version,
+                            nonce: payload.nonce,
+                        };
+
+                        let _ = qr_action_tx.send(Action::SetQRData(Some(qr_data), Some(tx_info)));
                         tracing::info!("QR data generated ({} bytes for Polkadot Vault)", qr_len);
                     }
                     Err(e) => {
                         tracing::error!("Failed to generate nomination payload: {}", e);
-                        let _ = qr_action_tx.send(Action::SetQRData(None));
+                        let _ = qr_action_tx.send(Action::SetQRData(None, None));
                     }
                 }
             }
@@ -720,12 +955,12 @@ async fn chain_task(
                     Ok(Some(era)) => era,
                     Ok(None) => {
                         tracing::error!("No active era found");
-                        let _ = history_action_tx.send(Action::HistoryLoadingComplete);
+                        let _ = history_action_tx.send(Action::HistoryLoadingComplete).await;
                         continue;
                     }
                     Err(e) => {
                         tracing::error!("Failed to get active era: {}", e);
-                        let _ = history_action_tx.send(Action::HistoryLoadingComplete);
+                        let _ = history_action_tx.send(Action::HistoryLoadingComplete).await;
                         continue;
                     }
                 };
@@ -758,7 +993,7 @@ async fn chain_task(
 
                 if eras_to_fetch.is_empty() {
                     tracing::info!("All eras already cached");
-                    let _ = history_action_tx.send(Action::HistoryLoadingComplete);
+                    let _ = history_action_tx.send(Action::HistoryLoadingComplete).await;
                     continue;
                 }
 
@@ -770,7 +1005,7 @@ async fn chain_task(
                     // Check for cancellation
                     if *cancel_rx.borrow() {
                         tracing::info!("History loading cancelled");
-                        let _ = history_action_tx.send(Action::HistoryLoadingComplete);
+                        let _ = history_action_tx.send(Action::HistoryLoadingComplete).await;
                         break;
                     }
 
@@ -840,7 +1075,7 @@ async fn chain_task(
 
                 // Check if we completed without cancellation
                 if !*cancel_rx.borrow() {
-                    let _ = history_action_tx.send(Action::HistoryLoadingComplete);
+                    let _ = history_action_tx.send(Action::HistoryLoadingComplete).await;
                     tracing::info!("Staking history loaded");
                 }
             }
@@ -864,7 +1099,7 @@ fn get_db_path() -> std::path::PathBuf {
 /// This is suitable for running from cron jobs.
 async fn run_update_mode(
     network: Network,
-    custom_rpc: Option<String>,
+    rpc_endpoints: RpcEndpoints,
     address: Option<String>,
     num_eras: u32,
 ) -> Result<()> {
@@ -878,9 +1113,9 @@ async fn run_update_mode(
         }
     };
 
-    let account: subxt::utils::AccountId32 = address.parse().map_err(|_| {
-        color_eyre::eyre::eyre!("Invalid address format: {}", address)
-    })?;
+    let account: subxt::utils::AccountId32 = address
+        .parse()
+        .map_err(|_| color_eyre::eyre::eyre!("Invalid address format: {}", address))?;
 
     println!("Updating staking history for {} on {}", address, network);
 
@@ -893,16 +1128,11 @@ async fn run_update_mode(
     println!("Database: {}", db_path.display());
 
     // Create connection status channel (not used in update mode, but required by API)
-    let (status_tx, _status_rx) = mpsc::unbounded_channel::<ConnectionStatus>();
+    let (status_tx, _status_rx) = mpsc::channel::<ConnectionStatus>(1);
 
     // Connect to chain
     println!("Connecting to {} Asset Hub...", network);
-    let client = ChainClient::connect_rpc(
-        network,
-        custom_rpc.as_deref(),
-        status_tx,
-    )
-    .await?;
+    let client = ChainClient::connect_rpc(network, &rpc_endpoints, status_tx).await?;
     println!("Connected");
 
     // Get current era info
@@ -913,9 +1143,15 @@ async fn run_update_mode(
 
     let current_era = current_era_info.index;
     let current_era_start_ms = current_era_info.start_timestamp_ms;
-    let era_duration_ms = client.get_era_duration_ms().await.unwrap_or(24 * 60 * 60 * 1000);
+    let era_duration_ms = client
+        .get_era_duration_ms()
+        .await
+        .unwrap_or(24 * 60 * 60 * 1000);
 
-    println!("Current era: {} ({}ms per era)", current_era, era_duration_ms);
+    println!(
+        "Current era: {} ({}ms per era)",
+        current_era, era_duration_ms
+    );
 
     // Get user's bonded amount
     let user_bonded = match client.get_staking_ledger(&account).await {
@@ -1021,7 +1257,12 @@ async fn run_update_mode(
 
 /// Calculate the date string for an era in YYYYMMDD format.
 /// Uses current time as fallback if start_timestamp_ms is 0.
-fn calculate_era_date(era: u32, current_era: u32, current_era_start_ms: u64, era_duration_ms: u64) -> String {
+fn calculate_era_date(
+    era: u32,
+    current_era: u32,
+    current_era_start_ms: u64,
+    era_duration_ms: u64,
+) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let eras_ago = current_era.saturating_sub(era);

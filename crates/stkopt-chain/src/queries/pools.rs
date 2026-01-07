@@ -1,7 +1,7 @@
 //! Nomination pool queries.
 
-use crate::error::ChainError;
 use crate::ChainClient;
+use crate::error::ChainError;
 use stkopt_core::Balance;
 use subxt::dynamic::{At, DecodedValueThunk, Value};
 use subxt::utils::AccountId32;
@@ -118,10 +118,7 @@ impl ChainClient {
                 .and_then(|v: &Value<u32>| v.as_u128())
                 .unwrap_or(0);
 
-            let state = match decoded
-                .at("state")
-                .and_then(|v: &Value<u32>| v.as_str())
-            {
+            let state = match decoded.at("state").and_then(|v: &Value<u32>| v.as_str()) {
                 Some("Open") => PoolState::Open,
                 Some("Blocked") => PoolState::Blocked,
                 Some("Destroying") => PoolState::Destroying,
@@ -179,13 +176,16 @@ impl ChainClient {
             .iter(storage_query)
             .await?;
 
+        let mut count = 0;
         while let Some(result) = iter.next().await {
+            count += 1;
             let kv = result?;
             let key_bytes = kv.key_bytes;
             let value: DecodedValueThunk = kv.value;
 
             // Extract pool ID from key
             if key_bytes.len() < 4 {
+                tracing::debug!("Pool metadata key too short: {} bytes", key_bytes.len());
                 continue;
             }
             let id_bytes: [u8; 4] = key_bytes[key_bytes.len() - 4..]
@@ -194,16 +194,55 @@ impl ChainClient {
             let id = u32::from_le_bytes(id_bytes);
 
             let decoded = value.to_value()?;
+            tracing::debug!("Pool {} raw metadata: {:?}", id, decoded);
 
             // Metadata is stored as a sequence of bytes
             let name = extract_bytes_as_string(&decoded);
+            tracing::debug!("Pool {} extracted name: '{}'", id, name);
 
             if !name.is_empty() {
                 metadata.push(PoolMetadata { id, name });
             }
         }
 
+        tracing::info!(
+            "Fetched pool metadata: {} entries iterated, {} with names",
+            count,
+            metadata.len()
+        );
+
         Ok(metadata)
+    }
+
+    /// Get metadata (name) for a specific pool.
+    pub async fn get_pool_name(&self, pool_id: u32) -> Result<Option<String>, ChainError> {
+        let storage_query = subxt::dynamic::storage(
+            "NominationPools",
+            "Metadata",
+            vec![Value::u128(pool_id as u128)],
+        );
+
+        let result: Option<DecodedValueThunk> = self
+            .client()
+            .storage()
+            .at_latest()
+            .await?
+            .fetch(&storage_query)
+            .await?;
+
+        let Some(value) = result else {
+            return Ok(None);
+        };
+
+        let decoded = value.to_value()?;
+        let name = extract_bytes_as_string(&decoded);
+
+        if name.is_empty() {
+            Ok(None)
+        } else {
+            tracing::debug!("Pool {} name: '{}'", pool_id, name);
+            Ok(Some(name))
+        }
     }
 
     /// Get the nominations (targets) for a pool by its ID.
@@ -317,14 +356,27 @@ fn extract_bytes_as_string(value: &Value<u32>) -> String {
     let mut bytes = Vec::new();
     for i in 0..1024 {
         // Reasonable max for pool name
-        if let Some(byte_val) = value.at(i)
-            && let Some(byte) = byte_val.as_u128()
-        {
-            bytes.push(byte as u8);
-        } else if value.at(i).is_none() {
+        if let Some(byte_val) = value.at(i) {
+            if let Some(byte) = byte_val.as_u128() {
+                bytes.push(byte as u8);
+            } else {
+                // Might be a nested structure, try recursively
+                for j in 0..32 {
+                    if let Some(inner) = byte_val.at(j)
+                        && let Some(b) = inner.as_u128()
+                    {
+                        bytes.push(b as u8);
+                    } else {
+                        break;
+                    }
+                }
+            }
+        } else {
             break;
         }
     }
 
-    String::from_utf8_lossy(&bytes).to_string()
+    // Filter out any null bytes
+    let filtered: Vec<u8> = bytes.into_iter().filter(|&b| b != 0).collect();
+    String::from_utf8_lossy(&filtered).to_string()
 }

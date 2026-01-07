@@ -1,7 +1,7 @@
 //! Era-related chain queries.
 
-use crate::error::ChainError;
 use crate::ChainClient;
+use crate::error::ChainError;
 use stkopt_core::EraInfo;
 use subxt::dynamic::{At, DecodedValueThunk, Value};
 
@@ -29,7 +29,8 @@ impl ChainClient {
             .at("index")
             .ok_or_else(|| ChainError::InvalidData("Missing era index".into()))?
             .as_u128()
-            .ok_or_else(|| ChainError::InvalidData("Invalid era index".into()))? as u32;
+            .ok_or_else(|| ChainError::InvalidData("Invalid era index".into()))?
+            as u32;
 
         let start_timestamp_ms = decoded
             .at("start")
@@ -107,10 +108,9 @@ impl ChainClient {
         let constant = subxt::dynamic::constant(pallet, name);
         let value = self.client().constants().at(&constant)?;
         let decoded = value.to_value()?;
-        decoded
-            .as_u128()
-            .map(|v| v as u32)
-            .ok_or_else(|| ChainError::InvalidData(format!("Invalid constant {}::{}", pallet, name)))
+        decoded.as_u128().map(|v| v as u32).ok_or_else(|| {
+            ChainError::InvalidData(format!("Invalid constant {}::{}", pallet, name))
+        })
     }
 
     /// Helper to get a u64 constant from runtime.
@@ -118,9 +118,8 @@ impl ChainClient {
         let constant = subxt::dynamic::constant(pallet, name);
         let value = self.client().constants().at(&constant)?;
         let decoded = value.to_value()?;
-        decoded
-            .as_u128()
-            .map(|v| v as u64)
-            .ok_or_else(|| ChainError::InvalidData(format!("Invalid constant {}::{}", pallet, name)))
+        decoded.as_u128().map(|v| v as u64).ok_or_else(|| {
+            ChainError::InvalidData(format!("Invalid constant {}::{}", pallet, name))
+        })
     }
 }

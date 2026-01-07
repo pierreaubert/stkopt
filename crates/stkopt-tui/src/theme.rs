@@ -118,9 +118,9 @@ impl Palette {
             border: Color::Gray,
 
             // Accent colors - more saturated for visibility
-            primary: Color::Rgb(0, 128, 128),  // Teal
-            secondary: Color::Rgb(0, 0, 139),  // Dark blue
-            accent: Color::Rgb(128, 0, 128),   // Purple
+            primary: Color::Rgb(0, 128, 128), // Teal
+            secondary: Color::Rgb(0, 0, 139), // Dark blue
+            accent: Color::Rgb(128, 0, 128),  // Purple
 
             // Status colors - darker variants
             success: Color::Rgb(0, 128, 0),    // Dark green
@@ -128,9 +128,9 @@ impl Palette {
             error: Color::Rgb(178, 34, 34),    // Firebrick
 
             // Data visualization
-            graph_high: Color::Rgb(0, 128, 0),    // Dark green
-            graph_mid: Color::Rgb(184, 134, 11),  // Dark goldenrod
-            graph_low: Color::Rgb(178, 34, 34),   // Firebrick
+            graph_high: Color::Rgb(0, 128, 0),   // Dark green
+            graph_mid: Color::Rgb(184, 134, 11), // Dark goldenrod
+            graph_low: Color::Rgb(178, 34, 34),  // Firebrick
 
             // UI elements
             selection: Color::Rgb(70, 130, 180), // Steel blue

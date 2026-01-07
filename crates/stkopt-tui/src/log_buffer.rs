@@ -58,23 +58,33 @@ impl LogBuffer {
 
     /// Push a new log line, removing oldest if at capacity.
     pub fn push(&self, line: LogLine) {
-        let mut buffer = self.inner.lock().unwrap();
-        if buffer.len() >= MAX_LOG_LINES {
-            buffer.pop_front();
+        match self.inner.lock() {
+            Ok(mut buffer) => {
+                if buffer.len() >= MAX_LOG_LINES {
+                    buffer.pop_front();
+                }
+                buffer.push_back(line);
+            }
+            Err(_) => {
+                tracing::error!("Log buffer mutex poisoned, dropping log line");
+            }
         }
-        buffer.push_back(line);
     }
 
     /// Get all log lines.
     pub fn get_lines(&self) -> Vec<LogLine> {
-        let buffer = self.inner.lock().unwrap();
-        buffer.iter().cloned().collect()
+        match self.inner.lock() {
+            Ok(buffer) => buffer.iter().cloned().collect(),
+            Err(_) => Vec::new(),
+        }
     }
 
     /// Get the number of log lines.
     pub fn len(&self) -> usize {
-        let buffer = self.inner.lock().unwrap();
-        buffer.len()
+        match self.inner.lock() {
+            Ok(buffer) => buffer.len(),
+            Err(_) => 0,
+        }
     }
 
     /// Check if buffer is empty.

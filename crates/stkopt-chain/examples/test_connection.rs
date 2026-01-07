@@ -13,9 +13,7 @@ use tokio::sync::mpsc;
 #[tokio::main]
 async fn main() {
     // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter("debug")
-        .init();
+    tracing_subscriber::fmt().with_env_filter("debug").init();
 
     let args: Vec<String> = std::env::args().collect();
     let custom_url = args.get(1).map(|s| s.as_str());
@@ -28,7 +26,7 @@ async fn main() {
     }
 
     // Create a dummy status channel
-    let (status_tx, mut status_rx) = mpsc::unbounded_channel::<ConnectionStatus>();
+    let (status_tx, mut status_rx) = mpsc::channel::<ConnectionStatus>(10);
 
     // Spawn task to print status updates
     tokio::spawn(async move {
@@ -90,7 +88,11 @@ async fn main() {
 
             // Try with Vec<Value> empty key
             println!("\nTrying Staking.ValidatorCount with vec![] key...");
-            let validator_count_query2 = subxt::dynamic::storage("Staking", "ValidatorCount", Vec::<subxt::dynamic::Value<()>>::new());
+            let validator_count_query2 = subxt::dynamic::storage(
+                "Staking",
+                "ValidatorCount",
+                Vec::<subxt::dynamic::Value<()>>::new(),
+            );
             match storage.fetch(&validator_count_query2).await {
                 Ok(Some(value)) => {
                     let decoded = value.to_value().unwrap();
@@ -192,7 +194,11 @@ async fn main() {
             println!("\n--- Using get_active_era() method ---");
             match client.get_active_era().await {
                 Ok(Some(era)) => {
-                    println!("Active era: {} ({:.1}% complete)", era.index, era.pct_complete * 100.0);
+                    println!(
+                        "Active era: {} ({:.1}% complete)",
+                        era.index,
+                        era.pct_complete * 100.0
+                    );
                 }
                 Ok(None) => {
                     println!("Active era: None returned");
@@ -212,7 +218,9 @@ async fn main() {
                     use futures::StreamExt;
                     let mut count = 0;
                     while let Some(item) = stream.next().await {
-                        if count >= 3 { break; }
+                        if count >= 3 {
+                            break;
+                        }
                         match item {
                             Ok(kv) => {
                                 println!("  Bonded entry key: 0x{}", hex::encode(&kv.key_bytes));
@@ -256,7 +264,8 @@ async fn main() {
 
             // Check StakingAhClient.ValidatorSet
             println!("\n--- Checking StakingAhClient.ValidatorSet ---");
-            let validator_set_query = subxt::dynamic::storage("StakingAhClient", "ValidatorSet", ());
+            let validator_set_query =
+                subxt::dynamic::storage("StakingAhClient", "ValidatorSet", ());
             let iter = storage.iter(validator_set_query).await;
             match iter {
                 Ok(mut stream) => {
@@ -289,7 +298,13 @@ async fn main() {
             match storage.fetch(&session_validators).await {
                 Ok(Some(value)) => {
                     let decoded = value.to_value().unwrap();
-                    println!("Session.Validators (first part): {:?}", format!("{:?}", decoded).chars().take(500).collect::<String>());
+                    println!(
+                        "Session.Validators (first part): {:?}",
+                        format!("{:?}", decoded)
+                            .chars()
+                            .take(500)
+                            .collect::<String>()
+                    );
                 }
                 Ok(None) => println!("Session.Validators: None"),
                 Err(e) => println!("Session.Validators error: {}", e),
@@ -372,7 +387,7 @@ async fn main() {
 
             // Test People chain connection and identity fetching
             println!("\n\n=== PEOPLE CHAIN TEST ===");
-            test_people_chain(Network::Polkadot).await;
+            test_people_chain(&client, Network::Polkadot).await;
         }
         Err(e) => {
             println!("Failed to connect: {}", e);
@@ -381,58 +396,78 @@ async fn main() {
     }
 }
 
-async fn test_people_chain(network: Network) {
+async fn test_people_chain(client: &stkopt_chain::ChainClient, network: Network) {
     println!("Connecting to {} People chain...", network);
 
     match stkopt_chain::connect_people_chain(network).await {
         Ok(subxt_client) => {
             println!("✓ Connected to People chain");
 
-            let people_client = stkopt_chain::PeopleChainClient::new(subxt_client);
-
-            // Test with Polkadot treasury address (has identity)
-            let test_address: subxt::utils::AccountId32 =
-                "13UVJyLnbVp9RBZYFwFGyDvVd1y27Tt8tkntv6Q7JVPhFsTB"
-                    .parse()
-                    .expect("valid address");
-
-            println!("Testing identity fetch for: {}", test_address);
-
-            match people_client.get_identity(&test_address).await {
-                Ok(Some(identity)) => {
-                    println!("✓ Identity found!");
-                    println!("  Display name: {:?}", identity.display_name);
-                    println!("  Verified: {}", identity.verified);
-                    println!("  Sub-identity: {:?}", identity.sub_identity);
-                }
-                Ok(None) => {
-                    println!("  No identity found for this address");
-                }
-                Err(e) => {
-                    println!("✗ Failed to fetch identity: {}", e);
+            // List available pallets to verify Identity pallet exists
+            println!("\n--- Checking People chain pallets ---");
+            let metadata = subxt_client.metadata();
+            for pallet in metadata.pallets() {
+                if pallet.name() == "Identity" {
+                    println!("Found Identity pallet!");
+                    if let Some(storage) = pallet.storage() {
+                        println!("Storage entries:");
+                        for entry in storage.entries() {
+                            println!("  - {}", entry.name());
+                        }
+                    }
                 }
             }
 
-            // Test batch fetch - just use the same address multiple times to avoid checksum issues
-            println!("\nTesting batch identity fetch (3 addresses)...");
-            let addresses: Vec<subxt::utils::AccountId32> = vec![
-                test_address.clone(),
-                test_address.clone(),
-                test_address.clone(),
-            ];
+            let people_client = stkopt_chain::PeopleChainClient::new(subxt_client);
+
+            // Fetch validators from Asset Hub
+            println!("\n--- Fetching validators from Asset Hub ---");
+            let validators = match client.get_validators().await {
+                Ok(v) => {
+                    println!("Found {} validators", v.len());
+                    v
+                }
+                Err(e) => {
+                    println!("Failed to get validators: {}", e);
+                    return;
+                }
+            };
+
+            // Take first 5 validators for testing
+            let test_addresses: Vec<_> = validators.iter().take(5).collect();
+            println!(
+                "Testing identity fetch for first {} validators:",
+                test_addresses.len()
+            );
+
+            for v in &test_addresses {
+                println!("  Validator: {}", v.address);
+            }
+
+            // Query People chain for identities
+            let addresses: Vec<subxt::utils::AccountId32> =
+                test_addresses.iter().map(|v| v.address.clone()).collect();
 
             match people_client.get_identities(&addresses).await {
                 Ok(identities) => {
-                    let with_names = identities.iter().filter(|i| i.display_name.is_some()).count();
-                    println!("✓ Batch fetch complete: {} identities, {} with names", identities.len(), with_names);
+                    let with_names = identities
+                        .iter()
+                        .filter(|i| i.display_name.is_some())
+                        .count();
+                    println!(
+                        "\nFound {} identities ({} with display names):",
+                        identities.len(),
+                        with_names
+                    );
                     for id in identities {
                         if let Some(name) = &id.display_name {
-                            println!("  {} => {}", &id.address.to_string()[..8], name);
+                            let addr_short = &id.address.to_string()[..8];
+                            println!("  {} => {}", addr_short, name);
                         }
                     }
                 }
                 Err(e) => {
-                    println!("✗ Batch fetch failed: {}", e);
+                    println!("Failed to fetch identities: {}", e);
                 }
             }
         }

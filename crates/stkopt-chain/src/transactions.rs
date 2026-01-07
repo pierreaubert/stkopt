@@ -1,7 +1,7 @@
 //! Transaction generation for QR code signing.
 
-use crate::error::ChainError;
 use crate::ChainClient;
+use crate::error::ChainError;
 use subxt::dynamic::{At, Value};
 pub use subxt::utils::AccountId32;
 
@@ -39,6 +39,9 @@ pub enum Era {
 
 impl ChainClient {
     /// Generate an unsigned nomination extrinsic.
+    ///
+    /// Note: Staking transactions go to the relay chain, not Asset Hub.
+    /// This uses the relay chain genesis hash and runtime version.
     pub async fn create_nominate_payload(
         &self,
         signer: &AccountId32,
@@ -49,42 +52,51 @@ impl ChainClient {
             .iter()
             .map(|t| {
                 // MultiAddress::Id variant
-                Value::named_variant(
-                    "Id",
-                    [("0", Value::from_bytes(t.clone()))],
-                )
+                Value::named_variant("Id", [("0", Value::from_bytes(t.clone()))])
             })
             .collect();
 
-        let call = subxt::dynamic::tx("Staking", "nominate", vec![Value::unnamed_composite(target_values)]);
+        let call = subxt::dynamic::tx(
+            "Staking",
+            "nominate",
+            vec![Value::unnamed_composite(target_values)],
+        );
 
-        // Get the call data
-        let call_data = self
-            .client()
-            .tx()
-            .call_data(&call)?;
+        // Use relay chain client for transaction data
+        let relay = self.relay_client();
 
-        // Get chain info
-        let genesis_hash: [u8; 32] = self.genesis_hash();
+        // Get the call data (using relay chain's metadata for call encoding)
+        let call_data = relay.tx().call_data(&call)?;
 
-        let block = self.client().blocks().at_latest().await?;
+        // Get relay chain info (transactions go to relay chain, not Asset Hub)
+        let genesis_hash: [u8; 32] = self.relay_genesis_hash();
+
+        let block = relay.blocks().at_latest().await?;
         let block_hash: [u8; 32] = block.hash().0;
 
-        let runtime = self.client().runtime_version();
+        let runtime = relay.runtime_version();
         let spec_version = runtime.spec_version;
         let tx_version = runtime.transaction_version;
 
-        // Get account nonce
-        let nonce = self.get_account_nonce(signer).await?;
+        // Get account nonce from relay chain
+        let nonce = self.get_relay_account_nonce(signer).await?;
 
         // Create description
-        let description = format!(
-            "Nominate {} validators",
-            targets.len()
-        );
+        let description = format!("Nominate {} validators", targets.len());
 
         // Calculate metadata hash (simplified - real implementation would hash the metadata)
-        let metadata_hash = [0u8; 32]; // Placeholder
+        // NOTE: This is a placeholder. For full security, the metadata hash should be computed
+        // from the chain's metadata to enable runtime version verification.
+        // Polkadot Vault will still validate genesis hash, spec version, and transaction version.
+        let metadata_hash = [0u8; 32];
+
+        tracing::info!(
+            "Created nominate payload: genesis={:?}, spec_version={}, tx_version={}, nonce={}",
+            &genesis_hash[..8], // First 8 bytes for logging
+            spec_version,
+            tx_version,
+            nonce
+        );
 
         Ok(UnsignedPayload {
             call_data,
@@ -103,50 +115,67 @@ impl ChainClient {
     }
 
     /// Generate an unsigned bond extrinsic.
+    ///
+    /// Note: Staking transactions go to the relay chain, not Asset Hub.
     pub async fn create_bond_payload(
         &self,
         signer: &AccountId32,
         value: u128,
     ) -> Result<UnsignedPayload, ChainError> {
         // Build the bond call (bond to self with Staked payee)
-        // Use unnamed_variant which accepts an iterator of values
         let payee = Value::unnamed_variant("Staked", std::iter::empty::<Value<()>>());
-        let call = subxt::dynamic::tx(
-            "Staking",
-            "bond",
-            vec![Value::u128(value), payee],
-        );
+        let call = subxt::dynamic::tx("Staking", "bond", vec![Value::u128(value), payee]);
 
-        let call_data = self.client().tx().call_data(&call)?;
-        let genesis_hash: [u8; 32] = self.genesis_hash();
-        let block = self.client().blocks().at_latest().await?;
+        // Use relay chain client for transaction data
+        let relay = self.relay_client();
+
+        let call_data = relay.tx().call_data(&call)?;
+        let genesis_hash: [u8; 32] = self.relay_genesis_hash();
+        let block = relay.blocks().at_latest().await?;
         let block_hash: [u8; 32] = block.hash().0;
-        let runtime = self.client().runtime_version();
-        let nonce = self.get_account_nonce(signer).await?;
+        let runtime = relay.runtime_version();
+        let nonce = self.get_relay_account_nonce(signer).await?;
 
         Ok(UnsignedPayload {
             call_data,
             description: format!("Bond {} tokens", value),
+            // NOTE: Placeholder for metadata hash. See nominate payload for details.
             metadata_hash: [0u8; 32],
             genesis_hash,
             block_hash,
             spec_version: runtime.spec_version,
             tx_version: runtime.transaction_version,
             nonce,
-            era: Era::Mortal { period: 64, phase: 0 },
+            era: Era::Mortal {
+                period: 64,
+                phase: 0,
+            },
         })
     }
 
-    /// Get account nonce.
+    /// Get account nonce from Asset Hub.
+    #[allow(dead_code)]
     async fn get_account_nonce(&self, account: &AccountId32) -> Result<u64, ChainError> {
+        Self::fetch_nonce(self.client(), account).await
+    }
+
+    /// Get account nonce from relay chain (for transactions).
+    async fn get_relay_account_nonce(&self, account: &AccountId32) -> Result<u64, ChainError> {
+        Self::fetch_nonce(self.relay_client(), account).await
+    }
+
+    /// Fetch nonce from a client.
+    async fn fetch_nonce(
+        client: &subxt::OnlineClient<subxt::PolkadotConfig>,
+        account: &AccountId32,
+    ) -> Result<u64, ChainError> {
         let storage_query = subxt::dynamic::storage(
             "System",
             "Account",
             vec![Value::from_bytes(account.clone())],
         );
 
-        let result = self
-            .client()
+        let result = client
             .storage()
             .at_latest()
             .await?
@@ -168,26 +197,26 @@ impl ChainClient {
 
 /// Encode payload for Polkadot Vault QR code.
 ///
-/// Polkadot Vault QR format:
+/// UOS (Universal Offline Signature) format:
 /// - `0x53` (ASCII 'S') - Substrate prefix
-/// - `0x02` - Payload type (mortal transaction)
-/// - `0x01` - Crypto type (Sr25519, most common for Polkadot)
+/// - Crypto type: `0x00` = Ed25519, `0x01` = Sr25519
+/// - Action type: `0x00` = Standard, `0x01` = Hash, `0x02` = Immortal, `0x03` = Message
 /// - 32 bytes - Public key of signer
 /// - Signing payload bytes
+///
+/// Format: `[S][crypto][action][pubkey(32)][payload]`
 pub fn encode_for_qr(payload: &UnsignedPayload, signer: &AccountId32) -> Vec<u8> {
     let mut qr_payload = Vec::new();
 
-    // Polkadot Vault header
+    // Substrate prefix
     qr_payload.push(0x53); // 'S' for Substrate
-
-    // Payload type: 0x02 = mortal, 0x03 = immortal
-    match payload.era {
-        Era::Immortal => qr_payload.push(0x03),
-        Era::Mortal { .. } => qr_payload.push(0x02),
-    }
 
     // Crypto type: 0x01 = Sr25519 (default for Polkadot)
     qr_payload.push(0x01);
+
+    // Action type: 0x00 = Standard mortal transaction
+    // (0x02 is for immortal, not mortal as previously thought)
+    qr_payload.push(0x00);
 
     // Signer's public key (32 bytes)
     qr_payload.extend_from_slice(signer.as_ref());

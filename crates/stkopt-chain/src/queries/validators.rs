@@ -1,7 +1,7 @@
 //! Validator-related chain queries.
 
-use crate::error::ChainError;
 use crate::ChainClient;
+use crate::error::ChainError;
 use stkopt_core::{Balance, EraIndex, ValidatorPreferences};
 use subxt::dynamic::{At, DecodedValueThunk, Value};
 use subxt::utils::AccountId32;
@@ -74,7 +74,10 @@ impl ChainClient {
 
             validators.push(ValidatorInfo {
                 address,
-                preferences: ValidatorPreferences { commission, blocked },
+                preferences: ValidatorPreferences {
+                    commission,
+                    blocked,
+                },
             });
         }
 
@@ -86,8 +89,11 @@ impl ChainClient {
         &self,
         era: EraIndex,
     ) -> Result<(u32, Vec<ValidatorPoints>), ChainError> {
-        let storage_query =
-            subxt::dynamic::storage("Staking", "ErasRewardPoints", vec![Value::u128(era as u128)]);
+        let storage_query = subxt::dynamic::storage(
+            "Staking",
+            "ErasRewardPoints",
+            vec![Value::u128(era as u128)],
+        );
 
         let result: Option<DecodedValueThunk> = self
             .client()
@@ -109,10 +115,62 @@ impl ChainClient {
             .and_then(|v: &Value<u32>| v.as_u128())
             .unwrap_or(0) as u32;
 
-        // For now, we'll fetch individual validator points from ErasStakersOverview
-        // The BTreeMap parsing is complex with dynamic values
-        // TODO: Implement detailed reward points parsing
-        let validators = Vec::new();
+        let mut validators = Vec::new();
+
+        // individual is a BTreeMap, which encodes as a sequence of (Key, Value) tuples
+        if let Some(individual) = decoded.at("individual") {
+            // Iterate over the map entries
+            // Depending on subxt/scale-value version, this might be represented as a sequence of tuples
+            // or a map. We'll try to iterate assuming it's a sequence/composite.
+
+            // We can iterate by index or use values() iterator if available
+            // Let's iterate up to a reasonable limit or until we find no more items
+            for i in 0..10000 {
+                if let Some(entry) = individual.at(i) {
+                    // Each entry should be a tuple (AccountId, points)
+                    if let Some(account_val) = entry.at(0)
+                        && let Some(points_val) = entry.at(1)
+                    {
+                        // Extract account ID
+                        let mut account_bytes = [0u8; 32];
+                        let mut bytes_found = false;
+
+                        // AccountId might be wrapped or direct bytes
+                        // Try to get as slice of bytes if it's a Primitive(U128/U256 etc) or a Composite
+                        // subxt Value doesn't have as_bytes(), so we have to try different ways
+
+                        let mut extracted_bytes = Vec::new();
+
+                        // Case 1: Sequence of u8
+                        for k in 0..32 {
+                            if let Some(b_val) = account_val.at(k) {
+                                if let Some(b) = b_val.as_u128() {
+                                    extracted_bytes.push(b as u8);
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+
+                        if extracted_bytes.len() == 32 {
+                            account_bytes.copy_from_slice(&extracted_bytes);
+                            bytes_found = true;
+                        }
+                        // Note: AccountId32 is [u8; 32], handled above via byte iteration
+
+                        if bytes_found {
+                            let points = points_val.as_u128().unwrap_or(0) as u32;
+                            validators.push(ValidatorPoints {
+                                address: AccountId32::from(account_bytes),
+                                points,
+                            });
+                        }
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
 
         Ok((total, validators))
     }

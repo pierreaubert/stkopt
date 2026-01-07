@@ -1,7 +1,7 @@
 //! Account-related chain queries.
 
-use crate::error::ChainError;
 use crate::ChainClient;
+use crate::error::ChainError;
 use stkopt_core::{Balance, EraIndex};
 use subxt::dynamic::{At, DecodedValueThunk, Value};
 use subxt::utils::AccountId32;
@@ -107,11 +107,8 @@ impl ChainClient {
         stash: &AccountId32,
     ) -> Result<Option<StakingLedger>, ChainError> {
         // In newer runtimes, the stash is used directly (no separate controller)
-        let storage_query = subxt::dynamic::storage(
-            "Staking",
-            "Ledger",
-            vec![Value::from_bytes(stash.clone())],
-        );
+        let storage_query =
+            subxt::dynamic::storage("Staking", "Ledger", vec![Value::from_bytes(stash.clone())]);
 
         let result: Option<DecodedValueThunk> = self
             .client()

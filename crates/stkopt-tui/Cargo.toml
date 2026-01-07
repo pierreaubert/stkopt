@@ -29,3 +29,4 @@ base64.workspace = true
 terminal-light.workspace = true
 reqwest.workspace = true
 rusqlite.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock"] }

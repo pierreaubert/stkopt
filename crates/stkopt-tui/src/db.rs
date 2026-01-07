@@ -1,9 +1,9 @@
 //! SQLite database for caching staking history.
 
 use crate::action::StakingHistoryPoint;
-use rusqlite::{params, Connection, Result};
-use stkopt_core::Network;
+use rusqlite::{Connection, Result, params};
 use std::path::Path;
+use stkopt_core::Network;
 
 /// Database wrapper for staking history storage.
 pub struct HistoryDb {
@@ -227,6 +227,16 @@ impl HistoryDb {
         Ok(count)
     }
 
+    /// Delete all history entries for an address (all networks).
+    /// Used when removing an account from the address book.
+    pub fn delete_address_history(&self, address: &str) -> Result<u32> {
+        let deleted = self.conn.execute(
+            "DELETE FROM staking_history WHERE address = ?1",
+            params![address],
+        )?;
+        Ok(deleted as u32)
+    }
+
     /// Delete old history entries beyond a certain count.
     #[allow(dead_code)]
     pub fn prune_history(&self, network: Network, address: &str, keep_count: u32) -> Result<u32> {
@@ -266,9 +276,7 @@ mod tests {
         db.insert_history(Network::Polkadot, "15oF4uV", &point)
             .unwrap();
 
-        let history = db
-            .get_history(Network::Polkadot, "15oF4uV", None)
-            .unwrap();
+        let history = db.get_history(Network::Polkadot, "15oF4uV", None).unwrap();
 
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].era, 1500);

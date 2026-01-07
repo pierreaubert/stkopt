@@ -1,12 +1,15 @@
 //! Application state and logic.
 
-use crate::action::{AccountStatus, Action, DisplayPool, DisplayValidator, StakingHistoryPoint};
+use crate::action::{
+    AccountStatus, Action, DisplayPool, DisplayValidator, StakingHistoryPoint, TransactionInfo,
+};
 use crate::log_buffer::LogBuffer;
 use crate::theme::{Palette, Theme};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::TableState;
-use stkopt_core::{ConnectionStatus, Network, OptimizationResult};
 use std::collections::HashSet;
+use stkopt_chain::ChainInfo;
+use stkopt_core::{ConnectionStatus, Network, OptimizationResult};
 use subxt::utils::AccountId32;
 
 /// Input mode for the application.
@@ -16,6 +19,126 @@ pub enum InputMode {
     Normal,
     /// Entering account address.
     EnteringAccount,
+    /// Searching in validators/pools.
+    Searching,
+    /// Showing sort menu.
+    SortMenu,
+    /// Showing strategy menu in nominate view.
+    StrategyMenu,
+}
+
+/// Sort field for validators.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ValidatorSortField {
+    Name,
+    Address,
+    Commission,
+    TotalStake,
+    OwnStake,
+    Points,
+    Nominators,
+    #[default]
+    Apy,
+    Blocked,
+}
+
+impl ValidatorSortField {
+    pub fn all() -> &'static [Self] {
+        &[
+            Self::Name,
+            Self::Address,
+            Self::Commission,
+            Self::TotalStake,
+            Self::OwnStake,
+            Self::Points,
+            Self::Nominators,
+            Self::Apy,
+            Self::Blocked,
+        ]
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Name => "Name",
+            Self::Address => "Address",
+            Self::Commission => "Commission",
+            Self::TotalStake => "Total Stake",
+            Self::OwnStake => "Own Stake",
+            Self::Points => "Points",
+            Self::Nominators => "Nominators",
+            Self::Apy => "APY",
+            Self::Blocked => "Blocked",
+        }
+    }
+
+    pub fn key(&self) -> char {
+        match self {
+            Self::Name => 'n',
+            Self::Address => 'a',
+            Self::Commission => 'c',
+            Self::TotalStake => 't',
+            Self::OwnStake => 'o',
+            Self::Points => 'p',
+            Self::Nominators => 'm',
+            Self::Apy => 'y',
+            Self::Blocked => 'b',
+        }
+    }
+
+    pub fn from_key(key: char) -> Option<Self> {
+        Self::all().iter().find(|f| f.key() == key).copied()
+    }
+}
+
+/// Sort field for pools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PoolSortField {
+    Id,
+    Name,
+    State,
+    Members,
+    Points,
+    #[default]
+    Apy,
+}
+
+impl PoolSortField {
+    pub fn all() -> &'static [Self] {
+        &[
+            Self::Id,
+            Self::Name,
+            Self::State,
+            Self::Members,
+            Self::Points,
+            Self::Apy,
+        ]
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Id => "ID",
+            Self::Name => "Name",
+            Self::State => "State",
+            Self::Members => "Members",
+            Self::Points => "Points",
+            Self::Apy => "APY",
+        }
+    }
+
+    pub fn key(&self) -> char {
+        match self {
+            Self::Id => 'i',
+            Self::Name => 'n',
+            Self::State => 's',
+            Self::Members => 'm',
+            Self::Points => 'p',
+            Self::Apy => 'y',
+        }
+    }
+
+    pub fn from_key(key: char) -> Option<Self> {
+        Self::all().iter().find(|f| f.key() == key).copied()
+    }
 }
 
 /// Current view/tab in the application.
@@ -31,7 +154,13 @@ pub enum View {
 
 impl View {
     pub fn all() -> &'static [View] {
-        &[View::Validators, View::Pools, View::Nominate, View::Account, View::History]
+        &[
+            View::Validators,
+            View::Pools,
+            View::Nominate,
+            View::Account,
+            View::History,
+        ]
     }
 
     pub fn label(&self) -> &'static str {
@@ -76,6 +205,8 @@ pub struct App {
     pub network: Network,
     /// Connection status.
     pub connection_status: ConnectionStatus,
+    /// Chain info (name, spec version, validation).
+    pub chain_info: Option<ChainInfo>,
     /// Current view/tab.
     pub current_view: View,
     /// Current era index.
@@ -112,10 +243,14 @@ pub struct App {
     pub nominate_table_state: TableState,
     /// QR code data to display (if any).
     pub qr_data: Option<Vec<u8>>,
+    /// Transaction info for QR code display.
+    pub qr_tx_info: Option<TransactionInfo>,
     /// Current QR frame for animated multipart display.
     pub qr_frame: usize,
     /// Whether showing QR code modal.
     pub showing_qr: bool,
+    /// Whether to show transaction details in QR modal.
+    pub qr_show_details: bool,
     /// Whether showing help overlay.
     pub showing_help: bool,
     /// Whether the app should quit.
@@ -132,6 +267,26 @@ pub struct App {
     pub loading_history: bool,
     /// Total eras to load for history.
     pub history_total_eras: u32,
+    /// Account for which history was loaded (to detect account changes).
+    pub history_loaded_for: Option<String>,
+    /// Search query for filtering.
+    pub search_query: String,
+    /// Whether to show blocked validators.
+    pub show_blocked: bool,
+    /// Validator sort field.
+    pub validator_sort: ValidatorSortField,
+    /// Validator sort ascending (false = descending).
+    pub validator_sort_asc: bool,
+    /// Pool sort field.
+    pub pool_sort: PoolSortField,
+    /// Pool sort ascending (false = descending).
+    pub pool_sort_asc: bool,
+    /// Currently focused panel in account view (0 = status, 1 = address book).
+    pub account_panel_focus: usize,
+    /// Address book table state.
+    pub address_book_state: TableState,
+    /// Optimization strategy selection index.
+    pub strategy_index: usize,
 }
 
 impl App {
@@ -143,6 +298,7 @@ impl App {
             palette,
             network,
             connection_status: ConnectionStatus::Disconnected,
+            chain_info: None,
             current_view: View::default(),
             current_era: None,
             era_pct_complete: 0.0,
@@ -161,8 +317,10 @@ impl App {
             selected_validators: HashSet::new(),
             nominate_table_state: TableState::default(),
             qr_data: None,
+            qr_tx_info: None,
             qr_frame: 0,
             showing_qr: false,
+            qr_show_details: false,
             showing_help: false,
             should_quit: false,
             tick_count: 0,
@@ -171,6 +329,16 @@ impl App {
             staking_history: Vec::new(),
             loading_history: false,
             history_total_eras: 30,
+            history_loaded_for: None,
+            search_query: String::new(),
+            show_blocked: true,
+            validator_sort: ValidatorSortField::default(),
+            validator_sort_asc: false, // Default descending (highest APY first)
+            pool_sort: PoolSortField::default(),
+            pool_sort_asc: false,
+            account_panel_focus: 0,
+            address_book_state: TableState::default(),
+            strategy_index: 0,
         }
     }
 
@@ -196,8 +364,8 @@ impl App {
     pub fn tick(&mut self) {
         self.tick_count = self.tick_count.wrapping_add(1);
 
-        // Advance QR animation frame every ~500ms (5 ticks at 10fps)
-        if self.showing_qr && self.tick_count.is_multiple_of(5) {
+        // Advance QR animation frame every tick (~100ms) for fast multipart display
+        if self.showing_qr {
             self.qr_frame = self.qr_frame.wrapping_add(1);
         }
     }
@@ -207,6 +375,9 @@ impl App {
         match self.input_mode {
             InputMode::Normal => self.handle_normal_key(key),
             InputMode::EnteringAccount => self.handle_input_key(key),
+            InputMode::Searching => self.handle_search_key(key),
+            InputMode::SortMenu => self.handle_sort_menu_key(key),
+            InputMode::StrategyMenu => self.handle_strategy_menu_key(key),
         }
     }
 
@@ -215,10 +386,15 @@ impl App {
         // Close QR modal if showing
         if self.showing_qr {
             match key.code {
-                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
+                KeyCode::Esc | KeyCode::Char('q') => {
                     self.showing_qr = false;
                     self.qr_data = None;
+                    self.qr_tx_info = None;
                     self.qr_frame = 0;
+                    self.qr_show_details = false;
+                }
+                KeyCode::Tab | KeyCode::Right | KeyCode::Left => {
+                    self.qr_show_details = !self.qr_show_details;
                 }
                 _ => {}
             }
@@ -238,13 +414,16 @@ impl App {
 
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Tab => self.next_view(),
-            KeyCode::BackTab => self.prev_view(),
+            KeyCode::Tab => return self.next_view(),
+            KeyCode::BackTab => return self.prev_view(),
             KeyCode::Char('1') => self.current_view = View::Validators,
             KeyCode::Char('2') => self.current_view = View::Pools,
             KeyCode::Char('3') => self.current_view = View::Nominate,
             KeyCode::Char('4') => self.current_view = View::Account,
-            KeyCode::Char('5') => self.current_view = View::History,
+            KeyCode::Char('5') => {
+                self.current_view = View::History;
+                return self.maybe_auto_load_history();
+            }
             KeyCode::Char('n') => self.next_network(),
             KeyCode::Up | KeyCode::Char('k') => self.select_previous(),
             KeyCode::Down | KeyCode::Char('j') => self.select_next(),
@@ -286,6 +465,46 @@ impl App {
             KeyCode::Char('?') => {
                 self.showing_help = true;
             }
+            // Search with /
+            KeyCode::Char('/') if matches!(self.current_view, View::Validators | View::Pools) => {
+                self.input_mode = InputMode::Searching;
+                self.search_query.clear();
+            }
+            // Toggle blocked validators with b
+            KeyCode::Char('b') if self.current_view == View::Validators => {
+                self.show_blocked = !self.show_blocked;
+            }
+            // Sort menu with s
+            KeyCode::Char('s') if matches!(self.current_view, View::Validators | View::Pools) => {
+                self.input_mode = InputMode::SortMenu;
+            }
+            // Reverse sort with S
+            KeyCode::Char('S') if self.current_view == View::Validators => {
+                self.validator_sort_asc = !self.validator_sort_asc;
+            }
+            KeyCode::Char('S') if self.current_view == View::Pools => {
+                self.pool_sort_asc = !self.pool_sort_asc;
+            }
+            // Strategy menu in nominate view
+            KeyCode::Char('t') if self.current_view == View::Nominate => {
+                self.input_mode = InputMode::StrategyMenu;
+            }
+            // Account view panel switching
+            KeyCode::Left if self.current_view == View::Account => {
+                self.account_panel_focus = 0;
+            }
+            KeyCode::Right if self.current_view == View::Account => {
+                self.account_panel_focus = 1;
+            }
+            // Select from address book with Enter when focused on address book
+            KeyCode::Enter
+                if self.current_view == View::Account && self.account_panel_focus == 1 =>
+            {
+                if let Some(idx) = self.address_book_state.selected() {
+                    // Return action to select this address
+                    return Some(Action::SelectAddressBookEntry(idx));
+                }
+            }
             // Log scrolling
             KeyCode::PageUp => {
                 self.scroll_logs_up();
@@ -295,6 +514,89 @@ impl App {
             }
             KeyCode::End => {
                 self.scroll_logs_to_bottom();
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// Handle keyboard input when searching.
+    fn handle_search_key(&mut self, key: KeyEvent) -> Option<Action> {
+        match key.code {
+            KeyCode::Enter | KeyCode::Esc => {
+                self.input_mode = InputMode::Normal;
+            }
+            KeyCode::Backspace => {
+                self.search_query.pop();
+            }
+            KeyCode::Char(c) => {
+                self.search_query.push(c);
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// Handle keyboard input in sort menu.
+    fn handle_sort_menu_key(&mut self, key: KeyEvent) -> Option<Action> {
+        match key.code {
+            KeyCode::Esc => {
+                self.input_mode = InputMode::Normal;
+            }
+            KeyCode::Char(c) => match self.current_view {
+                View::Validators => {
+                    if let Some(field) = ValidatorSortField::from_key(c) {
+                        self.validator_sort = field;
+                        self.input_mode = InputMode::Normal;
+                    }
+                }
+                View::Pools => {
+                    if let Some(field) = PoolSortField::from_key(c) {
+                        self.pool_sort = field;
+                        self.input_mode = InputMode::Normal;
+                    }
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+        None
+    }
+
+    /// Handle keyboard input in strategy menu.
+    fn handle_strategy_menu_key(&mut self, key: KeyEvent) -> Option<Action> {
+        match key.code {
+            KeyCode::Esc => {
+                self.input_mode = InputMode::Normal;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if self.strategy_index > 0 {
+                    self.strategy_index -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.strategy_index < 2 {
+                    self.strategy_index += 1;
+                }
+            }
+            KeyCode::Enter => {
+                self.input_mode = InputMode::Normal;
+                return Some(Action::RunOptimizationWithStrategy(self.strategy_index));
+            }
+            KeyCode::Char('1') => {
+                self.strategy_index = 0;
+                self.input_mode = InputMode::Normal;
+                return Some(Action::RunOptimizationWithStrategy(0));
+            }
+            KeyCode::Char('2') => {
+                self.strategy_index = 1;
+                self.input_mode = InputMode::Normal;
+                return Some(Action::RunOptimizationWithStrategy(1));
+            }
+            KeyCode::Char('3') => {
+                self.strategy_index = 2;
+                self.input_mode = InputMode::Normal;
+                return Some(Action::RunOptimizationWithStrategy(2));
             }
             _ => {}
         }
@@ -334,15 +636,19 @@ impl App {
     }
 
     /// Switch to next view.
-    fn next_view(&mut self) {
+    fn next_view(&mut self) -> Option<Action> {
         let views = View::all();
         let current_idx = self.current_view.index();
         let next_idx = (current_idx + 1) % views.len();
         self.current_view = View::from_index(next_idx);
+        if self.current_view == View::History {
+            return self.maybe_auto_load_history();
+        }
+        None
     }
 
     /// Switch to previous view.
-    fn prev_view(&mut self) {
+    fn prev_view(&mut self) -> Option<Action> {
         let views = View::all();
         let current_idx = self.current_view.index();
         let prev_idx = if current_idx == 0 {
@@ -351,12 +657,40 @@ impl App {
             current_idx - 1
         };
         self.current_view = View::from_index(prev_idx);
+        if self.current_view == View::History {
+            return self.maybe_auto_load_history();
+        }
+        None
+    }
+
+    /// Auto-load staking history when switching to History view.
+    fn maybe_auto_load_history(&mut self) -> Option<Action> {
+        // Only auto-load if:
+        // - We have a watched account
+        // - Not already loading
+        // - Either no history loaded, or loaded for different account
+        if let Some(account) = &self.watched_account {
+            let account_str = account.to_string();
+            let should_load = !self.loading_history
+                && (self.staking_history.is_empty()
+                    || self.history_loaded_for.as_ref() != Some(&account_str));
+            if should_load {
+                self.staking_history.clear();
+                self.loading_history = true;
+                self.history_loaded_for = Some(account_str);
+                return Some(Action::LoadStakingHistory);
+            }
+        }
+        None
     }
 
     /// Switch to next network.
     fn next_network(&mut self) {
         let networks = Network::all();
-        let current_idx = networks.iter().position(|n| *n == self.network).unwrap_or(0);
+        let current_idx = networks
+            .iter()
+            .position(|n| *n == self.network)
+            .unwrap_or(0);
         let next_idx = (current_idx + 1) % networks.len();
         self.network = networks[next_idx];
         self.connection_status = ConnectionStatus::Disconnected;
@@ -372,6 +706,9 @@ impl App {
         match action {
             Action::UpdateConnectionStatus(status) => {
                 self.connection_status = status;
+            }
+            Action::SetChainInfo(info) => {
+                self.chain_info = Some(info);
             }
             Action::SetActiveEra(era_info) => {
                 self.current_era = Some(era_info.index);
@@ -420,7 +757,7 @@ impl App {
                 self.account_status = None;
                 self.account_input.clear();
             }
-            Action::RunOptimization => {
+            Action::RunOptimization | Action::RunOptimizationWithStrategy(_) => {
                 // Handled in main.rs
             }
             Action::SetOptimizationResult(result) => {
@@ -455,8 +792,9 @@ impl App {
             Action::GenerateNominationQR => {
                 // Handled in main.rs
             }
-            Action::SetQRData(data) => {
+            Action::SetQRData(data, tx_info) => {
                 self.qr_data = data;
+                self.qr_tx_info = tx_info;
                 self.qr_frame = 0; // Reset animation frame for new QR
                 self.showing_qr = self.qr_data.is_some();
             }
@@ -474,9 +812,14 @@ impl App {
                 self.staking_history.insert(pos, point);
             }
             Action::LoadStakingHistory => {
-                // Clear previous history and start loading
-                self.staking_history.clear();
-                self.loading_history = true;
+                // Manual load request (clear if needed and start loading)
+                if !self.loading_history {
+                    self.staking_history.clear();
+                    self.loading_history = true;
+                    if let Some(account) = &self.watched_account {
+                        self.history_loaded_for = Some(account.to_string());
+                    }
+                }
                 // Actual loading is handled in main.rs
             }
             Action::CancelLoadingHistory => {
@@ -492,10 +835,23 @@ impl App {
                 self.era_pct_complete = 0.0;
                 self.validators.clear();
             }
+            Action::SelectAddressBookEntry(_idx) => {
+                // Handled in main.rs where we have access to the address book entries
+            }
+            Action::RemoveAccount(_addr) => {
+                // Handled in main.rs where we have access to config and database
+            }
             Action::Quit => {
                 self.should_quit = true;
             }
         }
+    }
+
+    /// Get the number of entries in the address book.
+    pub fn address_book_len(&self) -> usize {
+        // 1 for "My Account" if set, plus 3 hardcoded entries
+        let my_account = if self.watched_account.is_some() { 1 } else { 0 };
+        my_account + 3
     }
 
     /// Move selection up in the current list.
@@ -540,8 +896,129 @@ impl App {
                 };
                 self.nominate_table_state.select(Some(i));
             }
+            View::Account if self.account_panel_focus == 1 => {
+                let len = self.address_book_len();
+                if len > 0 {
+                    let i = match self.address_book_state.selected() {
+                        Some(i) => {
+                            if i == 0 {
+                                len - 1
+                            } else {
+                                i - 1
+                            }
+                        }
+                        None => 0,
+                    };
+                    self.address_book_state.select(Some(i));
+                }
+            }
             _ => {}
         }
+    }
+
+    /// Get filtered and sorted validators.
+    pub fn filtered_validators(&self) -> Vec<&DisplayValidator> {
+        let mut result: Vec<_> = self
+            .validators
+            .iter()
+            .filter(|v| {
+                // Filter by blocked status
+                if !self.show_blocked && v.blocked {
+                    return false;
+                }
+                // Filter by search query
+                if !self.search_query.is_empty() {
+                    let query = self.search_query.to_lowercase();
+                    let name_match = v
+                        .name
+                        .as_ref()
+                        .map(|n| n.to_lowercase().contains(&query))
+                        .unwrap_or(false);
+                    let addr_match = v.address.to_lowercase().contains(&query);
+                    if !name_match && !addr_match {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect();
+
+        // Sort
+        result.sort_by(|a, b| {
+            let cmp = match self.validator_sort {
+                ValidatorSortField::Name => {
+                    let a_name = a.name.as_deref().unwrap_or("");
+                    let b_name = b.name.as_deref().unwrap_or("");
+                    a_name.cmp(b_name)
+                }
+                ValidatorSortField::Address => a.address.cmp(&b.address),
+                ValidatorSortField::Commission => a
+                    .commission
+                    .partial_cmp(&b.commission)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+                ValidatorSortField::TotalStake => a.total_stake.cmp(&b.total_stake),
+                ValidatorSortField::OwnStake => a.own_stake.cmp(&b.own_stake),
+                ValidatorSortField::Points => a.points.cmp(&b.points),
+                ValidatorSortField::Nominators => a.nominator_count.cmp(&b.nominator_count),
+                ValidatorSortField::Apy => a
+                    .apy
+                    .partial_cmp(&b.apy)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+                ValidatorSortField::Blocked => a.blocked.cmp(&b.blocked),
+            };
+            if self.validator_sort_asc {
+                cmp
+            } else {
+                cmp.reverse()
+            }
+        });
+
+        result
+    }
+
+    /// Get filtered and sorted pools.
+    pub fn filtered_pools(&self) -> Vec<&DisplayPool> {
+        let mut result: Vec<_> = self
+            .pools
+            .iter()
+            .filter(|p| {
+                // Filter by search query
+                if !self.search_query.is_empty() {
+                    let query = self.search_query.to_lowercase();
+                    let name_match = p.name.to_lowercase().contains(&query);
+                    let id_match = p.id.to_string().contains(&query);
+                    if !name_match && !id_match {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect();
+
+        // Sort
+        result.sort_by(|a, b| {
+            let cmp = match self.pool_sort {
+                PoolSortField::Id => a.id.cmp(&b.id),
+                PoolSortField::Name => a.name.cmp(&b.name),
+                PoolSortField::State => format!("{:?}", a.state).cmp(&format!("{:?}", b.state)),
+                PoolSortField::Members => a.member_count.cmp(&b.member_count),
+                PoolSortField::Points => a.points.cmp(&b.points),
+                PoolSortField::Apy => {
+                    let a_apy = a.apy.unwrap_or(0.0);
+                    let b_apy = b.apy.unwrap_or(0.0);
+                    a_apy
+                        .partial_cmp(&b_apy)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                }
+            };
+            if self.pool_sort_asc {
+                cmp
+            } else {
+                cmp.reverse()
+            }
+        });
+
+        result
     }
 
     /// Move selection down in the current list.
@@ -585,6 +1062,22 @@ impl App {
                     None => 0,
                 };
                 self.nominate_table_state.select(Some(i));
+            }
+            View::Account if self.account_panel_focus == 1 => {
+                let len = self.address_book_len();
+                if len > 0 {
+                    let i = match self.address_book_state.selected() {
+                        Some(i) => {
+                            if i >= len - 1 {
+                                0
+                            } else {
+                                i + 1
+                            }
+                        }
+                        None => 0,
+                    };
+                    self.address_book_state.select(Some(i));
+                }
             }
             _ => {}
         }

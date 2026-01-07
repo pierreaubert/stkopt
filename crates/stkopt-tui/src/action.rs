@@ -1,8 +1,8 @@
 //! Actions for state updates.
 
 use stkopt_chain::{
-    AccountBalance, NominatorInfo, PoolMembership, PoolState, StakingLedger, ValidatorExposure,
-    ValidatorInfo,
+    AccountBalance, ChainInfo, NominatorInfo, PoolMembership, PoolState, StakingLedger,
+    ValidatorExposure, ValidatorInfo,
 };
 use stkopt_core::{ConnectionStatus, EraIndex, EraInfo, Network, OptimizationResult};
 use subxt::utils::AccountId32;
@@ -60,11 +60,32 @@ pub struct StakingHistoryPoint {
     pub apy: f64,
 }
 
+/// Transaction info for QR code display.
+#[derive(Debug, Clone)]
+pub struct TransactionInfo {
+    /// Signing account.
+    pub signer: String,
+    /// Call description (e.g., "Staking.nominate").
+    pub call: String,
+    /// Target validator addresses.
+    pub targets: Vec<String>,
+    /// Call data size in bytes.
+    pub call_data_size: usize,
+    /// Spec version.
+    pub spec_version: u32,
+    /// Transaction version.
+    pub tx_version: u32,
+    /// Nonce.
+    pub nonce: u64,
+}
+
 /// Actions that can update application state.
 #[derive(Debug, Clone)]
 pub enum Action {
     /// Update connection status.
     UpdateConnectionStatus(ConnectionStatus),
+    /// Set chain info (name, spec version, validation status).
+    SetChainInfo(ChainInfo),
     /// Set active era information.
     SetActiveEra(EraInfo),
     /// Set era duration in milliseconds.
@@ -92,6 +113,8 @@ pub enum Action {
     ClearAccount,
     /// Run validator optimization and get results.
     RunOptimization,
+    /// Run optimization with specific strategy (0=TopApy, 1=RandomFromTop, 2=DiversifyByStake).
+    RunOptimizationWithStrategy(usize),
     /// Set optimization results.
     SetOptimizationResult(OptimizationResult),
     /// Toggle validator selection (for manual selection).
@@ -100,8 +123,8 @@ pub enum Action {
     ClearNominations,
     /// Generate QR code for nomination transaction.
     GenerateNominationQR,
-    /// Set QR code data to display.
-    SetQRData(Option<Vec<u8>>),
+    /// Set QR code data to display (raw bytes + transaction info).
+    SetQRData(Option<Vec<u8>>, Option<TransactionInfo>),
     /// Set staking history for the watched account (replaces all).
     SetStakingHistory(Vec<StakingHistoryPoint>),
     /// Add a single staking history point (streaming).
@@ -115,6 +138,10 @@ pub enum Action {
     /// Switch network.
     #[allow(dead_code)]
     SwitchNetwork(Network),
+    /// Select an entry from the address book (by index).
+    SelectAddressBookEntry(usize),
+    /// Remove an account from the address book and purge its history.
+    RemoveAccount(String),
     /// Quit the application.
     #[allow(dead_code)]
     Quit,

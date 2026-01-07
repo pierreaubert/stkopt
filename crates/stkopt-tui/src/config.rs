@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+#[cfg(test)]
+use chrono::TimeZone;
+
 /// Application configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -59,13 +62,33 @@ impl AppConfig {
                     config
                 }
                 Err(e) => {
-                    tracing::error!("Failed to parse config file: {}", e);
+                    tracing::error!("Failed to parse config file: {} - using defaults", e);
+                    Self::backup_corrupted_config(&path);
                     Self::default()
                 }
             },
             Err(e) => {
-                tracing::error!("Failed to read config file: {}", e);
+                tracing::error!("Failed to read config file: {} - using defaults", e);
                 Self::default()
+            }
+        }
+    }
+
+    /// Backup a corrupted config file for debugging.
+    fn backup_corrupted_config(path: &std::path::PathBuf) {
+        if let Some(parent) = path.parent() {
+            let backup_path = parent.join(format!(
+                "config.backup.{}",
+                chrono::Utc::now().format("%Y%m%d_%H%M%S")
+            ));
+            if let Err(e) = fs::copy(path, &backup_path) {
+                tracing::warn!(
+                    "Failed to backup corrupted config to {:?}: {}",
+                    backup_path,
+                    e
+                );
+            } else {
+                tracing::info!("Backed up corrupted config to {:?}", backup_path);
             }
         }
     }
@@ -137,7 +160,10 @@ mod tests {
             Some("Polkadot".to_string()),
         );
         assert_eq!(config.accounts.len(), 1);
-        assert_eq!(config.accounts[0].address, "15oF4uVJwmo4TdGW7VfQxNLavjCXviqxT9S1MgbjMNHr6Sp5");
+        assert_eq!(
+            config.accounts[0].address,
+            "15oF4uVJwmo4TdGW7VfQxNLavjCXviqxT9S1MgbjMNHr6Sp5"
+        );
     }
 
     #[test]

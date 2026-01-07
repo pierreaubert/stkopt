@@ -63,10 +63,13 @@ impl PeopleChainClient {
             .await?;
 
         let Some(value) = result else {
+            tracing::trace!("No identity found for address {}", address);
             return Ok(None);
         };
 
         let decoded = value.to_value()?;
+
+        tracing::debug!("Raw identity data for {}: {:?}", address, decoded);
 
         // IdentityOf returns (Registration, Option<Username>)
         // Registration contains: { judgements, deposit, info }
@@ -74,15 +77,36 @@ impl PeopleChainClient {
 
         // Try to get the registration (first element of tuple or direct struct)
         let registration = decoded.at(0).unwrap_or(&decoded);
-        let info = registration.at("info");
+        tracing::debug!("Registration for {}: {:?}", address, registration);
 
-        let display_name = info
-            .and_then(|i| i.at("display"))
-            .and_then(extract_data_field);
+        // Try multiple approaches to find the info field
+        let info = registration
+            .at("info")
+            .or_else(|| registration.at(2)) // info might be at index 2 after judgements and deposit
+            .or_else(|| decoded.at("info")); // Direct access on decoded
+
+        tracing::debug!("Info field for {}: {:?}", address, info);
+
+        // Try multiple approaches to find the display name
+        let display_field = info.and_then(|i| {
+            // Try named field first
+            let field = i.at("display").or_else(|| i.at(0));
+            tracing::debug!("Display field for {}: {:?}", address, field);
+            field
+        });
+
+        let display_name = display_field.and_then(extract_data_field);
+
+        if display_name.is_some() {
+            tracing::info!("Found identity for {}: {:?}", address, display_name);
+        } else {
+            tracing::debug!("No display name found for {}", address);
+        }
 
         // Check judgements for verification
         let verified = registration
             .at("judgements")
+            .or_else(|| registration.at(0))
             .map(has_positive_judgement)
             .unwrap_or(false);
 
@@ -191,10 +215,7 @@ impl PeopleChainClient {
     }
 
     /// Get identity with a timeout to prevent hanging.
-    async fn get_identity_with_timeout(
-        &self,
-        address: &AccountId32,
-    ) -> Option<ValidatorIdentity> {
+    async fn get_identity_with_timeout(&self, address: &AccountId32) -> Option<ValidatorIdentity> {
         match tokio::time::timeout(
             std::time::Duration::from_secs(5),
             self.get_identity(address),
@@ -216,49 +237,86 @@ impl PeopleChainClient {
 
 /// Extract string from a Data field (Raw, BlakeTwo256, etc).
 fn extract_data_field(value: &Value<u32>) -> Option<String> {
-    // Data enum variants: None, Raw0-32, BlakeTwo256, Sha256, Keccak256, ShaThree256
+    // Data enum variants: None, Raw0-32, BlakeTwo256, Keccak256, ShaThree256
     // Most common is Raw which contains bytes
 
-    // Try Raw variants first (most common)
+    tracing::trace!("Extracting data field from: {:?}", value);
+
+    // Check for None variant first
+    if value.at("None").is_some() {
+        tracing::trace!("Data field is None");
+        return None;
+    }
+
+    // Try Raw variants first (most common) - these are Raw0 through Raw32
     for variant_name in [
         "Raw0", "Raw1", "Raw2", "Raw3", "Raw4", "Raw5", "Raw6", "Raw7", "Raw8", "Raw9", "Raw10",
         "Raw11", "Raw12", "Raw13", "Raw14", "Raw15", "Raw16", "Raw17", "Raw18", "Raw19", "Raw20",
         "Raw21", "Raw22", "Raw23", "Raw24", "Raw25", "Raw26", "Raw27", "Raw28", "Raw29", "Raw30",
         "Raw31", "Raw32",
     ] {
-        if let Some(inner) = value.at(variant_name) {
-            return extract_bytes_as_string(inner);
+        if let Some(inner) = value.at(variant_name)
+            && let Some(s) = extract_bytes_as_string(inner)
+            && !s.is_empty()
+        {
+            tracing::trace!("Found {}, extracted: {}", variant_name, s);
+            return Some(s);
         }
     }
 
     // Try generic Raw variant
-    if let Some(inner) = value.at("Raw") {
-        return extract_bytes_as_string(inner);
+    if let Some(inner) = value.at("Raw")
+        && let Some(s) = extract_bytes_as_string(inner)
+        && !s.is_empty()
+    {
+        tracing::trace!("Found generic Raw variant");
+        return Some(s);
     }
 
-    // Check for None variant
-    if value.at("None").is_some() {
-        return None;
+    // Try to extract using index 0 (unnamed variant tuple)
+    if let Some(inner) = value.at(0)
+        && let Some(s) = extract_bytes_as_string(inner)
+        && !s.is_empty()
+    {
+        tracing::trace!("Extracted from index 0");
+        return Some(s);
     }
 
-    // Try to extract directly if it's already bytes
-    extract_bytes_as_string(value)
+    // Last resort: try to extract bytes directly from value itself
+    if let Some(s) = extract_bytes_as_string(value)
+        && !s.is_empty()
+    {
+        return Some(s);
+    }
+
+    None
 }
 
 /// Extract bytes from a value and convert to UTF-8 string.
 fn extract_bytes_as_string(value: &Value<u32>) -> Option<String> {
-    let mut bytes = Vec::new();
+    // The value might be a Composite containing primitives, or directly a primitive
+    // We need to handle both cases
 
-    // Try iterating indices
-    for i in 0..256 {
-        if let Some(byte_val) = value.at(i) {
-            if let Some(byte) = byte_val.as_u128() {
-                bytes.push(byte as u8);
+    fn extract_bytes_recursive(val: &Value<u32>, bytes: &mut Vec<u8>) {
+        // Check if this is a composite (tuple/struct)
+        // scale_value::Value doesn't expose is_composite directly, but we can try accessing elements
+        for i in 0..256 {
+            if let Some(elem) = val.at(i) {
+                // Try to get as u128
+                if let Some(b) = elem.as_u128() {
+                    bytes.push(b as u8);
+                } else {
+                    // Recursively extract from nested composite
+                    extract_bytes_recursive(elem, bytes);
+                }
+            } else {
+                break;
             }
-        } else {
-            break;
         }
     }
+
+    let mut bytes = Vec::new();
+    extract_bytes_recursive(value, &mut bytes);
 
     if bytes.is_empty() {
         return None;
@@ -270,7 +328,12 @@ fn extract_bytes_as_string(value: &Value<u32>) -> Option<String> {
         return None;
     }
 
-    Some(String::from_utf8_lossy(&filtered).to_string())
+    let result = String::from_utf8_lossy(&filtered).to_string();
+    // Only log if we found a non-empty string
+    if !result.trim().is_empty() {
+        tracing::trace!("Extracted string: '{}'", result);
+    }
+    Some(result)
 }
 
 /// Extract account ID bytes from a Value.

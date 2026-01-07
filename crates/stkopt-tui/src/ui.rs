@@ -1,18 +1,32 @@
 //! UI rendering.
 
-use crate::app::{App, InputMode, View};
+use crate::app::{App, InputMode, PoolSortField, ValidatorSortField, View};
 use crate::log_buffer::LogLevel;
 use crate::theme::Palette;
 use qrcode::QrCode;
 use ratatui::{
+    Frame,
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Modifier, Style, Stylize},
     text::{Line, Span},
     widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Tabs},
-    Frame,
 };
 use stkopt_chain::PoolState;
 use stkopt_core::ConnectionStatus;
+
+/// Safely truncate a string to a maximum number of characters (not bytes).
+/// Handles multi-byte Unicode characters correctly.
+fn truncate_str(s: &str, max_chars: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count <= max_chars {
+        s.to_string()
+    } else if max_chars <= 3 {
+        s.chars().take(max_chars).collect()
+    } else {
+        let truncated: String = s.chars().take(max_chars - 3).collect();
+        format!("{}...", truncated)
+    }
+}
 
 /// Render the entire UI.
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -38,6 +52,16 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if app.showing_help {
         render_help_modal(frame, app);
     }
+
+    // Render sort menu overlay
+    if app.input_mode == InputMode::SortMenu {
+        render_sort_menu(frame, app);
+    }
+
+    // Render strategy menu overlay
+    if app.input_mode == InputMode::StrategyMenu {
+        render_strategy_menu(frame, app);
+    }
 }
 
 /// Render the header with network info and era status.
@@ -51,12 +75,30 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         None => "Era --".to_string(),
     };
 
-    let header_text = Line::from(vec![
+    // Build chain info display
+    let chain_display = if let Some(info) = &app.chain_info {
+        let style = if info.validated {
+            Style::default().fg(p.success)
+        } else {
+            Style::default().fg(p.warning)
+        };
+        vec![
+            Span::raw("  │  "),
+            Span::styled(format!("{} v{}", info.spec_name, info.spec_version), style),
+        ]
+    } else {
+        vec![]
+    };
+
+    let mut spans = vec![
         Span::styled(format!("[{}] ", symbol), network_style),
         Span::raw(app.network.to_string()),
         Span::raw("  │  "),
         Span::raw(era_info),
-    ]);
+    ];
+    spans.extend(chain_display);
+
+    let header_text = Line::from(spans);
 
     let header = Paragraph::new(header_text)
         .block(
@@ -73,13 +115,14 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
 /// Render the tab bar.
 fn render_tabs(frame: &mut Frame, app: &App, area: Rect) {
     let p = &app.palette;
-    let titles: Vec<Line> = View::all()
-        .iter()
-        .map(|v| Line::from(v.label()))
-        .collect();
+    let titles: Vec<Line> = View::all().iter().map(|v| Line::from(v.label())).collect();
 
     let tabs = Tabs::new(titles)
-        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(p.border)))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(p.border)),
+        )
         .select(app.current_view.index())
         .style(Style::default().fg(p.tab_inactive))
         .highlight_style(
@@ -99,7 +142,7 @@ fn render_content(frame: &mut Frame, app: &mut App, area: Rect) {
         View::Nominate => render_nominate(frame, app, area),
         View::Account => render_account(frame, app, area),
         View::History => render_history(frame, app, area),
-    };
+    }
 }
 
 /// Format balance with proper decimals.
@@ -121,12 +164,31 @@ fn render_validators(frame: &mut Frame, app: &mut App, area: Rect) {
     let p = &app.palette;
     let decimals = app.network.token_decimals();
 
+    // Split area if searching
+    let (search_area, table_area) = if app.input_mode == InputMode::Searching {
+        let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(area);
+        (Some(chunks[0]), chunks[1])
+    } else {
+        (None, area)
+    };
+
+    // Render search bar if in search mode
+    if let Some(search_area) = search_area {
+        let search_text = format!("/{}", app.search_query);
+        let search = Paragraph::new(search_text)
+            .style(Style::default().fg(p.highlight))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(p.primary))
+                    .title(" Search (Enter to confirm, Esc to cancel) "),
+            );
+        frame.render_widget(search, search_area);
+    }
+
     if app.validators.is_empty() {
         let loading_text = if app.loading_validators {
-            format!(
-                "Loading validators... {:.0}%",
-                app.loading_progress * 100.0
-            )
+            format!("Loading validators... {:.0}%", app.loading_progress * 100.0)
         } else if app.connection_status == ConnectionStatus::Connected {
             "Fetching validators...".to_string()
         } else {
@@ -135,42 +197,48 @@ fn render_validators(frame: &mut Frame, app: &mut App, area: Rect) {
 
         let text = vec![
             Line::from(""),
-            Line::from(Span::styled(format!("  {}", loading_text), Style::default().fg(p.fg_dim))),
+            Line::from(Span::styled(
+                format!("  {}", loading_text),
+                Style::default().fg(p.fg_dim),
+            )),
         ];
 
         let paragraph = Paragraph::new(text).block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(p.border))
-                .title(" Validators "),
+                .title(" Validators | /:Search  s:Sort  b:Blocked  ?:Help "),
         );
-        frame.render_widget(paragraph, area);
+        frame.render_widget(paragraph, table_area);
         return;
     }
 
+    // Get filtered and sorted validators
+    let filtered = app.filtered_validators();
+    let filtered_count = filtered.len();
+
     // Determine if we have space for full addresses (wide screen)
-    let is_wide = area.width >= 120;
+    let is_wide = table_area.width >= 120;
     let addr_width: u16 = if is_wide { 48 } else { 15 };
 
-    // Build table rows
-    let rows: Vec<Row> = app
-        .validators
+    // Build table rows from filtered validators
+    let rows: Vec<Row> = filtered
         .iter()
         .map(|v| {
             let addr_display = if is_wide {
                 v.address.clone()
             } else {
-                format!("{}...{}", &v.address[..6], &v.address[v.address.len() - 6..])
+                format!(
+                    "{}...{}",
+                    &v.address[..6],
+                    &v.address[v.address.len() - 6..]
+                )
             };
-            let name_display = v.name.as_deref().unwrap_or("-").to_string();
-            let name_display = if name_display.len() > 20 {
-                format!("{}...", &name_display[..17])
-            } else {
-                name_display
-            };
+            let name_display = truncate_str(v.name.as_deref().unwrap_or("-"), 20);
             let commission_str = format!("{:.1}%", v.commission * 100.0);
             let stake_str = format_balance(v.total_stake, decimals);
             let own_str = format_balance(v.own_stake, decimals);
+            let points_str = v.points.to_string();
             let apy_str = format!("{:.2}%", v.apy * 100.0);
             let blocked_str = if v.blocked { "Yes" } else { "No" };
 
@@ -180,6 +248,7 @@ fn render_validators(frame: &mut Frame, app: &mut App, area: Rect) {
                 Cell::from(commission_str),
                 Cell::from(stake_str),
                 Cell::from(own_str),
+                Cell::from(points_str),
                 Cell::from(v.nominator_count.to_string()),
                 Cell::from(apy_str),
                 Cell::from(blocked_str),
@@ -187,28 +256,88 @@ fn render_validators(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
+    // Build header with sort indicator
+    let sort_indicator = |field: ValidatorSortField| {
+        if app.validator_sort == field {
+            if app.validator_sort_asc {
+                " ▲"
+            } else {
+                " ▼"
+            }
+        } else {
+            ""
+        }
+    };
+
     let header = Row::new(vec![
-        Cell::from("Name").style(Style::default().bold()),
-        Cell::from("Address").style(Style::default().bold()),
-        Cell::from("Comm").style(Style::default().bold()),
-        Cell::from("Total Stake").style(Style::default().bold()),
-        Cell::from("Own Stake").style(Style::default().bold()),
-        Cell::from("Noms").style(Style::default().bold()),
-        Cell::from("APY").style(Style::default().bold()),
-        Cell::from("Blocked").style(Style::default().bold()),
+        Cell::from(format!("Name{}", sort_indicator(ValidatorSortField::Name)))
+            .style(Style::default().bold()),
+        Cell::from(format!(
+            "Address{}",
+            sort_indicator(ValidatorSortField::Address)
+        ))
+        .style(Style::default().bold()),
+        Cell::from(format!(
+            "Comm{}",
+            sort_indicator(ValidatorSortField::Commission)
+        ))
+        .style(Style::default().bold()),
+        Cell::from(format!(
+            "Total Stake{}",
+            sort_indicator(ValidatorSortField::TotalStake)
+        ))
+        .style(Style::default().bold()),
+        Cell::from(format!(
+            "Own Stake{}",
+            sort_indicator(ValidatorSortField::OwnStake)
+        ))
+        .style(Style::default().bold()),
+        Cell::from(format!(
+            "Points{}",
+            sort_indicator(ValidatorSortField::Points)
+        ))
+        .style(Style::default().bold()),
+        Cell::from(format!(
+            "Noms{}",
+            sort_indicator(ValidatorSortField::Nominators)
+        ))
+        .style(Style::default().bold()),
+        Cell::from(format!("APY{}", sort_indicator(ValidatorSortField::Apy)))
+            .style(Style::default().bold()),
+        Cell::from(format!(
+            "Blocked{}",
+            sort_indicator(ValidatorSortField::Blocked)
+        ))
+        .style(Style::default().bold()),
     ])
     .style(Style::default().fg(p.highlight));
 
     let widths = [
-        Constraint::Length(20),
+        Constraint::Length(22),
         Constraint::Length(addr_width),
         Constraint::Length(7),
+        Constraint::Length(14),
         Constraint::Length(12),
-        Constraint::Length(12),
-        Constraint::Length(6),
+        Constraint::Length(10),
         Constraint::Length(8),
-        Constraint::Length(8),
+        Constraint::Length(10),
+        Constraint::Length(10),
     ];
+
+    // Build title with filter info
+    let mut title_parts = vec![format!(" Validators ({}", filtered_count)];
+    if filtered_count != app.validators.len() {
+        title_parts.push(format!("/{}", app.validators.len()));
+    }
+    title_parts.push(") ".to_string());
+    if !app.search_query.is_empty() {
+        title_parts.push(format!("[filter: {}] ", app.search_query));
+    }
+    if !app.show_blocked {
+        title_parts.push("[hiding blocked] ".to_string());
+    }
+    title_parts.push("| /:Search  s:Sort  b:Blocked  S:Reverse  ?:Help ".to_string());
+    let title = title_parts.join("");
 
     let table = Table::new(rows, widths)
         .header(header)
@@ -216,18 +345,44 @@ fn render_validators(frame: &mut Frame, app: &mut App, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(p.border))
-                .title(format!(" Validators ({}) ", app.validators.len())),
+                .title(title),
         )
-        .row_highlight_style(Style::default().fg(p.selection).add_modifier(Modifier::REVERSED))
+        .row_highlight_style(
+            Style::default()
+                .fg(p.selection)
+                .add_modifier(Modifier::REVERSED),
+        )
         .highlight_symbol(">> ");
 
-    frame.render_stateful_widget(table, area, &mut app.validators_table_state);
+    frame.render_stateful_widget(table, table_area, &mut app.validators_table_state);
 }
 
 /// Render the nomination pools view with table.
 fn render_pools(frame: &mut Frame, app: &mut App, area: Rect) {
     let pal = &app.palette;
     let decimals = app.network.token_decimals();
+
+    // Split area if searching
+    let (search_area, table_area) = if app.input_mode == InputMode::Searching {
+        let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(area);
+        (Some(chunks[0]), chunks[1])
+    } else {
+        (None, area)
+    };
+
+    // Render search bar if in search mode
+    if let Some(search_area) = search_area {
+        let search_text = format!("/{}", app.search_query);
+        let search = Paragraph::new(search_text)
+            .style(Style::default().fg(pal.highlight))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(pal.primary))
+                    .title(" Search (Enter to confirm, Esc to cancel) "),
+            );
+        frame.render_widget(search, search_area);
+    }
 
     if app.pools.is_empty() {
         let loading_text = if app.connection_status == ConnectionStatus::Connected {
@@ -238,22 +393,28 @@ fn render_pools(frame: &mut Frame, app: &mut App, area: Rect) {
 
         let text = vec![
             Line::from(""),
-            Line::from(Span::styled(format!("  {}", loading_text), Style::default().fg(pal.fg_dim))),
+            Line::from(Span::styled(
+                format!("  {}", loading_text),
+                Style::default().fg(pal.fg_dim),
+            )),
         ];
 
         let paragraph = Paragraph::new(text).block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(pal.border))
-                .title(" Nomination Pools "),
+                .title(" Nomination Pools | /:Search  s:Sort  ?:Help "),
         );
-        frame.render_widget(paragraph, area);
+        frame.render_widget(paragraph, table_area);
         return;
     }
 
-    // Build table rows
-    let rows: Vec<Row> = app
-        .pools
+    // Get filtered and sorted pools
+    let filtered = app.filtered_pools();
+    let filtered_count = filtered.len();
+
+    // Build table rows from filtered pools
+    let rows: Vec<Row> = filtered
         .iter()
         .map(|p| {
             let state_str = match p.state {
@@ -269,10 +430,8 @@ fn render_pools(frame: &mut Frame, app: &mut App, area: Rect) {
             let points_str = format_balance(p.points, decimals);
             let name_display = if p.name.is_empty() {
                 format!("Pool #{}", p.id)
-            } else if p.name.len() > 30 {
-                format!("{}...", &p.name[..27])
             } else {
-                p.name.clone()
+                truncate_str(&p.name, 30)
             };
             let apy_str = match p.apy {
                 Some(apy) => format!("{:.2}%", apy * 100.0),
@@ -290,24 +449,51 @@ fn render_pools(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
+    // Build header with sort indicator
+    let sort_indicator = |field: PoolSortField| {
+        if app.pool_sort == field {
+            if app.pool_sort_asc { " ▲" } else { " ▼" }
+        } else {
+            ""
+        }
+    };
+
     let header = Row::new(vec![
-        Cell::from("ID").style(Style::default().bold()),
-        Cell::from("Name").style(Style::default().bold()),
-        Cell::from("State").style(Style::default().bold()),
-        Cell::from("Members").style(Style::default().bold()),
-        Cell::from("Points").style(Style::default().bold()),
-        Cell::from("APY").style(Style::default().bold()),
+        Cell::from(format!("ID{}", sort_indicator(PoolSortField::Id)))
+            .style(Style::default().bold()),
+        Cell::from(format!("Name{}", sort_indicator(PoolSortField::Name)))
+            .style(Style::default().bold()),
+        Cell::from(format!("State{}", sort_indicator(PoolSortField::State)))
+            .style(Style::default().bold()),
+        Cell::from(format!("Members{}", sort_indicator(PoolSortField::Members)))
+            .style(Style::default().bold()),
+        Cell::from(format!("Points{}", sort_indicator(PoolSortField::Points)))
+            .style(Style::default().bold()),
+        Cell::from(format!("APY{}", sort_indicator(PoolSortField::Apy)))
+            .style(Style::default().bold()),
     ])
     .style(Style::default().fg(pal.highlight));
 
     let widths = [
-        Constraint::Length(6),
-        Constraint::Min(25),
-        Constraint::Length(12),
-        Constraint::Length(10),
-        Constraint::Length(14),
         Constraint::Length(8),
+        Constraint::Min(25),
+        Constraint::Length(14),
+        Constraint::Length(12),
+        Constraint::Length(16),
+        Constraint::Length(10),
     ];
+
+    // Build title with filter info
+    let mut title_parts = vec![format!(" Nomination Pools ({}", filtered_count)];
+    if filtered_count != app.pools.len() {
+        title_parts.push(format!("/{}", app.pools.len()));
+    }
+    title_parts.push(") ".to_string());
+    if !app.search_query.is_empty() {
+        title_parts.push(format!("[filter: {}] ", app.search_query));
+    }
+    title_parts.push("| /:Search  s:Sort  S:Reverse  ?:Help ".to_string());
+    let title = title_parts.join("");
 
     let table = Table::new(rows, widths)
         .header(header)
@@ -315,12 +501,16 @@ fn render_pools(frame: &mut Frame, app: &mut App, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(pal.border))
-                .title(format!(" Nomination Pools ({}) ", app.pools.len())),
+                .title(title),
         )
-        .row_highlight_style(Style::default().fg(pal.selection).add_modifier(Modifier::REVERSED))
+        .row_highlight_style(
+            Style::default()
+                .fg(pal.selection)
+                .add_modifier(Modifier::REVERSED),
+        )
         .highlight_symbol(">> ");
 
-    frame.render_stateful_widget(table, area, &mut app.pools_table_state);
+    frame.render_stateful_widget(table, table_area, &mut app.pools_table_state);
 }
 
 /// Render the nomination optimizer view.
@@ -338,7 +528,10 @@ fn render_nominate(frame: &mut Frame, app: &mut App, area: Rect) {
     // Show optimization result or manual selection info
     if let Some(result) = &app.optimization_result {
         info_lines.push(Line::from(vec![
-            Span::styled("  Optimized Selection ", Style::default().fg(pal.success).bold()),
+            Span::styled(
+                "  Optimized Selection ",
+                Style::default().fg(pal.success).bold(),
+            ),
             Span::raw(format!("({} validators)", result.selected.len())),
         ]));
         info_lines.push(Line::from(format!(
@@ -349,7 +542,10 @@ fn render_nominate(frame: &mut Frame, app: &mut App, area: Rect) {
         )));
     } else {
         info_lines.push(Line::from(vec![
-            Span::styled("  Manual Selection ", Style::default().fg(pal.warning).bold()),
+            Span::styled(
+                "  Manual Selection ",
+                Style::default().fg(pal.warning).bold(),
+            ),
             Span::raw(format!("({}/16 validators)", app.selected_validators.len())),
         ]));
     }
@@ -359,6 +555,8 @@ fn render_nominate(frame: &mut Frame, app: &mut App, area: Rect) {
         Span::raw("  "),
         Span::styled("o", Style::default().fg(pal.primary).bold()),
         Span::raw(": Optimize  "),
+        Span::styled("t", Style::default().fg(pal.primary).bold()),
+        Span::raw(": Strategy  "),
         Span::styled("Space", Style::default().fg(pal.primary).bold()),
         Span::raw(": Toggle  "),
         Span::styled("c", Style::default().fg(pal.primary).bold()),
@@ -371,7 +569,7 @@ fn render_nominate(frame: &mut Frame, app: &mut App, area: Rect) {
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(pal.border))
-            .title(" Nomination Optimizer "),
+            .title(" Nomination Optimizer | Space:Toggle  o:Optimize  t:Strategy  g:QR  c:Clear "),
     );
     frame.render_widget(info_panel, chunks[0]);
 
@@ -379,7 +577,12 @@ fn render_nominate(frame: &mut Frame, app: &mut App, area: Rect) {
     if app.validators.is_empty() {
         let loading = Paragraph::new("  Loading validators...")
             .style(Style::default().fg(pal.fg_dim))
-            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(pal.border)).title(" Select Validators "));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(pal.border))
+                    .title(" Select Validators "),
+            );
         frame.render_widget(loading, chunks[1]);
         return;
     }
@@ -405,14 +608,13 @@ fn render_nominate(frame: &mut Frame, app: &mut App, area: Rect) {
             let addr_display = if is_wide {
                 v.address.clone()
             } else {
-                format!("{}...{}", &v.address[..6], &v.address[v.address.len() - 6..])
+                format!(
+                    "{}...{}",
+                    &v.address[..6],
+                    &v.address[v.address.len() - 6..]
+                )
             };
-            let name_display = v.name.as_deref().unwrap_or("-").to_string();
-            let name_display = if name_display.len() > 16 {
-                format!("{}...", &name_display[..13])
-            } else {
-                name_display
-            };
+            let name_display = truncate_str(v.name.as_deref().unwrap_or("-"), 16);
             let commission_str = format!("{:.1}%", v.commission * 100.0);
             let stake_str = format_balance(v.total_stake, decimals);
             let apy_str = format!("{:.2}%", v.apy * 100.0);
@@ -462,42 +664,62 @@ fn render_nominate(frame: &mut Frame, app: &mut App, area: Rect) {
                     app.selected_validators.len()
                 )),
         )
-        .row_highlight_style(Style::default().fg(pal.selection).add_modifier(Modifier::REVERSED))
+        .row_highlight_style(
+            Style::default()
+                .fg(pal.selection)
+                .add_modifier(Modifier::REVERSED),
+        )
         .highlight_symbol(">> ");
 
     frame.render_stateful_widget(table, chunks[1], &mut app.nominate_table_state);
 }
 
 /// Render the account status view.
-fn render_account(frame: &mut Frame, app: &App, area: Rect) {
+fn render_account(frame: &mut Frame, app: &mut App, area: Rect) {
     let decimals = app.network.token_decimals();
     let symbol = app.network.token_symbol();
-
-    // Split area for input (if in input mode) and content
-    let chunks = if app.input_mode == InputMode::EnteringAccount {
-        Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(area)
-    } else {
-        Layout::vertical([Constraint::Min(0)]).split(area)
-    };
-
     let pal = &app.palette;
 
-    let content_area = if app.input_mode == InputMode::EnteringAccount {
+    // Layout:
+    // Top: Input (if entering)
+    // Main: Split horizontally (Left: Info, Right: Address Book)
+
+    let main_area = if app.input_mode == InputMode::EnteringAccount {
+        let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(area);
         // Render input box
         let input = Paragraph::new(app.account_input.as_str())
             .style(Style::default().fg(pal.highlight))
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(pal.border))
+                    .border_style(Style::default().fg(pal.primary))
                     .title(" Enter SS58 Address (Enter to confirm, Esc to cancel) "),
             );
         frame.render_widget(input, chunks[0]);
         chunks[1]
     } else {
-        chunks[0]
+        area
     };
 
+    let chunks =
+        Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).split(main_area);
+
+    let left_area = chunks[0];
+    let right_area = chunks[1];
+
+    // Determine focus colors
+    let left_border = if app.account_panel_focus == 0 {
+        pal.primary
+    } else {
+        pal.border
+    };
+    let right_border = if app.account_panel_focus == 1 {
+        pal.primary
+    } else {
+        pal.border
+    };
+
+    // --- Left Panel: Account Status ---
     let mut lines = Vec::new();
     lines.push(Line::from(""));
 
@@ -517,7 +739,10 @@ fn render_account(frame: &mut Frame, app: &App, area: Rect) {
                 Span::raw(account.to_string()),
             ]));
             lines.push(Line::from(""));
-            lines.push(Line::from("  Loading account data..."));
+            lines.push(Line::from(Span::styled(
+                "  Loading account data...",
+                Style::default().fg(pal.warning),
+            )));
         }
         (Some(_), Some(status)) => {
             // Address
@@ -532,28 +757,48 @@ fn render_account(frame: &mut Frame, app: &App, area: Rect) {
                 "  Balances",
                 Style::default().fg(pal.primary).bold(),
             )));
+
+            // Calculate detailed split
+            let free = status.balance.free;
+            let reserved = status.balance.reserved;
+            let frozen = status.balance.frozen;
+            let total = free + reserved;
+            // Transferable is usually free - frozen (simplified)
+            let transferable = free.saturating_sub(frozen);
+            let bonded = if let Some(l) = &status.staking_ledger {
+                l.active
+            } else {
+                0
+            };
+
             lines.push(Line::from(vec![
-                Span::raw("    Free:     "),
+                Span::raw("    Total:        "),
                 Span::styled(
-                    format!("{} {}", format_balance(status.balance.free, decimals), symbol),
+                    format!("{} {}", format_balance(total, decimals), symbol),
+                    Style::default().bold(),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::raw("    Transferable: "),
+                Span::styled(
+                    format!("{} {}", format_balance(transferable, decimals), symbol),
                     Style::default().fg(pal.success),
                 ),
             ]));
             lines.push(Line::from(vec![
-                Span::raw("    Reserved: "),
+                Span::raw("    Locked:       "),
                 Span::raw(format!(
                     "{} {}",
-                    format_balance(status.balance.reserved, decimals),
+                    format_balance(frozen.max(reserved), decimals),
                     symbol
                 )),
             ]));
             lines.push(Line::from(vec![
-                Span::raw("    Frozen:   "),
-                Span::raw(format!(
-                    "{} {}",
-                    format_balance(status.balance.frozen, decimals),
-                    symbol
-                )),
+                Span::raw("    Bonded:       "),
+                Span::styled(
+                    format!("{} {}", format_balance(bonded, decimals), symbol),
+                    Style::default().fg(pal.accent),
+                ),
             ]));
             lines.push(Line::from(""));
 
@@ -563,23 +808,6 @@ fn render_account(frame: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(pal.primary).bold(),
             )));
             if let Some(ledger) = &status.staking_ledger {
-                lines.push(Line::from(vec![
-                    Span::raw("    Bonded: "),
-                    Span::styled(
-                        format!("{} {}", format_balance(ledger.active, decimals), symbol),
-                        Style::default().fg(pal.highlight),
-                    ),
-                ]));
-                if ledger.total > ledger.active {
-                    lines.push(Line::from(vec![
-                        Span::raw("    Total:  "),
-                        Span::raw(format!(
-                            "{} {}",
-                            format_balance(ledger.total, decimals),
-                            symbol
-                        )),
-                    ]));
-                }
                 if !ledger.unlocking.is_empty() {
                     lines.push(Line::from(vec![
                         Span::raw("    Unlocking: "),
@@ -596,65 +824,43 @@ fn render_account(frame: &mut Frame, app: &App, area: Rect) {
                             chunk.era
                         )));
                     }
+                } else {
+                    lines.push(Line::from("    No unlocking chunks"));
                 }
             } else {
                 lines.push(Line::from("    Not staking directly"));
             }
             lines.push(Line::from(""));
 
-            // Nominations section
+            // Nominations
             lines.push(Line::from(Span::styled(
                 "  Nominations",
                 Style::default().fg(pal.primary).bold(),
             )));
             if let Some(nominations) = &status.nominations {
                 lines.push(Line::from(format!(
-                    "    {} validators nominated (era {})",
+                    "    {} validators (era {})",
                     nominations.targets.len(),
                     nominations.submitted_in
                 )));
-                for (i, target) in nominations.targets.iter().take(5).enumerate() {
-                    let addr_short = format!(
-                        "{}...{}",
-                        &target.to_string()[..8],
-                        &target.to_string()[target.to_string().len() - 8..]
-                    );
-                    lines.push(Line::from(format!("    {}. {}", i + 1, addr_short)));
-                }
-                if nominations.targets.len() > 5 {
-                    lines.push(Line::from(format!(
-                        "    ... and {} more",
-                        nominations.targets.len() - 5
-                    )));
-                }
             } else {
                 lines.push(Line::from("    No nominations"));
             }
-            lines.push(Line::from(""));
 
-            // Pool membership section
+            // Pool
             lines.push(Line::from(Span::styled(
                 "  Nomination Pool",
                 Style::default().fg(pal.primary).bold(),
             )));
             if let Some(membership) = &status.pool_membership {
-                lines.push(Line::from(vec![
-                    Span::raw("    Pool ID: "),
-                    Span::styled(
-                        membership.pool_id.to_string(),
-                        Style::default().fg(pal.highlight),
-                    ),
-                ]));
+                lines.push(Line::from(format!(
+                    "    Member of Pool {}",
+                    membership.pool_id
+                )));
                 lines.push(Line::from(format!(
                     "    Points: {}",
                     format_balance(membership.points, decimals)
                 )));
-                if !membership.unbonding_eras.is_empty() {
-                    lines.push(Line::from(format!(
-                        "    Unbonding: {} eras",
-                        membership.unbonding_eras.len()
-                    )));
-                }
             } else {
                 lines.push(Line::from("    Not a pool member"));
             }
@@ -663,20 +869,85 @@ fn render_account(frame: &mut Frame, app: &App, area: Rect) {
             lines.push(Line::from(vec![
                 Span::raw("  Press "),
                 Span::styled("c", Style::default().fg(pal.highlight).bold()),
-                Span::raw(" to clear account, "),
+                Span::raw(" to clear, "),
                 Span::styled("a", Style::default().fg(pal.highlight).bold()),
                 Span::raw(" to change"),
             ]));
         }
     }
 
-    let paragraph = Paragraph::new(lines).block(
+    // Build title with focus hint
+    let status_title = if app.account_panel_focus == 0 {
+        " Account Status [←→:Switch Panel] | a:Change  c:Clear "
+    } else {
+        " Account Status | a:Change  c:Clear "
+    };
+
+    let status_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(left_border))
+        .title(status_title);
+
+    let status_para = Paragraph::new(lines).block(status_block);
+    frame.render_widget(status_para, left_area);
+
+    // --- Right Panel: Address Book ---
+    // Hardcoded list for now
+    let known_addresses: Vec<(&str, &str)> = vec![
+        (
+            "Polkadot Treasury",
+            "13UVJyLnbVp9RBZYFwCNuGnK87JYJ2nb7jMwaVe4vQ2UNCzN",
+        ),
+        (
+            "Polkadot Fellowship",
+            "16SpacegeUTft9v3ts27CEC3tJaxgvE4uZeCctThFH3Vb24p",
+        ),
+        (
+            "Snowbridge",
+            "13cKp89Nt7t1hZVWnqhKW9LY7Udhxk2BmLwKi3snVgUAjZGE",
+        ),
+    ];
+
+    let mut address_rows = Vec::new();
+    // Add user account
+    if let Some(account) = &app.watched_account {
+        address_rows.push(Row::new(vec![
+            Cell::from("My Account").style(Style::default().bold().fg(pal.success)),
+            Cell::from(account.to_string()),
+        ]));
+    }
+
+    // Add known addresses
+    for (name, addr) in &known_addresses {
+        address_rows.push(Row::new(vec![Cell::from(*name), Cell::from(*addr)]));
+    }
+
+    // Build title with focus hint
+    let address_title = if app.account_panel_focus == 1 {
+        " Addresses [←→:Switch Panel  Enter:Select] | ↑↓:Navigate "
+    } else {
+        " Addresses "
+    };
+
+    let address_table = Table::new(
+        address_rows,
+        [Constraint::Percentage(30), Constraint::Percentage(70)],
+    )
+    .header(Row::new(vec!["Name", "Address"]).style(Style::default().fg(pal.muted)))
+    .block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(pal.border))
-            .title(" Account Status "),
-    );
-    frame.render_widget(paragraph, content_area);
+            .border_style(Style::default().fg(right_border))
+            .title(address_title),
+    )
+    .row_highlight_style(
+        Style::default()
+            .fg(pal.selection)
+            .add_modifier(Modifier::REVERSED),
+    )
+    .highlight_symbol(">> ");
+
+    frame.render_stateful_widget(address_table, right_area, &mut app.address_book_state);
 }
 
 /// Render the staking history view with bar chart and table.
@@ -741,7 +1012,12 @@ fn render_history(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     let title_para = Paragraph::new(title_lines)
-        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(pal.border)).title(" Staking History "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(pal.border))
+                .title(" Staking History | l:Load  c:Cancel  q:Quit "),
+        )
         .alignment(Alignment::Center);
     frame.render_widget(title_para, chunks[0]);
 
@@ -755,13 +1031,23 @@ fn render_history(frame: &mut Frame, app: &App, area: Rect) {
         let paragraph = Paragraph::new(msg)
             .style(Style::default().fg(pal.muted))
             .alignment(Alignment::Center)
-            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(pal.border)).title(" Era History "));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(pal.border))
+                    .title(" Era History "),
+            );
         frame.render_widget(paragraph, chunks[1]);
     } else if app.staking_history.is_empty() && app.loading_history {
         let paragraph = Paragraph::new("Loading first data points...")
             .style(Style::default().fg(pal.warning))
             .alignment(Alignment::Center)
-            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(pal.border)).title(" Era History "));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(pal.border))
+                    .title(" Era History "),
+            );
         frame.render_widget(paragraph, chunks[1]);
     } else {
         // Split content area horizontally: bar chart on top, table below
@@ -781,7 +1067,51 @@ fn render_history(frame: &mut Frame, app: &App, area: Rect) {
     render_history_stats(frame, app, chunks[2]);
 }
 
-/// Render daily DOT rewards as a bar chart.
+/// Calculate nice Y-axis tick values.
+fn calculate_y_ticks(max_value: f64, num_ticks: usize) -> Vec<f64> {
+    if max_value <= 0.0 || num_ticks == 0 {
+        return vec![0.0];
+    }
+
+    // Find a "nice" step size
+    let raw_step = max_value / (num_ticks as f64);
+    let magnitude = 10f64.powf(raw_step.log10().floor());
+    let normalized = raw_step / magnitude;
+
+    let nice_step = if normalized <= 1.0 {
+        1.0 * magnitude
+    } else if normalized <= 2.0 {
+        2.0 * magnitude
+    } else if normalized <= 5.0 {
+        5.0 * magnitude
+    } else {
+        10.0 * magnitude
+    };
+
+    let nice_max = (max_value / nice_step).ceil() * nice_step;
+    let actual_ticks = (nice_max / nice_step) as usize + 1;
+
+    (0..actual_ticks).map(|i| i as f64 * nice_step).collect()
+}
+
+/// Calculate 7-day moving average for trend line.
+fn calculate_trend(values: &[f64], window: usize) -> Vec<f64> {
+    if values.is_empty() || window == 0 {
+        return vec![];
+    }
+
+    let mut result = Vec::with_capacity(values.len());
+    for i in 0..values.len() {
+        let start = i.saturating_sub(window / 2);
+        let end = (i + window / 2 + 1).min(values.len());
+        let slice = &values[start..end];
+        let avg = slice.iter().sum::<f64>() / slice.len() as f64;
+        result.push(avg);
+    }
+    result
+}
+
+/// Render daily DOT rewards as a bar chart with trend line.
 fn render_reward_bar_chart(frame: &mut Frame, app: &App, area: Rect) {
     let pal = &app.palette;
     let decimals = app.network.token_decimals();
@@ -790,19 +1120,24 @@ fn render_reward_bar_chart(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(pal.border))
-        .title(format!(" Daily {} Rewards ", symbol));
+        .title(format!(" Daily {} Rewards (━ 7-era trend) ", symbol));
 
     let inner_area = block.inner(area);
     frame.render_widget(block, area);
 
-    if app.staking_history.is_empty() || inner_area.height < 2 {
+    if app.staking_history.is_empty() || inner_area.height < 4 {
         return;
     }
 
-    let graph_height = inner_area.height.saturating_sub(2) as usize; // Leave room for x-axis label
-    let graph_width = inner_area.width.saturating_sub(10) as usize; // Leave room for y-axis labels
+    // Calculate dimensions with 1:2 ratio (height = width / 2)
+    let y_axis_width = 8usize; // Width for Y-axis labels
+    let available_width = inner_area.width.saturating_sub(y_axis_width as u16) as usize;
+    let max_graph_height = inner_area.height.saturating_sub(3) as usize; // Room for x-axis
+    let target_height = (available_width / 2).min(max_graph_height);
+    let graph_height = target_height.max(4);
+    let graph_width = available_width;
 
-    if graph_width < 5 || graph_height < 2 {
+    if graph_width < 10 || graph_height < 3 {
         return;
     }
 
@@ -818,55 +1153,93 @@ fn render_reward_bar_chart(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    // Y-axis starts from 0
-    let max_reward = rewards.iter().cloned().fold(0.0_f64, f64::max);
-    let range = max_reward.max(0.01);
+    // Calculate trend line (7-era moving average)
+    let trend = calculate_trend(&rewards, 7);
 
-    // Calculate how many data points per bar
-    let num_bars = graph_width.min(rewards.len());
+    // Y-axis: find nice ticks
+    let max_reward = rewards.iter().cloned().fold(0.0_f64, f64::max);
+    let y_ticks = calculate_y_ticks(max_reward, 5);
+    let y_max = *y_ticks.last().unwrap_or(&max_reward.max(0.01));
+
+    // Calculate bar width with spacing (2 chars per bar: 1 bar + 1 space)
+    let bar_spacing = 2usize;
+    let num_bars = (graph_width / bar_spacing).min(rewards.len());
     let points_per_bar = (rewards.len() as f64 / num_bars as f64).max(1.0);
 
-    // Build bars data
-    let mut bar_heights: Vec<(f64, f64)> = Vec::new(); // (normalized height, actual value)
+    // Build bars data and trend points
+    let mut bar_data: Vec<(f64, f64)> = Vec::new(); // (normalized height, actual value)
+    let mut trend_data: Vec<f64> = Vec::new();
+
     for i in 0..num_bars {
         let start_idx = (i as f64 * points_per_bar) as usize;
         let end_idx = ((i + 1) as f64 * points_per_bar) as usize;
         let slice = &rewards[start_idx.min(rewards.len())..end_idx.min(rewards.len())];
+        let trend_slice = &trend[start_idx.min(trend.len())..end_idx.min(trend.len())];
+
         if !slice.is_empty() {
             let avg = slice.iter().sum::<f64>() / slice.len() as f64;
-            let normalized = avg / range; // Normalize from 0
-            bar_heights.push((normalized, avg));
+            let normalized = (avg / y_max).min(1.0);
+            bar_data.push((normalized, avg));
+
+            if !trend_slice.is_empty() {
+                let trend_avg = trend_slice.iter().sum::<f64>() / trend_slice.len() as f64;
+                trend_data.push((trend_avg / y_max).min(1.0));
+            } else {
+                trend_data.push(normalized);
+            }
         }
     }
 
     // Build lines for the chart
     let mut lines: Vec<Line> = Vec::new();
 
+    // Only show y-axis labels at tick positions
+    let tick_rows: Vec<usize> = y_ticks
+        .iter()
+        .map(|&v| ((1.0 - v / y_max) * graph_height as f64) as usize)
+        .collect();
+
     for row in 0..graph_height {
+        // Y-axis label (only at tick positions)
         let y_pct = 1.0 - (row as f64 / graph_height as f64);
-        let y_value = y_pct * range; // Y-axis from 0 to max
-        let y_label = if y_value >= 1000.0 {
-            format!("{:>6.0}k│", y_value / 1000.0)
-        } else if y_value >= 1.0 {
-            format!("{:>7.1}│", y_value)
+        let y_value = y_pct * y_max;
+
+        let y_label = if tick_rows.contains(&row) {
+            if y_value >= 1000.0 {
+                format!("{:>5.0}k │", y_value / 1000.0)
+            } else if y_value >= 1.0 {
+                format!("{:>6.1} │", y_value)
+            } else {
+                format!("{:>6.2} │", y_value)
+            }
         } else {
-            format!("{:>7.3}│", y_value)
+            "       │".to_string()
         };
 
         let mut line_spans = vec![Span::styled(y_label, Style::default().fg(pal.muted))];
 
-        for (normalized, _) in &bar_heights {
+        for (bar_idx, (normalized, _)) in bar_data.iter().enumerate() {
             let bar_height = (normalized * graph_height as f64).ceil() as usize;
             let row_from_bottom = graph_height - 1 - row;
 
-            let ch = if row_from_bottom < bar_height {
-                '█'
+            // Check if trend line should be drawn at this position
+            let trend_height = if bar_idx < trend_data.len() {
+                (trend_data[bar_idx] * graph_height as f64).round() as usize
+            } else {
+                0
+            };
+            let is_trend_row = row_from_bottom == trend_height
+                || (row_from_bottom == trend_height.saturating_sub(1) && trend_height > 0);
+
+            // Bar character
+            let bar_ch = if row_from_bottom < bar_height {
+                '▓'
             } else {
                 ' '
             };
 
             // Color based on relative height
-            let color = if *normalized > 0.7 {
+            let bar_color = if *normalized > 0.7 {
                 pal.graph_high
             } else if *normalized > 0.3 {
                 pal.graph_mid
@@ -874,23 +1247,55 @@ fn render_reward_bar_chart(frame: &mut Frame, app: &App, area: Rect) {
                 pal.graph_low
             };
 
-            line_spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
+            // Draw bar or trend line
+            if is_trend_row && row_from_bottom >= bar_height {
+                // Trend line (when above bar)
+                line_spans.push(Span::styled("━", Style::default().fg(pal.warning)));
+            } else {
+                line_spans.push(Span::styled(
+                    bar_ch.to_string(),
+                    Style::default().fg(bar_color),
+                ));
+            }
+
+            // Add spacing between bars
+            if bar_idx < bar_data.len() - 1 {
+                // Check if trend line continues in spacing
+                let next_trend = if bar_idx + 1 < trend_data.len() {
+                    (trend_data[bar_idx + 1] * graph_height as f64).round() as usize
+                } else {
+                    trend_height
+                };
+                let is_trend_space = row_from_bottom == trend_height
+                    || row_from_bottom == next_trend
+                    || (trend_height != next_trend
+                        && row_from_bottom > trend_height.min(next_trend)
+                        && row_from_bottom < trend_height.max(next_trend));
+
+                if is_trend_space {
+                    line_spans.push(Span::styled("━", Style::default().fg(pal.warning)));
+                } else {
+                    line_spans.push(Span::raw(" "));
+                }
+            }
         }
 
         lines.push(Line::from(line_spans));
     }
 
     // X-axis line
-    let x_axis = format!("       └{}", "─".repeat(num_bars));
-    lines.push(Line::from(Span::styled(x_axis, Style::default().fg(pal.muted))));
+    let x_axis_len = num_bars * bar_spacing;
+    let x_axis = format!("       └{}", "─".repeat(x_axis_len));
+    lines.push(Line::from(Span::styled(
+        x_axis,
+        Style::default().fg(pal.muted),
+    )));
 
-    // Era range label
+    // Era range label with dates
     if let (Some(first), Some(last)) = (app.staking_history.first(), app.staking_history.last()) {
         let era_label = format!(
-            "        Era {:<6} {:>width$}",
-            first.era,
-            last.era,
-            width = num_bars.saturating_sub(10)
+            "        Era {} ({})  ───  Era {} ({})",
+            first.era, first.date, last.era, last.date
         );
         lines.push(Line::from(Span::styled(
             era_label,
@@ -956,9 +1361,16 @@ fn render_history_table(frame: &mut Frame, app: &App, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(pal.border))
-                .title(format!(" Era History ({} eras) ", app.staking_history.len())),
+                .title(format!(
+                    " Era History ({} eras) ",
+                    app.staking_history.len()
+                )),
         )
-        .row_highlight_style(Style::default().fg(pal.selection).add_modifier(Modifier::REVERSED));
+        .row_highlight_style(
+            Style::default()
+                .fg(pal.selection)
+                .add_modifier(Modifier::REVERSED),
+        );
 
     frame.render_widget(table, area);
 }
@@ -1048,16 +1460,24 @@ fn render_apy_graph(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     // X-axis
-    let x_axis = format!(
-        "    └{}",
-        "─".repeat(graph_width)
-    );
-    lines.push(Line::from(Span::styled(x_axis, Style::default().fg(pal.muted))));
+    let x_axis = format!("    └{}", "─".repeat(graph_width));
+    lines.push(Line::from(Span::styled(
+        x_axis,
+        Style::default().fg(pal.muted),
+    )));
 
     // Era labels
     if let (Some(first), Some(last)) = (app.staking_history.first(), app.staking_history.last()) {
-        let era_label = format!("     Era {:<10} {:>width$}", first.era, last.era, width = graph_width - 10);
-        lines.push(Line::from(Span::styled(era_label, Style::default().fg(pal.muted))));
+        let era_label = format!(
+            "     Era {:<10} {:>width$}",
+            first.era,
+            last.era,
+            width = graph_width - 10
+        );
+        lines.push(Line::from(Span::styled(
+            era_label,
+            Style::default().fg(pal.muted),
+        )));
     }
 
     let paragraph = Paragraph::new(lines);
@@ -1110,12 +1530,13 @@ fn render_history_stats(frame: &mut Frame, app: &App, area: Rect) {
         if let Some(last) = app.staking_history.last() {
             lines.push(Line::from(vec![
                 Span::styled("  Latest Era: ", Style::default().fg(pal.fg_dim)),
+                Span::styled(format!("{}", last.era), Style::default().fg(pal.fg)),
                 Span::styled(
-                    format!("{}", last.era),
-                    Style::default().fg(pal.fg),
-                ),
-                Span::styled(
-                    format!(" | Reward: {} {}", format_balance(last.reward, decimals), symbol),
+                    format!(
+                        " | Reward: {} {}",
+                        format_balance(last.reward, decimals),
+                        symbol
+                    ),
                     Style::default().fg(pal.muted),
                 ),
             ]));
@@ -1130,106 +1551,205 @@ fn render_history_stats(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-/// Render the QR code modal overlay with animated multipart support.
+/// Render the QR code modal overlay with tabs.
 fn render_qr_modal(frame: &mut Frame, app: &App) {
     let pal = &app.palette;
     let area = frame.area();
 
-    let mut lines = Vec::new();
-    let mut qr_width: u16 = 0;
-
-    // Available space for QR code (subtract borders, title, footer)
-    let max_qr_height = area.height.saturating_sub(12) as usize; // Leave room for text
-    let max_qr_width = area.width.saturating_sub(6) as usize;
-
-    match &app.qr_data {
-        Some(data) => {
-            // Try to generate QR code for full data
-            match QrCode::new(data) {
-                Ok(qr) => {
-                    let qr_lines = render_qr_halfblock(&qr);
-                    let qr_h = qr_lines.len();
-                    let qr_w = qr_lines.first().map(|l| l.chars().count()).unwrap_or(0);
-
-                    // Check if QR fits in available space
-                    if qr_h <= max_qr_height && qr_w <= max_qr_width {
-                        // Single QR code fits - show normally
-                        qr_width = qr_w as u16;
-                        lines.push(Line::from(""));
-                        lines.push(Line::from(Span::styled(
-                            "Scan with Polkadot Vault",
-                            Style::default().fg(pal.primary).bold(),
-                        )));
-                        lines.push(Line::from(""));
-                        for line in qr_lines {
-                            lines.push(Line::from(line));
-                        }
-                        lines.push(Line::from(""));
-                        lines.push(Line::from(format!("Payload: {} bytes", data.len())));
-                    } else {
-                        // QR doesn't fit - use animated multipart
-                        render_multipart_qr(
-                            &mut lines,
-                            &mut qr_width,
-                            data,
-                            max_qr_height,
-                            max_qr_width,
-                            app.qr_frame,
-                            pal,
-                        );
-                    }
-                }
-                Err(e) => {
-                    lines.push(Line::from(""));
-                    lines.push(Line::from(Span::styled(
-                        format!("Error generating QR: {}", e),
-                        Style::default().fg(pal.error),
-                    )));
-                }
-            }
-        }
-        None => {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                "No QR data available",
-                Style::default().fg(pal.warning),
-            )));
-        }
-    }
-
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::raw("Press "),
-        Span::styled("Esc", Style::default().fg(pal.highlight).bold()),
-        Span::raw(" to close"),
-    ]));
-
-    // Dynamic modal sizing based on QR code size
-    let content_height = lines.len() as u16;
-    let content_width = qr_width.max(30);
-
-    // Add padding for borders and margins
-    let modal_width = (content_width + 4).min(area.width.saturating_sub(2));
-    let modal_height = (content_height + 2).min(area.height.saturating_sub(2));
-
+    // Use up to 90% of screen for modal, with max dimensions for very large screens
+    let max_modal_width = 120.min(area.width * 9 / 10);
+    let max_modal_height = 60.min(area.height * 9 / 10);
+    let modal_width = max_modal_width.max(50); // Minimum 50 chars
+    let modal_height = max_modal_height.max(25); // Minimum 25 lines
     let modal_x = (area.width.saturating_sub(modal_width)) / 2;
     let modal_y = (area.height.saturating_sub(modal_height)) / 2;
     let modal_area = Rect::new(modal_x, modal_y, modal_width, modal_height);
 
-    // Clear the background
     frame.render_widget(Clear, modal_area);
 
-    let paragraph = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(pal.primary))
-                .title(" QR Code "),
-        )
-        .style(Style::default().bg(pal.bg))
-        .alignment(Alignment::Center);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(pal.primary))
+        .title(" Nomination QR ");
 
-    frame.render_widget(paragraph, modal_area);
+    frame.render_widget(block.clone(), modal_area);
+
+    // Inner layout for tabs and content
+    let inner_area = block.inner(modal_area);
+    let chunks = Layout::vertical([
+        Constraint::Length(1), // Tabs
+        Constraint::Min(0),    // Content
+        Constraint::Length(1), // Footer hint
+    ])
+    .split(inner_area);
+
+    // Tabs
+    let titles = vec![Line::from(" QR Code "), Line::from(" Details ")];
+    let tabs = Tabs::new(titles)
+        .select(if app.qr_show_details { 1 } else { 0 })
+        .style(Style::default().fg(pal.muted))
+        .highlight_style(Style::default().fg(pal.highlight).bold());
+    frame.render_widget(tabs, chunks[0]);
+
+    if !app.qr_show_details {
+        // Render QR
+        render_qr_content(frame, app, chunks[1]);
+    } else {
+        // Render Details
+        render_qr_details(frame, app, chunks[1]);
+    }
+
+    // Footer
+    let footer = Line::from(vec![Span::raw("Tab:View  Esc:Close")]);
+    frame.render_widget(
+        Paragraph::new(footer).alignment(Alignment::Center),
+        chunks[2],
+    );
+}
+
+fn render_qr_content(frame: &mut Frame, app: &App, area: Rect) {
+    let pal = &app.palette;
+    let mut lines = Vec::new();
+    let mut qr_width: u16 = 0;
+
+    let max_qr_height = area.height.saturating_sub(2) as usize;
+    let max_qr_width = area.width.saturating_sub(4) as usize;
+
+    match &app.qr_data {
+        Some(data) => match QrCode::new(data) {
+            Ok(qr) => {
+                let qr_lines = render_qr_halfblock(&qr);
+                let qr_h = qr_lines.len();
+                let qr_w = qr_lines.first().map(|l| l.chars().count()).unwrap_or(0);
+
+                if qr_h <= max_qr_height && qr_w <= max_qr_width {
+                    qr_width = qr_w as u16;
+                    for line in qr_lines {
+                        lines.push(Line::from(line));
+                    }
+                } else {
+                    render_multipart_qr(
+                        &mut lines,
+                        &mut qr_width,
+                        data,
+                        max_qr_height,
+                        max_qr_width,
+                        app.qr_frame,
+                        pal,
+                    );
+                }
+            }
+            Err(e) => {
+                lines.push(Line::from(Span::styled(
+                    format!("Error: {}", e),
+                    Style::default().fg(pal.error),
+                )));
+            }
+        },
+        None => lines.push(Line::from("No Data")),
+    }
+
+    let p = Paragraph::new(lines).alignment(Alignment::Center);
+    frame.render_widget(p, area);
+}
+
+fn render_qr_details(frame: &mut Frame, app: &App, area: Rect) {
+    let pal = &app.palette;
+    let mut lines = Vec::new();
+
+    // Header info
+    lines.push(Line::from(vec![Span::styled(
+        "Transaction Details",
+        Style::default().fg(pal.primary).bold(),
+    )]));
+    lines.push(Line::from(""));
+
+    if let Some(tx_info) = &app.qr_tx_info {
+        // Call info
+        lines.push(Line::from(vec![
+            Span::styled("Call: ", Style::default().fg(pal.fg_dim)),
+            Span::styled(&tx_info.call, Style::default().fg(pal.success).bold()),
+        ]));
+        lines.push(Line::from(""));
+
+        // Signer
+        lines.push(Line::from(vec![Span::styled(
+            "Signer: ",
+            Style::default().fg(pal.fg_dim),
+        )]));
+        // Truncate signer for display
+        let signer_display = if tx_info.signer.len() > 48 {
+            format!(
+                "{}...{}",
+                &tx_info.signer[..24],
+                &tx_info.signer[tx_info.signer.len() - 20..]
+            )
+        } else {
+            tx_info.signer.clone()
+        };
+        lines.push(Line::from(format!("  {}", signer_display)));
+        lines.push(Line::from(""));
+
+        // Targets (validators being nominated)
+        lines.push(Line::from(vec![Span::styled(
+            format!("Targets ({} validators):", tx_info.targets.len()),
+            Style::default().fg(pal.fg_dim),
+        )]));
+
+        // Show validators (truncate addresses)
+        let max_display = 8; // Show up to 8 validators
+        for (i, target) in tx_info.targets.iter().take(max_display).enumerate() {
+            let addr_display = if target.len() > 20 {
+                format!("{}...{}", &target[..10], &target[target.len() - 10..])
+            } else {
+                target.clone()
+            };
+            lines.push(Line::from(format!("  {}. {}", i + 1, addr_display)));
+        }
+        if tx_info.targets.len() > max_display {
+            lines.push(Line::from(format!(
+                "  ... and {} more",
+                tx_info.targets.len() - max_display
+            )));
+        }
+        lines.push(Line::from(""));
+
+        // Technical details
+        lines.push(Line::from(vec![Span::styled(
+            "Technical:",
+            Style::default().fg(pal.fg_dim),
+        )]));
+        lines.push(Line::from(format!("  Nonce: {}", tx_info.nonce)));
+        lines.push(Line::from(format!(
+            "  Spec Version: {}",
+            tx_info.spec_version
+        )));
+        lines.push(Line::from(format!("  Tx Version: {}", tx_info.tx_version)));
+        lines.push(Line::from(format!(
+            "  Call Data: {} bytes",
+            tx_info.call_data_size
+        )));
+
+        if let Some(data) = &app.qr_data {
+            lines.push(Line::from(format!("  QR Payload: {} bytes", data.len())));
+        }
+    } else if let Some(data) = &app.qr_data {
+        // Fallback if no tx_info
+        lines.push(Line::from(format!("Payload Size: {} bytes", data.len())));
+        if let Some(account) = &app.watched_account {
+            lines.push(Line::from(format!("Signer: {}", account)));
+        }
+        lines.push(Line::from("Action: Nominate validators"));
+        lines.push(Line::from(format!(
+            "Validators: {}",
+            app.selected_validators.len()
+        )));
+    } else {
+        lines.push(Line::from("No transaction data available"));
+    }
+
+    let p = Paragraph::new(lines).block(Block::default().borders(Borders::NONE));
+    frame.render_widget(p, area);
 }
 
 /// Calculate chunk size that produces a QR code fitting in the given dimensions.
@@ -1269,7 +1789,7 @@ fn render_multipart_qr(
     current_frame: usize,
     pal: &Palette,
 ) {
-    use base64::{engine::general_purpose::STANDARD, Engine};
+    use base64::{Engine, engine::general_purpose::STANDARD};
 
     // Calculate appropriate chunk size
     let chunk_size = calculate_chunk_size(max_qr_height, max_qr_width);
@@ -1303,7 +1823,10 @@ fn render_multipart_qr(
     match QrCode::new(&part_data) {
         Ok(qr) => {
             let qr_lines = render_qr_halfblock(&qr);
-            *qr_width = qr_lines.first().map(|l| l.chars().count() as u16).unwrap_or(0);
+            *qr_width = qr_lines
+                .first()
+                .map(|l| l.chars().count() as u16)
+                .unwrap_or(0);
 
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
@@ -1370,17 +1893,24 @@ fn render_qr_halfblock(qr: &QrCode) -> Vec<String> {
                 false // quiet zone is light
             } else {
                 let idx = (y - quiet) * width + (x - quiet);
-                colors.get(idx).map(|c| *c == qrcode::Color::Dark).unwrap_or(false)
+                colors
+                    .get(idx)
+                    .map(|c| *c == qrcode::Color::Dark)
+                    .unwrap_or(false)
             };
 
-            let bottom_dark = if y + 1 < quiet || y + 1 >= quiet + width || x < quiet || x >= quiet + width {
-                false
-            } else if y + 1 < total_height {
-                let idx = (y + 1 - quiet) * width + (x - quiet);
-                colors.get(idx).map(|c| *c == qrcode::Color::Dark).unwrap_or(false)
-            } else {
-                false
-            };
+            let bottom_dark =
+                if y + 1 < quiet || y + 1 >= quiet + width || x < quiet || x >= quiet + width {
+                    false
+                } else if y + 1 < total_height {
+                    let idx = (y + 1 - quiet) * width + (x - quiet);
+                    colors
+                        .get(idx)
+                        .map(|c| *c == qrcode::Color::Dark)
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
 
             let ch = match (top_dark, bottom_dark) {
                 (true, true) => '█',
@@ -1524,7 +2054,9 @@ fn render_logs(frame: &mut Frame, app: &App, area: Rect) {
     // Build title with connection status and scroll info
     let status_text = match &app.connection_status {
         ConnectionStatus::Disconnected => "Disconnected".to_string(),
-        ConnectionStatus::Connecting => format!("Connecting{}", ".".repeat((app.tick_count() % 4) as usize)),
+        ConnectionStatus::Connecting => {
+            format!("Connecting{}", ".".repeat((app.tick_count() % 4) as usize))
+        }
         ConnectionStatus::Syncing { progress } => format!("Syncing {:.0}%", progress * 100.0),
         ConnectionStatus::Connected => "Connected".to_string(),
         ConnectionStatus::Error(e) => format!("Error: {}", e),
@@ -1602,4 +2134,169 @@ fn render_logs(frame: &mut Frame, app: &App, area: Rect) {
     );
 
     frame.render_widget(paragraph, area);
+}
+
+/// Render the sort menu overlay.
+fn render_sort_menu(frame: &mut Frame, app: &App) {
+    let pal = &app.palette;
+    let area = frame.area();
+
+    // Calculate centered modal area
+    let modal_width = 35.min(area.width.saturating_sub(4));
+    let modal_height = 16.min(area.height.saturating_sub(4));
+    let modal_x = (area.width.saturating_sub(modal_width)) / 2;
+    let modal_y = (area.height.saturating_sub(modal_height)) / 2;
+    let modal_area = Rect::new(modal_x, modal_y, modal_width, modal_height);
+
+    // Clear the background
+    frame.render_widget(Clear, modal_area);
+
+    let key_style = Style::default().fg(pal.highlight).bold();
+
+    let lines = match app.current_view {
+        View::Validators => {
+            let mut lines = vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "  Sort by:",
+                    Style::default().fg(pal.primary).bold(),
+                )),
+                Line::from(""),
+            ];
+            for field in ValidatorSortField::all() {
+                let marker = if *field == app.validator_sort {
+                    "▶ "
+                } else {
+                    "  "
+                };
+                lines.push(Line::from(vec![
+                    Span::raw(marker),
+                    Span::styled(format!("{}", field.key()), key_style),
+                    Span::raw(format!(" - {}", field.label())),
+                ]));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::raw("  Press key or "),
+                Span::styled("Esc", key_style),
+                Span::raw(" to close"),
+            ]));
+            lines
+        }
+        View::Pools => {
+            let mut lines = vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "  Sort by:",
+                    Style::default().fg(pal.primary).bold(),
+                )),
+                Line::from(""),
+            ];
+            for field in PoolSortField::all() {
+                let marker = if *field == app.pool_sort {
+                    "▶ "
+                } else {
+                    "  "
+                };
+                lines.push(Line::from(vec![
+                    Span::raw(marker),
+                    Span::styled(format!("{}", field.key()), key_style),
+                    Span::raw(format!(" - {}", field.label())),
+                ]));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::raw("  Press key or "),
+                Span::styled("Esc", key_style),
+                Span::raw(" to close"),
+            ]));
+            lines
+        }
+        _ => vec![Line::from("Invalid view for sort menu")],
+    };
+
+    let paragraph = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(pal.primary))
+                .title(" Sort Menu "),
+        )
+        .style(Style::default().bg(pal.bg));
+
+    frame.render_widget(paragraph, modal_area);
+}
+
+/// Render the strategy menu overlay.
+fn render_strategy_menu(frame: &mut Frame, app: &App) {
+    let pal = &app.palette;
+    let area = frame.area();
+
+    // Calculate centered modal area
+    let modal_width = 50.min(area.width.saturating_sub(4));
+    let modal_height = 14.min(area.height.saturating_sub(4));
+    let modal_x = (area.width.saturating_sub(modal_width)) / 2;
+    let modal_y = (area.height.saturating_sub(modal_height)) / 2;
+    let modal_area = Rect::new(modal_x, modal_y, modal_width, modal_height);
+
+    // Clear the background
+    frame.render_widget(Clear, modal_area);
+
+    let key_style = Style::default().fg(pal.highlight).bold();
+    let selected_style = Style::default().fg(pal.success).bold();
+
+    let strategies = [
+        ("Top APY", "Select validators with highest APY"),
+        ("Random from Top", "Random selection from top performers"),
+        ("Diversify by Stake", "Spread across different stake sizes"),
+    ];
+
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Optimization Strategy:",
+            Style::default().fg(pal.primary).bold(),
+        )),
+        Line::from(""),
+    ];
+
+    for (i, (name, desc)) in strategies.iter().enumerate() {
+        let is_selected = i == app.strategy_index;
+        let marker = if is_selected { "▶ " } else { "  " };
+        let style = if is_selected {
+            selected_style
+        } else {
+            Style::default()
+        };
+
+        lines.push(Line::from(vec![
+            Span::raw(marker),
+            Span::styled(format!("{}", i + 1), key_style),
+            Span::raw(". "),
+            Span::styled(*name, style),
+        ]));
+        lines.push(Line::from(format!("     {}", desc)));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled("↑/↓", key_style),
+        Span::raw(": Navigate  "),
+        Span::styled("Enter", key_style),
+        Span::raw(": Select  "),
+        Span::styled("Esc", key_style),
+        Span::raw(": Cancel"),
+    ]));
+
+    let paragraph = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(pal.primary))
+                .title(" Strategy Selection "),
+        )
+        .style(Style::default().bg(pal.bg));
+
+    frame.render_widget(paragraph, modal_area);
 }

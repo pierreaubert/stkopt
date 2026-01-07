@@ -12,6 +12,7 @@ A terminal user interface (TUI) application for optimizing Polkadot staking. Bro
 - **Nomination optimizer**: Automatically select optimal validators
 - **QR code signing**: Generate transaction QR codes for Polkadot Vault
 - **Theme support**: Auto-detects dark/light terminal background
+- **Batch mode**: Fetch and cache staking history from cron jobs
 
 ## Installation
 
@@ -38,9 +39,26 @@ stkopt --network kusama
 stkopt --network westend
 stkopt --network paseo
 
+# Use custom RPC endpoint
+stkopt --network kusama --url wss://kusama-rpc.polkadot.io
+
 # Show help
 stkopt --help
+
+# Batch mode: update staking history for an account, then exit
+# Suitable for cron jobs or CI/CD pipelines
+stkopt --update --address <ss58_address> --eras 30
 ```
+
+## Command Line Options
+
+| Option | Description |
+|--------|-------------|
+| `-n, --network <NETWORK>` | Network to connect to (polkadot, kusama, westend, paseo; default: polkadot) |
+| `-u, --url <URL>` | Custom RPC endpoint URL (overrides default endpoints) |
+| `--update` | Batch mode: fetch staking history and exit (use with --address) |
+| `-a, --address <ADDRESS>` | Account address for --update mode (SS58 format) |
+| `-e, --eras <NUM>` | Number of eras to fetch in update mode (default: 30) |
 
 ## Keyboard Shortcuts
 
@@ -95,6 +113,20 @@ stkopt generates unsigned transactions as QR codes compatible with [Polkadot Vau
 4. Scan with Polkadot Vault to sign
 5. Scan the signed QR back (coming soon)
 
+## Batch Mode (Cron Jobs)
+
+For headless environments, use `--update` mode to fetch and cache staking history:
+
+```bash
+# Fetch 30 eras of history for an account
+stkopt --update --address 15oF4uVJwmo4TdGW7VfQxELSav3wstvDAb7E7V9VFEJDvY6 --eras 30
+
+# Cron job example (run daily at 2 AM):
+# 0 2 * * * /usr/local/bin/stkopt --update --address <your_address> --eras 30 >> /var/log/stkopt.log 2>&1
+```
+
+Data is stored in the application data directory and loaded automatically when running the TUI.
+
 ## Project Structure
 
 ```
@@ -107,10 +139,14 @@ stkopt/
 
 ## Configuration
 
-Configuration is stored in:
-- Linux: `~/.config/stkopt/config.json`
-- macOS: `~/Library/Application Support/stkopt/config.json`
-- Windows: `C:\Users\<user>\AppData\Roaming\stkopt\config.json`
+Configuration and cache are stored in:
+- Linux: `~/.config/stkopt/`
+- macOS: `~/Library/Application Support/stkopt/`
+- Windows: `C:\Users\<user>\AppData\Roaming\stkopt\`
+
+Files:
+- `config.json` - Application configuration (accounts, settings)
+- `history.db` - Cached staking history (SQLite)
 
 ## License
 

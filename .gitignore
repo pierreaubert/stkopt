@@ -1,3 +1,17 @@
+# Rust
 /target
+
+
+# Editor
 *~
+*#
+
+# Logs
 *.log
+
+
+# AI stuff
+GEMINI.md
+.agents
+CLAUDE.md
+.claude

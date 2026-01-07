@@ -72,12 +72,14 @@ pub fn select_validators(
         .collect();
 
     // Sort by APY descending
-    filtered.sort_by(|a, b| b.apy.partial_cmp(&a.apy).unwrap_or(std::cmp::Ordering::Equal));
+    filtered.sort_by(|a, b| {
+        b.apy
+            .partial_cmp(&a.apy)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let selected: Vec<ValidatorCandidate> = match criteria.strategy {
-        SelectionStrategy::TopApy => {
-            filtered.into_iter().take(criteria.target_count).collect()
-        }
+        SelectionStrategy::TopApy => filtered.into_iter().take(criteria.target_count).collect(),
         SelectionStrategy::RandomFromTop => {
             // Select from top 10%
             let top_count = (filtered.len() / 10).max(criteria.target_count);
@@ -128,9 +130,11 @@ pub fn select_validators(
     };
 
     // Calculate APY statistics
-    let (min, max, sum) = selected.iter().fold((f64::MAX, f64::MIN, 0.0), |(min, max, sum), v| {
-        (min.min(v.apy), max.max(v.apy), sum + v.apy)
-    });
+    let (min, max, sum) = selected
+        .iter()
+        .fold((f64::MAX, f64::MIN, 0.0), |(min, max, sum), v| {
+            (min.min(v.apy), max.max(v.apy), sum + v.apy)
+        });
 
     let avg = if selected.is_empty() {
         0.0
@@ -150,7 +154,13 @@ pub fn select_validators(
 mod tests {
     use super::*;
 
-    fn make_candidate(address: &str, commission: f64, apy: f64, blocked: bool, stake: u128) -> ValidatorCandidate {
+    fn make_candidate(
+        address: &str,
+        commission: f64,
+        apy: f64,
+        blocked: bool,
+        stake: u128,
+    ) -> ValidatorCandidate {
         ValidatorCandidate {
             address: address.to_string(),
             commission,
@@ -189,7 +199,7 @@ mod tests {
     #[test]
     fn test_select_validators_filters_blocked() {
         let candidates = vec![
-            make_candidate("v1", 0.05, 0.20, true, 1000),  // Blocked
+            make_candidate("v1", 0.05, 0.20, true, 1000), // Blocked
             make_candidate("v2", 0.05, 0.15, false, 2000),
             make_candidate("v3", 0.05, 0.12, false, 1500),
         ];
@@ -211,7 +221,7 @@ mod tests {
     #[test]
     fn test_select_validators_filters_high_commission() {
         let candidates = vec![
-            make_candidate("v1", 0.25, 0.20, false, 1000),  // High commission
+            make_candidate("v1", 0.25, 0.20, false, 1000), // High commission
             make_candidate("v2", 0.05, 0.15, false, 2000),
             make_candidate("v3", 0.10, 0.18, false, 1500),
         ];
@@ -236,8 +246,8 @@ mod tests {
             make_candidate("v1", 0.05, 0.15, false, 5000),
             make_candidate("v2", 0.05, 0.14, false, 4000),
             make_candidate("v3", 0.05, 0.13, false, 3000),
-            make_candidate("v4", 0.05, 0.12, false, 200),  // Low stake
-            make_candidate("v5", 0.05, 0.11, false, 100),  // Lowest stake
+            make_candidate("v4", 0.05, 0.12, false, 200), // Low stake
+            make_candidate("v5", 0.05, 0.11, false, 100), // Lowest stake
         ];
 
         let criteria = OptimizationCriteria {

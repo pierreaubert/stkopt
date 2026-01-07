@@ -4,7 +4,7 @@ pub mod error;
 pub mod queries;
 pub mod transactions;
 
-pub use client::*;
+pub use client::{ChainClient, ChainInfo, RpcEndpoints, connect_people_chain};
 pub use config::*;
 pub use error::*;
 pub use queries::account::{
@@ -12,8 +12,8 @@ pub use queries::account::{
 };
 pub use queries::identity::{PeopleChainClient, ValidatorIdentity};
 pub use queries::pools::{
-    derive_pool_account, PoolAccountType, PoolInfo, PoolMetadata, PoolNominations, PoolRoles,
-    PoolState,
+    PoolAccountType, PoolInfo, PoolMetadata, PoolNominations, PoolRoles, PoolState,
+    derive_pool_account,
 };
 pub use queries::validators::{ValidatorExposure, ValidatorInfo, ValidatorPoints};
-pub use transactions::{encode_for_qr, Era, UnsignedPayload};
+pub use transactions::{Era, UnsignedPayload, encode_for_qr};
