@@ -85,16 +85,22 @@ pub struct ChainInfo {
 }
 
 /// Chain client for interacting with Polkadot-SDK chains.
-/// Connects to Asset Hub where staking data lives since Polkadot 2.0.
-/// Note: Staking transactions still go to the relay chain, not Asset Hub.
+/// Since Polkadot 2.0 (Nov 2025), connects to Asset Hub where the Staking pallet lives.
+/// Both staking data queries and staking transactions go to Asset Hub.
+///
+/// Supports reconnection when the connection drops via `reconnect()`.
 pub struct ChainClient {
     network: Network,
     /// Connection mode used.
     connection_mode: ConnectionMode,
+    /// RPC endpoints configuration (for reconnection).
+    rpc_endpoints: RpcEndpoints,
     /// Asset Hub client (for reading staking data).
     client: OnlineClient<PolkadotConfig>,
-    /// Relay chain client (for submitting staking transactions).
+    /// Relay chain client (for block/session data, kept for potential future use).
     relay_client: Option<OnlineClient<PolkadotConfig>>,
+    /// Status channel for connection updates.
+    status_tx: mpsc::Sender<ConnectionStatus>,
 }
 
 impl ChainClient {
@@ -160,8 +166,10 @@ impl ChainClient {
         Ok(Self {
             network,
             connection_mode: ConnectionMode::LightClient,
+            rpc_endpoints: RpcEndpoints::default(),
             client: light_client_conns.asset_hub,
             relay_client: Some(light_client_conns.relay),
+            status_tx,
         })
     }
 
@@ -235,8 +243,10 @@ impl ChainClient {
         Ok(Self {
             network,
             connection_mode: ConnectionMode::Rpc,
+            rpc_endpoints: rpc_endpoints.clone(),
             client,
             relay_client,
+            status_tx,
         })
     }
 
@@ -381,6 +391,28 @@ impl ChainClient {
             validated,
             validation_message,
         }
+    }
+
+    /// Attempt to reconnect to the chain.
+    /// Returns a new ChainClient instance with a fresh connection.
+    /// Call this when you detect persistent connection errors.
+    pub async fn reconnect(&self) -> Result<Self, ChainError> {
+        tracing::info!("Attempting to reconnect to {} ({})...", self.network, self.connection_mode);
+        let _ = self.status_tx.send(ConnectionStatus::Connecting).await;
+
+        match self.connection_mode {
+            ConnectionMode::LightClient => {
+                Self::connect_light_client(self.network, self.status_tx.clone()).await
+            }
+            ConnectionMode::Rpc => {
+                Self::connect_rpc(self.network, &self.rpc_endpoints, self.status_tx.clone()).await
+            }
+        }
+    }
+
+    /// Check if the connection appears healthy by trying to fetch latest block.
+    pub async fn is_connected(&self) -> bool {
+        self.get_latest_block().await.is_ok()
     }
 }
 

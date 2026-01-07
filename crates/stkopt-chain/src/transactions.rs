@@ -40,8 +40,8 @@ pub enum Era {
 impl ChainClient {
     /// Generate an unsigned nomination extrinsic.
     ///
-    /// Note: Staking transactions go to the relay chain, not Asset Hub.
-    /// This uses the relay chain genesis hash and runtime version.
+    /// Since Polkadot 2.0 (Nov 2025), the Staking pallet lives on Asset Hub,
+    /// so staking transactions go to Asset Hub, not the relay chain.
     pub async fn create_nominate_payload(
         &self,
         signer: &AccountId32,
@@ -62,24 +62,24 @@ impl ChainClient {
             vec![Value::unnamed_composite(target_values)],
         );
 
-        // Use relay chain client for transaction data
-        let relay = self.relay_client();
+        // Use Asset Hub client for transaction data (Staking pallet is on Asset Hub since Polkadot 2.0)
+        let asset_hub = self.client();
 
-        // Get the call data (using relay chain's metadata for call encoding)
-        let call_data = relay.tx().call_data(&call)?;
+        // Get the call data (using Asset Hub's metadata for call encoding)
+        let call_data = asset_hub.tx().call_data(&call)?;
 
-        // Get relay chain info (transactions go to relay chain, not Asset Hub)
-        let genesis_hash: [u8; 32] = self.relay_genesis_hash();
+        // Get Asset Hub info (transactions go to Asset Hub where Staking pallet lives)
+        let genesis_hash: [u8; 32] = self.genesis_hash();
 
-        let block = relay.blocks().at_latest().await?;
+        let block = asset_hub.blocks().at_latest().await?;
         let block_hash: [u8; 32] = block.hash().0;
 
-        let runtime = relay.runtime_version();
+        let runtime = asset_hub.runtime_version();
         let spec_version = runtime.spec_version;
         let tx_version = runtime.transaction_version;
 
-        // Get account nonce from relay chain
-        let nonce = self.get_relay_account_nonce(signer).await?;
+        // Get account nonce from Asset Hub
+        let nonce = self.get_account_nonce(signer).await?;
 
         // Create description
         let description = format!("Nominate {} validators", targets.len());
@@ -91,7 +91,7 @@ impl ChainClient {
         let metadata_hash = [0u8; 32];
 
         tracing::info!(
-            "Created nominate payload: genesis={:?}, spec_version={}, tx_version={}, nonce={}",
+            "Created nominate payload for Asset Hub: genesis={:?}, spec_version={}, tx_version={}, nonce={}",
             &genesis_hash[..8], // First 8 bytes for logging
             spec_version,
             tx_version,
@@ -116,7 +116,7 @@ impl ChainClient {
 
     /// Generate an unsigned bond extrinsic.
     ///
-    /// Note: Staking transactions go to the relay chain, not Asset Hub.
+    /// Since Polkadot 2.0 (Nov 2025), staking transactions go to Asset Hub.
     pub async fn create_bond_payload(
         &self,
         signer: &AccountId32,
@@ -126,15 +126,15 @@ impl ChainClient {
         let payee = Value::unnamed_variant("Staked", std::iter::empty::<Value<()>>());
         let call = subxt::dynamic::tx("Staking", "bond", vec![Value::u128(value), payee]);
 
-        // Use relay chain client for transaction data
-        let relay = self.relay_client();
+        // Use Asset Hub client for transaction data
+        let asset_hub = self.client();
 
-        let call_data = relay.tx().call_data(&call)?;
-        let genesis_hash: [u8; 32] = self.relay_genesis_hash();
-        let block = relay.blocks().at_latest().await?;
+        let call_data = asset_hub.tx().call_data(&call)?;
+        let genesis_hash: [u8; 32] = self.genesis_hash();
+        let block = asset_hub.blocks().at_latest().await?;
         let block_hash: [u8; 32] = block.hash().0;
-        let runtime = relay.runtime_version();
-        let nonce = self.get_relay_account_nonce(signer).await?;
+        let runtime = asset_hub.runtime_version();
+        let nonce = self.get_account_nonce(signer).await?;
 
         Ok(UnsignedPayload {
             call_data,
@@ -153,13 +153,13 @@ impl ChainClient {
         })
     }
 
-    /// Get account nonce from Asset Hub.
-    #[allow(dead_code)]
+    /// Get account nonce from Asset Hub (for transactions).
     async fn get_account_nonce(&self, account: &AccountId32) -> Result<u64, ChainError> {
         Self::fetch_nonce(self.client(), account).await
     }
 
-    /// Get account nonce from relay chain (for transactions).
+    /// Get account nonce from relay chain.
+    #[allow(dead_code)]
     async fn get_relay_account_nonce(&self, account: &AccountId32) -> Result<u64, ChainError> {
         Self::fetch_nonce(self.relay_client(), account).await
     }

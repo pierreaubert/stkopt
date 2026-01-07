@@ -1,7 +1,8 @@
-//! SQLite database for caching staking history.
+//! SQLite database for caching staking history and validator identities.
 
 use crate::action::StakingHistoryPoint;
 use rusqlite::{Connection, Result, params};
+use std::collections::HashMap;
 use std::path::Path;
 use stkopt_core::Network;
 
@@ -50,6 +51,17 @@ impl HistoryDb {
 
             CREATE INDEX IF NOT EXISTS idx_staking_history_era
                 ON staking_history(network, address, era DESC);
+
+            CREATE TABLE IF NOT EXISTS validator_identities (
+                network TEXT NOT NULL,
+                address TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (network, address)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_validator_identities_network
+                ON validator_identities(network);
             "#,
         )?;
         Ok(())
@@ -254,6 +266,88 @@ impl HistoryDb {
             params![network.to_string(), address, keep_count],
         )?;
         Ok(deleted as u32)
+    }
+
+    // ==================== Validator Identity Cache ====================
+
+    /// Get all cached validator identities for a network.
+    pub fn get_validator_identities(&self, network: Network) -> Result<HashMap<String, String>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT address, display_name
+            FROM validator_identities
+            WHERE network = ?1
+            "#,
+        )?;
+
+        let rows = stmt.query_map(params![network.to_string()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+
+        let mut identities = HashMap::new();
+        for row in rows {
+            let (address, name) = row?;
+            identities.insert(address, name);
+        }
+        Ok(identities)
+    }
+
+    /// Store or update a validator identity.
+    pub fn set_validator_identity(
+        &self,
+        network: Network,
+        address: &str,
+        display_name: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT OR REPLACE INTO validator_identities
+                (network, address, display_name, updated_at)
+            VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)
+            "#,
+            params![network.to_string(), address, display_name],
+        )?;
+        Ok(())
+    }
+
+    /// Store multiple validator identities in a transaction.
+    pub fn set_validator_identities_batch(
+        &mut self,
+        network: Network,
+        identities: &HashMap<String, String>,
+    ) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let mut count = 0;
+        {
+            let mut stmt = tx.prepare(
+                r#"
+                INSERT OR REPLACE INTO validator_identities
+                    (network, address, display_name, updated_at)
+                VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)
+                "#,
+            )?;
+
+            let network_str = network.to_string();
+            for (address, name) in identities {
+                stmt.execute(params![&network_str, address, name])?;
+                count += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(count)
+    }
+
+    /// Get the count of cached identities for a network.
+    pub fn count_validator_identities(&self, network: Network) -> Result<u32> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT COUNT(*) FROM validator_identities
+            WHERE network = ?1
+            "#,
+        )?;
+
+        let count: u32 = stmt.query_row(params![network.to_string()], |row| row.get(0))?;
+        Ok(count)
     }
 }
 

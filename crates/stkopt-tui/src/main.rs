@@ -456,7 +456,7 @@ async fn chain_task(
     });
 
     // Connect to chain (light client or RPC based on config)
-    let client = match ChainClient::connect(network, &config, status_tx).await {
+    let mut client = match ChainClient::connect(network, &config, status_tx).await {
         Ok(client) => {
             tracing::info!(
                 "Connected to {} Asset Hub via {} (genesis: {:?})",
@@ -476,6 +476,24 @@ async fn chain_task(
             return;
         }
     };
+
+    // Helper to attempt reconnection
+    async fn try_reconnect(client: &ChainClient, max_attempts: u32) -> Option<ChainClient> {
+        for attempt in 1..=max_attempts {
+            tracing::info!("Reconnection attempt {}/{}...", attempt, max_attempts);
+            match client.reconnect().await {
+                Ok(new_client) => {
+                    tracing::info!("Reconnected successfully!");
+                    return Some(new_client);
+                }
+                Err(e) => {
+                    tracing::warn!("Reconnection failed: {} - waiting before retry...", e);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                }
+            }
+        }
+        None
+    }
 
     // Send chain info for UI display and validation
     let chain_info = client.get_chain_info();
@@ -499,8 +517,14 @@ async fn chain_task(
             }
         };
 
-    // Brief delay to let connection stabilize
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    // Longer delay to let light client connection stabilize
+    // Light clients need time to sync state after initial connection
+    if client.is_light_client() {
+        tracing::info!("Waiting for light client to stabilize...");
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    } else {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    }
 
     // Fetch era info (retry a few times as light client may need time to sync state)
     let era_info = {
@@ -545,35 +569,126 @@ async fn chain_task(
 
     let _ = action_tx.send(Action::SetLoadingProgress(0.1)).await;
 
-    // Fetch validators
-    let validators = match client.get_validators().await {
-        Ok(v) => {
-            tracing::info!("Found {} registered validators", v.len());
-            v
+    // Open database for caching
+    let db_path = get_db_path();
+    let mut db = db::HistoryDb::open(&db_path).ok();
+
+    // Load cached identities immediately (fast, from local database)
+    let mut identity_map: HashMap<String, String> = if let Some(ref db) = db {
+        match db.get_validator_identities(network) {
+            Ok(cached) => {
+                if !cached.is_empty() {
+                    tracing::info!("Loaded {} cached validator identities", cached.len());
+                }
+                cached
+            }
+            Err(e) => {
+                tracing::debug!("Failed to load cached identities: {}", e);
+                HashMap::new()
+            }
         }
-        Err(e) => {
-            tracing::error!("Failed to get validators: {}", e);
-            return;
+    } else {
+        HashMap::new()
+    };
+
+    // Fetch validators (use light-client-friendly approach when in light client mode)
+    let validators = {
+        let mut result = None;
+        let mut reconnect_attempts = 0;
+        const MAX_RECONNECT_ATTEMPTS: u32 = 3;
+
+        'outer: loop {
+            // For light client, use the multi-source approach that handles partial data better
+            let fetch_result = if client.is_light_client() {
+                tracing::info!("Fetching validators via light client (multi-source approach)...");
+                client.get_validators_light_client().await
+            } else {
+                // RPC mode can use direct iteration
+                client.get_validators().await
+            };
+
+            match fetch_result {
+                Ok(v) => {
+                    if client.is_light_client() {
+                        tracing::info!(
+                            "Light client: Found {} validators (partial data - light clients have iteration limits)",
+                            v.len()
+                        );
+                    } else {
+                        tracing::info!("Found {} registered validators", v.len());
+                    }
+                    result = Some(v);
+                    break 'outer;
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to get validators: {}", e);
+                }
+            }
+
+            // Try to reconnect
+            reconnect_attempts += 1;
+            if reconnect_attempts > MAX_RECONNECT_ATTEMPTS {
+                tracing::error!("Could not fetch validators after {} reconnection attempts", MAX_RECONNECT_ATTEMPTS);
+                break;
+            }
+
+            tracing::warn!("Connection appears unstable - attempting reconnection ({}/{})", reconnect_attempts, MAX_RECONNECT_ATTEMPTS);
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+            if let Some(new_client) = try_reconnect(&client, 3).await {
+                client = new_client;
+                // Update chain info after reconnect
+                let chain_info = client.get_chain_info();
+                let _ = action_tx.send(Action::SetChainInfo(chain_info)).await;
+            } else {
+                tracing::error!("Reconnection failed - cannot continue");
+                break;
+            }
+        }
+
+        match result {
+            Some(v) => v,
+            None => {
+                tracing::error!("Could not fetch validators - cannot continue");
+                return;
+            }
         }
     };
 
     let _ = action_tx.send(Action::SetLoadingProgress(0.3)).await;
 
     // Fetch staker exposures for the previous era (active era - 1)
+    // Retry with backoff for light client stability
     let query_era = era_info.index.saturating_sub(1);
-    let exposures = match client.get_era_stakers_overview(query_era).await {
-        Ok(e) => {
-            tracing::info!(
-                "Found {} validator exposures for era {}",
-                e.len(),
-                query_era
-            );
-            e
+    let exposures = {
+        let mut result = None;
+        let max_attempts = if client.is_light_client() { 10 } else { 3 };
+        for attempt in 1..=max_attempts {
+            match client.get_era_stakers_overview(query_era).await {
+                Ok(e) => {
+                    tracing::info!(
+                        "Found {} active validators for era {}",
+                        e.len(),
+                        query_era
+                    );
+                    result = Some(e);
+                    break;
+                }
+                Err(e) => {
+                    if attempt < max_attempts {
+                        let delay = (attempt as u64).min(10);
+                        tracing::warn!(
+                            "Failed to get era stakers (attempt {}/{}): {} - retrying in {}s...",
+                            attempt, max_attempts, e, delay
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_secs(delay)).await;
+                    } else {
+                        tracing::warn!("Failed to get era stakers after {} attempts: {}", max_attempts, e);
+                    }
+                }
+            }
         }
-        Err(e) => {
-            tracing::error!("Failed to get era stakers: {}", e);
-            Vec::new()
-        }
+        result.unwrap_or_default()
     };
 
     let _ = action_tx.send(Action::SetLoadingProgress(0.6)).await;
@@ -618,8 +733,8 @@ async fn chain_task(
 
     let _ = action_tx.send(Action::SetLoadingProgress(0.7)).await;
 
-    // Fetch validator identities from People chain
-    let identity_map: HashMap<String, String> = if let Some(ref people) = people_client {
+    // Fetch fresh validator identities from People chain and update cache
+    if let Some(ref people) = people_client {
         let addresses: Vec<subxt::utils::AccountId32> =
             validators.iter().map(|v| v.address.clone()).collect();
 
@@ -630,29 +745,42 @@ async fn chain_task(
 
         match people.get_identities(&addresses).await {
             Ok(identities) => {
-                let with_names = identities
-                    .iter()
-                    .filter(|id| id.display_name.is_some())
-                    .count();
-                tracing::info!(
-                    "Found {} identities ({} with display names)",
-                    identities.len(),
-                    with_names
-                );
-                identities
+                let fresh_identities: HashMap<String, String> = identities
                     .into_iter()
                     .filter_map(|id| id.display_name.map(|name| (id.address.to_string(), name)))
-                    .collect()
+                    .collect();
+
+                let with_names = fresh_identities.len();
+                tracing::info!(
+                    "Found {} validators with display names from People chain",
+                    with_names
+                );
+
+                // Update cache with fresh data
+                if let Some(ref mut db) = db {
+                    match db.set_validator_identities_batch(network, &fresh_identities) {
+                        Ok(count) => {
+                            tracing::info!("Updated {} cached validator identities", count);
+                        }
+                        Err(e) => {
+                            tracing::debug!("Failed to update identity cache: {}", e);
+                        }
+                    }
+                }
+
+                // Merge fresh identities into our map (fresh data takes precedence)
+                identity_map.extend(fresh_identities);
             }
             Err(e) => {
-                tracing::warn!("Failed to fetch identities: {}", e);
-                HashMap::new()
+                tracing::warn!("Failed to fetch identities from People chain: {} (using cached data)", e);
+                // Keep using cached identities
             }
         }
+    } else if identity_map.is_empty() {
+        tracing::info!("Skipping identity fetch (People chain not connected, no cache)");
     } else {
-        tracing::info!("Skipping identity fetch (People chain not connected)");
-        HashMap::new()
-    };
+        tracing::info!("Using {} cached identities (People chain not connected)", identity_map.len());
+    }
 
     let _ = action_tx.send(Action::SetLoadingProgress(0.8)).await;
 
@@ -737,22 +865,32 @@ async fn chain_task(
     tracing::info!("Validator data loaded successfully");
 
     // Fetch nomination pools
+    // Note: This may fail with light client as storage iteration is limited
     let pools = match client.get_nomination_pools().await {
         Ok(p) => {
             tracing::info!("Found {} nomination pools", p.len());
             p
         }
         Err(e) => {
-            tracing::error!("Failed to get nomination pools: {}", e);
+            if client.is_light_client() {
+                tracing::warn!("Nomination pools unavailable (light client limitation): {}", e);
+            } else {
+                tracing::warn!("Failed to get nomination pools: {}", e);
+            }
             Vec::new()
         }
     };
 
     // Fetch pool metadata for names
+    // Note: This may fail with light client as storage iteration is limited
     let metadata = match client.get_pool_metadata().await {
         Ok(m) => m,
         Err(e) => {
-            tracing::error!("Failed to get pool metadata: {}", e);
+            if client.is_light_client() {
+                tracing::warn!("Pool metadata unavailable (light client limitation): {}", e);
+            } else {
+                tracing::warn!("Failed to get pool metadata: {}", e);
+            }
             Vec::new()
         }
     };

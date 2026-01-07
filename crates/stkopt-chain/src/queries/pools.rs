@@ -84,77 +84,105 @@ pub enum PoolAccountType {
 
 impl ChainClient {
     /// Get all bonded nomination pools.
+    /// Returns partial results if iteration is interrupted (e.g., connection drop).
     pub async fn get_nomination_pools(&self) -> Result<Vec<PoolInfo>, ChainError> {
         let storage_query = subxt::dynamic::storage("NominationPools", "BondedPools", ());
 
         let mut pools = Vec::new();
-        let mut iter = self
+        let iter_result = self
             .client()
             .storage()
             .at_latest()
             .await?
             .iter(storage_query)
-            .await?;
+            .await;
 
-        while let Some(result) = iter.next().await {
-            let kv = result?;
-            let key_bytes = kv.key_bytes;
-            let value: DecodedValueThunk = kv.value;
-
-            // Extract pool ID from key (last 4 bytes as u32)
-            if key_bytes.len() < 4 {
-                continue;
+        let mut iter = match iter_result {
+            Ok(iter) => iter,
+            Err(e) => {
+                tracing::warn!("Failed to start pool iteration: {}", e);
+                return Err(e.into());
             }
-            let id_bytes: [u8; 4] = key_bytes[key_bytes.len() - 4..]
-                .try_into()
-                .map_err(|_| ChainError::InvalidData("Invalid pool ID".into()))?;
-            let id = u32::from_le_bytes(id_bytes);
+        };
 
-            let decoded = value.to_value()?;
+        loop {
+            match iter.next().await {
+                Some(Ok(kv)) => {
+                    let key_bytes = kv.key_bytes;
+                    let value: DecodedValueThunk = kv.value;
 
-            // BondedPoolInner structure
-            let points = decoded
-                .at("points")
-                .and_then(|v: &Value<u32>| v.as_u128())
-                .unwrap_or(0);
+                    // Extract pool ID from key (last 4 bytes as u32)
+                    if key_bytes.len() < 4 {
+                        continue;
+                    }
+                    let Ok(id_bytes): Result<[u8; 4], _> = key_bytes[key_bytes.len() - 4..]
+                        .try_into() else {
+                        continue;
+                    };
+                    let id = u32::from_le_bytes(id_bytes);
 
-            let state = match decoded.at("state").and_then(|v: &Value<u32>| v.as_str()) {
-                Some("Open") => PoolState::Open,
-                Some("Blocked") => PoolState::Blocked,
-                Some("Destroying") => PoolState::Destroying,
-                _ => PoolState::Open,
-            };
+                    let Ok(decoded) = value.to_value() else {
+                        continue;
+                    };
 
-            let member_count = decoded
-                .at("member_counter")
-                .and_then(|v: &Value<u32>| v.as_u128())
-                .unwrap_or(0) as u32;
+                    // BondedPoolInner structure
+                    let points = decoded
+                        .at("points")
+                        .and_then(|v: &Value<u32>| v.as_u128())
+                        .unwrap_or(0);
 
-            // Parse roles
-            let roles = if let Some(roles_val) = decoded.at("roles") {
-                PoolRoles {
-                    depositor: parse_account_id(roles_val.at("depositor"))
-                        .unwrap_or_else(|| AccountId32::from([0u8; 32])),
-                    root: parse_account_id(roles_val.at("root")),
-                    nominator: parse_account_id(roles_val.at("nominator")),
-                    bouncer: parse_account_id(roles_val.at("bouncer")),
+                    let state = match decoded.at("state").and_then(|v: &Value<u32>| v.as_str()) {
+                        Some("Open") => PoolState::Open,
+                        Some("Blocked") => PoolState::Blocked,
+                        Some("Destroying") => PoolState::Destroying,
+                        _ => PoolState::Open,
+                    };
+
+                    let member_count = decoded
+                        .at("member_counter")
+                        .and_then(|v: &Value<u32>| v.as_u128())
+                        .unwrap_or(0) as u32;
+
+                    // Parse roles
+                    let roles = if let Some(roles_val) = decoded.at("roles") {
+                        PoolRoles {
+                            depositor: parse_account_id(roles_val.at("depositor"))
+                                .unwrap_or_else(|| AccountId32::from([0u8; 32])),
+                            root: parse_account_id(roles_val.at("root")),
+                            nominator: parse_account_id(roles_val.at("nominator")),
+                            bouncer: parse_account_id(roles_val.at("bouncer")),
+                        }
+                    } else {
+                        PoolRoles {
+                            depositor: AccountId32::from([0u8; 32]),
+                            root: None,
+                            nominator: None,
+                            bouncer: None,
+                        }
+                    };
+
+                    pools.push(PoolInfo {
+                        id,
+                        state,
+                        points,
+                        member_count,
+                        roles,
+                    });
                 }
-            } else {
-                PoolRoles {
-                    depositor: AccountId32::from([0u8; 32]),
-                    root: None,
-                    nominator: None,
-                    bouncer: None,
+                Some(Err(e)) => {
+                    // Connection error during iteration - return what we have so far
+                    tracing::warn!(
+                        "Pool iteration interrupted after {} entries: {}",
+                        pools.len(),
+                        e
+                    );
+                    break;
                 }
-            };
-
-            pools.push(PoolInfo {
-                id,
-                state,
-                points,
-                member_count,
-                roles,
-            });
+                None => {
+                    // Iteration complete
+                    break;
+                }
+            }
         }
 
         // Sort by pool ID
@@ -164,44 +192,72 @@ impl ChainClient {
     }
 
     /// Get metadata (names) for all pools.
+    /// Returns partial results if iteration is interrupted (e.g., connection drop).
     pub async fn get_pool_metadata(&self) -> Result<Vec<PoolMetadata>, ChainError> {
         let storage_query = subxt::dynamic::storage("NominationPools", "Metadata", ());
 
         let mut metadata = Vec::new();
-        let mut iter = self
+        let iter_result = self
             .client()
             .storage()
             .at_latest()
             .await?
             .iter(storage_query)
-            .await?;
+            .await;
+
+        let mut iter = match iter_result {
+            Ok(iter) => iter,
+            Err(e) => {
+                tracing::warn!("Failed to start pool metadata iteration: {}", e);
+                return Err(e.into());
+            }
+        };
 
         let mut count = 0;
-        while let Some(result) = iter.next().await {
-            count += 1;
-            let kv = result?;
-            let key_bytes = kv.key_bytes;
-            let value: DecodedValueThunk = kv.value;
+        loop {
+            match iter.next().await {
+                Some(Ok(kv)) => {
+                    count += 1;
+                    let key_bytes = kv.key_bytes;
+                    let value: DecodedValueThunk = kv.value;
 
-            // Extract pool ID from key
-            if key_bytes.len() < 4 {
-                tracing::debug!("Pool metadata key too short: {} bytes", key_bytes.len());
-                continue;
-            }
-            let id_bytes: [u8; 4] = key_bytes[key_bytes.len() - 4..]
-                .try_into()
-                .map_err(|_| ChainError::InvalidData("Invalid pool ID".into()))?;
-            let id = u32::from_le_bytes(id_bytes);
+                    // Extract pool ID from key
+                    if key_bytes.len() < 4 {
+                        tracing::debug!("Pool metadata key too short: {} bytes", key_bytes.len());
+                        continue;
+                    }
+                    let Ok(id_bytes): Result<[u8; 4], _> = key_bytes[key_bytes.len() - 4..]
+                        .try_into() else {
+                        continue;
+                    };
+                    let id = u32::from_le_bytes(id_bytes);
 
-            let decoded = value.to_value()?;
-            tracing::debug!("Pool {} raw metadata: {:?}", id, decoded);
+                    let Ok(decoded) = value.to_value() else {
+                        continue;
+                    };
+                    tracing::debug!("Pool {} raw metadata: {:?}", id, decoded);
 
-            // Metadata is stored as a sequence of bytes
-            let name = extract_bytes_as_string(&decoded);
-            tracing::debug!("Pool {} extracted name: '{}'", id, name);
+                    // Metadata is stored as a sequence of bytes
+                    let name = extract_bytes_as_string(&decoded);
+                    tracing::debug!("Pool {} extracted name: '{}'", id, name);
 
-            if !name.is_empty() {
-                metadata.push(PoolMetadata { id, name });
+                    if !name.is_empty() {
+                        metadata.push(PoolMetadata { id, name });
+                    }
+                }
+                Some(Err(e)) => {
+                    // Connection error during iteration - return what we have so far
+                    tracing::warn!(
+                        "Pool metadata iteration interrupted after {} entries: {}",
+                        count,
+                        e
+                    );
+                    break;
+                }
+                None => {
+                    // Iteration complete
+                    break;
+                }
             }
         }
 
