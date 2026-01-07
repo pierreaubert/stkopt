@@ -7,12 +7,16 @@ edition.workspace = true
 stkopt-core.workspace = true
 tokio.workspace = true
 subxt.workspace = true
+subxt-lightclient.workspace = true
 sp-crypto-hashing.workspace = true
 parity-scale-codec.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
 futures.workspace = true
+reqwest.workspace = true
+# Force ed25519-zebra alloc feature for smoldot light client
+ed25519-zebra.workspace = true
 
 [dev-dependencies]
 tracing-subscriber.workspace = true

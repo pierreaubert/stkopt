@@ -1,12 +1,16 @@
 pub mod client;
 pub mod config;
 pub mod error;
+pub mod lightclient;
 pub mod queries;
 pub mod transactions;
 
-pub use client::{ChainClient, ChainInfo, RpcEndpoints, connect_people_chain};
+pub use client::{
+    ChainClient, ChainInfo, ConnectionConfig, ConnectionMode, RpcEndpoints, connect_people_chain,
+};
 pub use config::*;
 pub use error::*;
+pub use lightclient::LightClientConnections;
 pub use queries::account::{
     AccountBalance, NominatorInfo, PoolMembership, StakingLedger, UnlockChunk,
 };

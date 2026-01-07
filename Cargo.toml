@@ -23,10 +23,13 @@ tokio-util = { version = "0.7", features = ["rt"] }
 futures = "0.3"
 
 # Chain interaction
-subxt = { version = "0.40", features = ["native"] }
-subxt-signer = "0.40"
+subxt = { version = "0.44", features = ["native", "unstable-light-client"] }
+subxt-lightclient = { version = "0.44", features = ["native"] }
+subxt-signer = "0.44"
 sp-crypto-hashing = "0.1"
 parity-scale-codec = "3.7"
+# Force ed25519-zebra alloc feature for smoldot compatibility
+ed25519-zebra = { version = "4", features = ["alloc"] }
 
 # TUI
 ratatui = { version = "0.29", features = ["crossterm"] }

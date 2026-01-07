@@ -1,17 +1,51 @@
 //! Chain client abstraction using subxt.
 //!
-//! Supports WebSocket RPC connections to Polkadot-SDK chains.
+//! Supports both light client (smoldot) and WebSocket RPC connections.
 //!
-//! Since the Polkadot 2.0 migration (Nov 2025), staking data is on Asset Hub.
-//! This client connects to Asset Hub by default for all staking operations.
+//! # Connection Modes
+//!
+//! - **LightClient** (default): Trustless P2P connection using smoldot.
+//!   Does not require trusting any RPC provider. Cannot query historical state.
+//!
+//! - **Rpc**: Traditional WebSocket RPC connection. Required for historical
+//!   data queries (past eras). Used as fallback when light client fails.
+//!
+//! # Architecture (Polkadot 2.0, Nov 2025+)
+//!
+//! - Asset Hub: All staking data (validators, pools, nominations)
+//! - Relay Chain: Transaction submission, block/session data
+//! - People Chain: Identity data
 
 use crate::config::get_asset_hub_endpoints;
 use crate::error::ChainError;
+use crate::lightclient::LightClientConnections;
 use stkopt_core::{ConnectionStatus, Network};
 
-use subxt::backend::rpc::RpcClient;
 use subxt::{OnlineClient, PolkadotConfig};
 use tokio::sync::mpsc;
+
+/// Connection mode for the chain client.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ConnectionMode {
+    /// Light client (smoldot) - trustless P2P connection.
+    /// This is the default and preferred mode.
+    /// Cannot query historical state beyond current block.
+    #[default]
+    LightClient,
+    /// RPC connection via WebSocket.
+    /// Required for historical data queries.
+    /// Use when light client is unavailable or for fallback.
+    Rpc,
+}
+
+impl std::fmt::Display for ConnectionMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConnectionMode::LightClient => write!(f, "Light Client"),
+            ConnectionMode::Rpc => write!(f, "RPC"),
+        }
+    }
+}
 
 /// RPC endpoint configuration for all chain types.
 #[derive(Debug, Clone, Default)]
@@ -22,6 +56,15 @@ pub struct RpcEndpoints {
     pub relay: Option<String>,
     /// People chain RPC endpoint (for identity data).
     pub people: Option<String>,
+}
+
+/// Connection configuration.
+#[derive(Debug, Clone, Default)]
+pub struct ConnectionConfig {
+    /// Connection mode (LightClient or Rpc).
+    pub mode: ConnectionMode,
+    /// RPC endpoints (used when mode is Rpc, or as fallback).
+    pub rpc_endpoints: RpcEndpoints,
 }
 
 /// Chain metadata and validation info.
@@ -46,6 +89,8 @@ pub struct ChainInfo {
 /// Note: Staking transactions still go to the relay chain, not Asset Hub.
 pub struct ChainClient {
     network: Network,
+    /// Connection mode used.
+    connection_mode: ConnectionMode,
     /// Asset Hub client (for reading staking data).
     client: OnlineClient<PolkadotConfig>,
     /// Relay chain client (for submitting staking transactions).
@@ -53,6 +98,73 @@ pub struct ChainClient {
 }
 
 impl ChainClient {
+    /// Connect to a network using the specified configuration.
+    ///
+    /// Uses light client by default (trustless P2P), falling back to RPC
+    /// if light client connection fails.
+    pub async fn connect(
+        network: Network,
+        config: &ConnectionConfig,
+        status_tx: mpsc::Sender<ConnectionStatus>,
+    ) -> Result<Self, ChainError> {
+        match config.mode {
+            ConnectionMode::LightClient => {
+                tracing::info!("Connection mode: Light Client (trustless P2P)");
+                // Try light client first
+                match Self::connect_light_client(network, status_tx.clone()).await {
+                    Ok(client) => Ok(client),
+                    Err(e) => {
+                        tracing::warn!("Light client connection failed: {}", e);
+                        tracing::info!("Falling back to RPC mode...");
+                        // Fall back to RPC
+                        Self::connect_rpc(network, &config.rpc_endpoints, status_tx).await
+                    }
+                }
+            }
+            ConnectionMode::Rpc => {
+                tracing::info!("Connection mode: RPC (forced via --rpc flag)");
+                Self::connect_rpc(network, &config.rpc_endpoints, status_tx).await
+            }
+        }
+    }
+
+    /// Connect using the light client (smoldot).
+    ///
+    /// This is the preferred connection method as it doesn't require
+    /// trusting any RPC provider. The light client verifies all data
+    /// cryptographically using P2P connections.
+    ///
+    /// # Limitations
+    ///
+    /// Light clients cannot query historical state beyond the current block.
+    /// For historical data, use RPC mode.
+    pub async fn connect_light_client(
+        network: Network,
+        status_tx: mpsc::Sender<ConnectionStatus>,
+    ) -> Result<Self, ChainError> {
+        let _ = status_tx.send(ConnectionStatus::Connecting).await;
+
+        tracing::info!("Connecting to {} via light client (smoldot)...", network);
+
+        // Connect using light client - this fetches chain specs and establishes
+        // P2P connections to relay chain and Asset Hub
+        let light_client_conns = LightClientConnections::connect(network).await?;
+
+        let _ = status_tx.send(ConnectionStatus::Connected).await;
+
+        tracing::info!(
+            "Light client connected to {} (Asset Hub + Relay Chain)",
+            network
+        );
+
+        Ok(Self {
+            network,
+            connection_mode: ConnectionMode::LightClient,
+            client: light_client_conns.asset_hub,
+            relay_client: Some(light_client_conns.relay),
+        })
+    }
+
     /// Connect to a network's Asset Hub using WebSocket RPC.
     /// Uses custom endpoints from RpcEndpoints if provided, otherwise uses defaults.
     ///
@@ -85,29 +197,11 @@ impl ChainClient {
         for endpoint in endpoints {
             tracing::info!("Trying {} Asset Hub via {}", network, endpoint);
 
-            match RpcClient::from_url(endpoint).await {
-                Ok(rpc_client) => {
-                    match OnlineClient::<PolkadotConfig>::from_rpc_client(rpc_client.clone()).await
-                    {
-                        Ok(client) => {
-                            tracing::info!("Connected to {} Asset Hub via {}", network, endpoint);
-
-                            // Log chain name to verify metadata
-                            if let Ok(name) = rpc_client
-                                .request::<String>("system_chain", subxt::rpc_params![])
-                                .await
-                            {
-                                tracing::info!("Chain reported name: {}", name);
-                            }
-
-                            asset_hub_client = Some(client);
-                            break;
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to create client from {}: {}", endpoint, e);
-                            last_error = Some(e.to_string());
-                        }
-                    }
+            match OnlineClient::<PolkadotConfig>::from_url(endpoint).await {
+                Ok(client) => {
+                    tracing::info!("Connected to {} Asset Hub via {}", network, endpoint);
+                    asset_hub_client = Some(client);
+                    break;
                 }
                 Err(e) => {
                     tracing::warn!("Failed to connect to {}: {}", endpoint, e);
@@ -125,7 +219,9 @@ impl ChainClient {
         })?;
 
         // Also connect to relay chain for transaction submission
-        let relay_client = Self::connect_relay_chain(network, rpc_endpoints.relay.as_deref()).await.ok();
+        let relay_client = Self::connect_relay_chain(network, rpc_endpoints.relay.as_deref())
+            .await
+            .ok();
         if relay_client.is_some() {
             tracing::info!("Also connected to {} relay chain for transactions", network);
         } else {
@@ -138,6 +234,7 @@ impl ChainClient {
 
         Ok(Self {
             network,
+            connection_mode: ConnectionMode::Rpc,
             client,
             relay_client,
         })
@@ -166,10 +263,7 @@ impl ChainClient {
         for endpoint in endpoints {
             tracing::debug!("Trying {} relay chain via {}", network, endpoint);
 
-            if let Ok(rpc_client) = RpcClient::from_url(endpoint).await
-                && let Ok(client) =
-                    OnlineClient::<PolkadotConfig>::from_rpc_client(rpc_client).await
-            {
+            if let Ok(client) = OnlineClient::<PolkadotConfig>::from_url(endpoint).await {
                 tracing::debug!("Connected to {} relay chain via {}", network, endpoint);
                 return Ok(client);
             }
@@ -199,6 +293,16 @@ impl ChainClient {
     /// Check if relay chain is connected.
     pub fn has_relay_connection(&self) -> bool {
         self.relay_client.is_some()
+    }
+
+    /// Get the connection mode used.
+    pub fn connection_mode(&self) -> ConnectionMode {
+        self.connection_mode
+    }
+
+    /// Check if using light client mode.
+    pub fn is_light_client(&self) -> bool {
+        self.connection_mode == ConnectionMode::LightClient
     }
 
     /// Get the genesis hash (Asset Hub).
@@ -241,15 +345,15 @@ impl ChainClient {
         }
         .to_string();
 
-        // Validate based on spec version range (known good versions)
-        // These are approximate ranges for Asset Hub chains in late 2025
-        let validated = (1_000_000..2_000_000).contains(&spec_version);
+        // Validate spec version - just a basic sanity check that we're on a modern runtime
+        // Asset Hub spec versions are typically >= 1,000,000
+        let validated = spec_version >= 1_000_000;
 
         let validation_message = if validated {
             String::new()
         } else {
             format!(
-                "Warning: Unexpected spec_version {} for {}",
+                "Warning: Unexpected spec_version {} for {} (expected >= 1000000)",
                 spec_version, self.network
             )
         };
@@ -305,18 +409,10 @@ pub async fn connect_people_chain(
     for endpoint in endpoints {
         tracing::info!("Trying {} People chain via {}", network, endpoint);
 
-        match RpcClient::from_url(endpoint).await {
-            Ok(rpc_client) => {
-                match OnlineClient::<PolkadotConfig>::from_rpc_client(rpc_client).await {
-                    Ok(client) => {
-                        tracing::info!("Connected to {} People chain via {}", network, endpoint);
-                        return Ok(client);
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to create People client from {}: {}", endpoint, e);
-                        last_error = Some(e.to_string());
-                    }
-                }
+        match OnlineClient::<PolkadotConfig>::from_url(endpoint).await {
+            Ok(client) => {
+                tracing::info!("Connected to {} People chain via {}", network, endpoint);
+                return Ok(client);
             }
             Err(e) => {
                 tracing::warn!("Failed to connect to People chain {}: {}", endpoint, e);

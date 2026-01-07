@@ -6,7 +6,7 @@
 //!   cargo run -p stkopt-chain --example test_connection
 //!   cargo run -p stkopt-chain --example test_connection -- wss://polkadot-asset-hub-rpc.polkadot.io
 
-use stkopt_chain::ChainClient;
+use stkopt_chain::{ChainClient, RpcEndpoints};
 use stkopt_core::{ConnectionStatus, Network};
 use tokio::sync::mpsc;
 
@@ -35,8 +35,15 @@ async fn main() {
         }
     });
 
+    // Build RPC endpoints config
+    let rpc_endpoints = RpcEndpoints {
+        asset_hub: custom_url.map(|s| s.to_string()),
+        relay: None,
+        people: None,
+    };
+
     // Try to connect
-    match ChainClient::connect_rpc(Network::Polkadot, custom_url, status_tx).await {
+    match ChainClient::connect_rpc(Network::Polkadot, &rpc_endpoints, status_tx).await {
         Ok(client) => {
             println!("Connected successfully!");
             println!("Genesis hash: 0x{}", hex::encode(client.genesis_hash()));
@@ -399,7 +406,7 @@ async fn main() {
 async fn test_people_chain(client: &stkopt_chain::ChainClient, network: Network) {
     println!("Connecting to {} People chain...", network);
 
-    match stkopt_chain::connect_people_chain(network).await {
+    match stkopt_chain::connect_people_chain(network, None).await {
         Ok(subxt_client) => {
             println!("✓ Connected to People chain");
 

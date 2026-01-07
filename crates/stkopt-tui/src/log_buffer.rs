@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use tracing_subscriber::Layer;
 
 /// Maximum number of log lines to keep.
-const MAX_LOG_LINES: usize = 500;
+const MAX_LOG_LINES: usize = 2000;
 
 /// A log line with level and message.
 #[derive(Debug, Clone)]

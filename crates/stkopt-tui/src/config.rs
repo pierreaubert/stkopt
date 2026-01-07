@@ -35,7 +35,7 @@ pub struct SavedAccount {
 impl AppConfig {
     /// Get the config directory path.
     pub fn config_dir() -> Option<PathBuf> {
-        ProjectDirs::from("io", "stkopt", "stkopt").map(|dirs| dirs.config_dir().to_path_buf())
+        ProjectDirs::from("xyz", "dotidx", "stkopt").map(|dirs| dirs.config_dir().to_path_buf())
     }
 
     /// Get the config file path.

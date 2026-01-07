@@ -59,10 +59,16 @@ struct Args {
     /// Number of eras to fetch in update mode (default: 30)
     #[arg(long, default_value = "30")]
     eras: u32,
+
+    /// Force RPC mode instead of light client.
+    /// Light client is default (trustless) but RPC may be needed for
+    /// historical data queries or when light client has issues.
+    #[arg(long)]
+    rpc: bool,
 }
 
-// Re-export RpcEndpoints from stkopt_chain
-use stkopt_chain::RpcEndpoints;
+// Re-export connection types from stkopt_chain
+use stkopt_chain::{ConnectionConfig, ConnectionMode, RpcEndpoints};
 
 /// Network argument that can be parsed from string.
 #[derive(Debug, Clone)]
@@ -96,27 +102,45 @@ async fn main() -> Result<()> {
     // Create shared log buffer
     let log_buffer = LogBuffer::new();
 
-    // Initialize logging with our buffer layer
+    // Initialize logging - use stderr for update mode, buffer for TUI
     let env_filter = tracing_subscriber::EnvFilter::from_default_env()
         .add_directive("stkopt=info".parse()?)
         .add_directive("stkopt_chain=info".parse()?)
         .add_directive("stkopt_core=info".parse()?);
 
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(LogBufferLayer::new(log_buffer.clone()))
-        .init();
+    if args.update {
+        // In update mode, log to stderr so user can see progress
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+            .init();
+    } else {
+        // In TUI mode, log to buffer for display in UI
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(LogBufferLayer::new(log_buffer.clone()))
+            .init();
+    }
 
     let network = args.network.0;
-    let rpc_endpoints = RpcEndpoints {
-        asset_hub: args.asset_hub_url.clone(),
-        relay: args.relay_url.clone(),
-        people: args.people_url.clone(),
+
+    // Build connection configuration
+    let connection_config = ConnectionConfig {
+        mode: if args.rpc {
+            ConnectionMode::Rpc
+        } else {
+            ConnectionMode::LightClient
+        },
+        rpc_endpoints: RpcEndpoints {
+            asset_hub: args.asset_hub_url.clone(),
+            relay: args.relay_url.clone(),
+            people: args.people_url.clone(),
+        },
     };
 
     // Handle update mode (batch mode for cron jobs)
     if args.update {
-        return run_update_mode(network, rpc_endpoints.clone(), args.address, args.eras).await;
+        return run_update_mode(network, connection_config.clone(), args.address, args.eras).await;
     }
 
     // Create action channel (bounded to prevent memory exhaustion from slow UI)
@@ -181,7 +205,7 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         chain_task(
             network,
-            rpc_endpoints,
+            connection_config,
             chain_action_tx,
             account_rx,
             account_action_tx,
@@ -227,7 +251,7 @@ async fn main() -> Result<()> {
                 // Handle special actions
                 match &action {
                     Action::SetWatchedAccount(account) => {
-                        let _ = account_tx.send(account.clone());
+                        let _ = account_tx.send(account.clone()).await;
                         // Save account to config (public key only)
                         let addr_str = account.to_string();
                         app_config.add_account(
@@ -244,7 +268,7 @@ async fn main() -> Result<()> {
                             account.clone(),
                             app.history_total_eras,
                             history_cancel_rx.clone(),
-                        ));
+                        )).await;
                         // Mark history as loading (will be handled by LoadStakingHistory action in app)
                         let _ = action_tx.send(Action::LoadStakingHistory).await;
                     }
@@ -263,7 +287,7 @@ async fn main() -> Result<()> {
 
                         let criteria = stkopt_core::OptimizationCriteria::default();
                         let result = stkopt_core::select_validators(&candidates, &criteria);
-                        let _ = action_tx.send(Action::SetOptimizationResult(result));
+                        let _ = action_tx.send(Action::SetOptimizationResult(result)).await;
                     }
                     Action::RunOptimizationWithStrategy(strategy_idx) => {
                         // Run optimization with selected strategy
@@ -290,7 +314,7 @@ async fn main() -> Result<()> {
                             ..stkopt_core::OptimizationCriteria::default()
                         };
                         let result = stkopt_core::select_validators(&candidates, &criteria);
-                        let _ = action_tx.send(Action::SetOptimizationResult(result));
+                        let _ = action_tx.send(Action::SetOptimizationResult(result)).await;
                     }
                     Action::GenerateNominationQR => {
                         // Get selected validator addresses
@@ -307,19 +331,19 @@ async fn main() -> Result<()> {
                                 .collect();
 
                             if !targets.is_empty() {
-                                let _ = qr_tx.send((account.clone(), targets));
+                                let _ = qr_tx.send((account.clone(), targets)).await;
                             }
                         }
                     }
                     Action::LoadStakingHistory => {
                         if let Some(account) = &app.watched_account {
-                            // Reset cancellation flag
+                            // Reset cancellation flag (watch channel - sync send)
                             let _ = history_cancel_tx.send(false);
                             let _ = history_tx.send((
                                 account.clone(),
                                 app.history_total_eras,
                                 history_cancel_rx.clone(),
-                            ));
+                            )).await;
                         }
                     }
                     Action::CancelLoadingHistory => {
@@ -349,7 +373,7 @@ async fn main() -> Result<()> {
                         if let Some(&addr_str) = known_addresses.get(actual_idx) {
                             use std::str::FromStr;
                             if let Ok(account) = subxt::utils::AccountId32::from_str(addr_str) {
-                                let _ = action_tx.send(Action::SetWatchedAccount(account));
+                                let _ = action_tx.send(Action::SetWatchedAccount(account)).await;
                             }
                         }
                     }
@@ -400,7 +424,7 @@ async fn main() -> Result<()> {
 #[allow(clippy::too_many_arguments)]
 async fn chain_task(
     network: Network,
-    rpc_endpoints: RpcEndpoints,
+    config: ConnectionConfig,
     action_tx: mpsc::Sender<Action>,
     mut account_rx: mpsc::Receiver<subxt::utils::AccountId32>,
     account_action_tx: mpsc::Sender<Action>,
@@ -431,43 +455,49 @@ async fn chain_task(
         }
     });
 
-    // Connect to Asset Hub
-    let client = match ChainClient::connect_rpc(network, &rpc_endpoints, status_tx).await {
+    // Connect to chain (light client or RPC based on config)
+    let client = match ChainClient::connect(network, &config, status_tx).await {
         Ok(client) => {
             tracing::info!(
-                "Connected to {} Asset Hub (genesis: {:?})",
+                "Connected to {} Asset Hub via {} (genesis: {:?})",
                 network,
+                client.connection_mode(),
                 client.genesis_hash()
             );
             client
         }
         Err(e) => {
             tracing::error!("Failed to connect to Asset Hub: {}", e);
-            let _ = action_tx.send(Action::UpdateConnectionStatus(ConnectionStatus::Error(
-                e.to_string(),
-            )));
+            let _ = action_tx
+                .send(Action::UpdateConnectionStatus(ConnectionStatus::Error(
+                    e.to_string(),
+                )))
+                .await;
             return;
         }
     };
 
     // Send chain info for UI display and validation
     let chain_info = client.get_chain_info();
-    let _ = action_tx.send(Action::SetChainInfo(chain_info));
+    let _ = action_tx.send(Action::SetChainInfo(chain_info)).await;
 
     // Connect to People chain for identity queries
-    let people_client = match stkopt_chain::connect_people_chain(network, rpc_endpoints.people.as_deref()).await {
-        Ok(subxt_client) => {
-            tracing::info!("Connected to {} People chain", network);
-            Some(stkopt_chain::PeopleChainClient::new(subxt_client))
-        }
-        Err(e) => {
-            tracing::warn!(
-                "Failed to connect to People chain (identities unavailable): {}",
-                e
-            );
-            None
-        }
-    };
+    let people_client =
+        match stkopt_chain::connect_people_chain(network, config.rpc_endpoints.people.as_deref())
+            .await
+        {
+            Ok(subxt_client) => {
+                tracing::info!("Connected to {} People chain", network);
+                Some(stkopt_chain::PeopleChainClient::new(subxt_client))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to connect to People chain (identities unavailable): {}",
+                    e
+                );
+                None
+            }
+        };
 
     // Brief delay to let connection stabilize
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -478,7 +508,7 @@ async fn chain_task(
         for attempt in 1..=10 {
             match client.get_active_era().await {
                 Ok(Some(info)) => {
-                    let _ = action_tx.send(Action::SetActiveEra(info.clone()));
+                    let _ = action_tx.send(Action::SetActiveEra(info.clone())).await;
                     era_result = Some(info);
                     break;
                 }
@@ -504,7 +534,7 @@ async fn chain_task(
     // Fetch era duration
     let era_duration_ms = match client.get_era_duration_ms().await {
         Ok(duration) => {
-            let _ = action_tx.send(Action::SetEraDuration(duration));
+            let _ = action_tx.send(Action::SetEraDuration(duration)).await;
             duration
         }
         Err(e) => {
@@ -513,7 +543,7 @@ async fn chain_task(
         }
     };
 
-    let _ = action_tx.send(Action::SetLoadingProgress(0.1));
+    let _ = action_tx.send(Action::SetLoadingProgress(0.1)).await;
 
     // Fetch validators
     let validators = match client.get_validators().await {
@@ -527,7 +557,7 @@ async fn chain_task(
         }
     };
 
-    let _ = action_tx.send(Action::SetLoadingProgress(0.3));
+    let _ = action_tx.send(Action::SetLoadingProgress(0.3)).await;
 
     // Fetch staker exposures for the previous era (active era - 1)
     let query_era = era_info.index.saturating_sub(1);
@@ -546,7 +576,7 @@ async fn chain_task(
         }
     };
 
-    let _ = action_tx.send(Action::SetLoadingProgress(0.6));
+    let _ = action_tx.send(Action::SetLoadingProgress(0.6)).await;
 
     // Fetch era reward
     let era_reward = match client.get_era_validator_reward(query_era).await {
@@ -586,7 +616,7 @@ async fn chain_task(
         .map(|vp| (*vp.address.as_ref(), vp.points))
         .collect();
 
-    let _ = action_tx.send(Action::SetLoadingProgress(0.7));
+    let _ = action_tx.send(Action::SetLoadingProgress(0.7)).await;
 
     // Fetch validator identities from People chain
     let identity_map: HashMap<String, String> = if let Some(ref people) = people_client {
@@ -624,7 +654,7 @@ async fn chain_task(
         HashMap::new()
     };
 
-    let _ = action_tx.send(Action::SetLoadingProgress(0.8));
+    let _ = action_tx.send(Action::SetLoadingProgress(0.8)).await;
 
     // Build exposure map for quick lookup
     let exposure_map: HashMap<[u8; 32], _> = exposures
@@ -699,8 +729,10 @@ async fn chain_task(
         validator_apy_map.len()
     );
 
-    let _ = action_tx.send(Action::SetLoadingProgress(0.9));
-    let _ = action_tx.send(Action::SetDisplayValidators(display_validators));
+    let _ = action_tx.send(Action::SetLoadingProgress(0.9)).await;
+    let _ = action_tx
+        .send(Action::SetDisplayValidators(display_validators))
+        .await;
 
     tracing::info!("Validator data loaded successfully");
 
@@ -751,7 +783,9 @@ async fn chain_task(
     }
 
     // Send pools immediately so UI shows them (without APY)
-    let _ = action_tx.send(Action::SetDisplayPools(display_pools.clone()));
+    let _ = action_tx
+        .send(Action::SetDisplayPools(display_pools.clone()))
+        .await;
     tracing::info!(
         "Sent {} pools to UI (fetching APY in background)",
         display_pools.len()
@@ -821,7 +855,9 @@ async fn chain_task(
 
         // Send progress update every 10 pools
         if (idx + 1) % 10 == 0 {
-            let _ = action_tx.send(Action::SetDisplayPools(display_pools.clone()));
+            let _ = action_tx
+                .send(Action::SetDisplayPools(display_pools.clone()))
+                .await;
             tracing::debug!("Updated APY for {} pools", idx + 1);
         }
     }
@@ -836,8 +872,8 @@ async fn chain_task(
         (None, None) => b.member_count.cmp(&a.member_count),
     });
 
-    let _ = action_tx.send(Action::SetLoadingProgress(1.0));
-    let _ = action_tx.send(Action::SetDisplayPools(display_pools));
+    let _ = action_tx.send(Action::SetLoadingProgress(1.0)).await;
+    let _ = action_tx.send(Action::SetDisplayPools(display_pools)).await;
 
     tracing::info!("Nomination pools loaded successfully");
 
@@ -893,7 +929,7 @@ async fn chain_task(
                     pool_membership,
                 };
 
-                let _ = account_action_tx.send(Action::SetAccountStatus(Box::new(status)));
+                let _ = account_action_tx.send(Action::SetAccountStatus(Box::new(status))).await;
                 tracing::info!("Account status updated");
             }
             Some((signer, targets)) = qr_rx.recv() => {
@@ -915,12 +951,12 @@ async fn chain_task(
                             nonce: payload.nonce,
                         };
 
-                        let _ = qr_action_tx.send(Action::SetQRData(Some(qr_data), Some(tx_info)));
+                        let _ = qr_action_tx.send(Action::SetQRData(Some(qr_data), Some(tx_info))).await;
                         tracing::info!("QR data generated ({} bytes for Polkadot Vault)", qr_len);
                     }
                     Err(e) => {
                         tracing::error!("Failed to generate nomination payload: {}", e);
-                        let _ = qr_action_tx.send(Action::SetQRData(None, None));
+                        let _ = qr_action_tx.send(Action::SetQRData(None, None)).await;
                     }
                 }
             }
@@ -946,7 +982,7 @@ async fn chain_task(
                 {
                     tracing::info!("Loaded {} cached history points", cached.len());
                     for point in cached {
-                        let _ = history_action_tx.send(Action::AddStakingHistoryPoint(point));
+                        let _ = history_action_tx.send(Action::AddStakingHistoryPoint(point)).await;
                     }
                 }
 
@@ -1058,7 +1094,7 @@ async fn chain_task(
                     };
 
                     new_points.push(point.clone());
-                    let _ = history_action_tx.send(Action::AddStakingHistoryPoint(point));
+                    let _ = history_action_tx.send(Action::AddStakingHistoryPoint(point)).await;
                     tracing::debug!("Added history point for era {} (APY: {:.2}%)", era, apy * 100.0);
                 }
 
@@ -1099,7 +1135,7 @@ fn get_db_path() -> std::path::PathBuf {
 /// This is suitable for running from cron jobs.
 async fn run_update_mode(
     network: Network,
-    rpc_endpoints: RpcEndpoints,
+    config: ConnectionConfig,
     address: Option<String>,
     num_eras: u32,
 ) -> Result<()> {
@@ -1130,10 +1166,10 @@ async fn run_update_mode(
     // Create connection status channel (not used in update mode, but required by API)
     let (status_tx, _status_rx) = mpsc::channel::<ConnectionStatus>(1);
 
-    // Connect to chain
+    // Connect to chain (update mode always uses RPC for historical queries)
     println!("Connecting to {} Asset Hub...", network);
-    let client = ChainClient::connect_rpc(network, &rpc_endpoints, status_tx).await?;
-    println!("Connected");
+    let client = ChainClient::connect(network, &config, status_tx).await?;
+    println!("Connected via {}", client.connection_mode());
 
     // Get current era info
     let current_era_info = client

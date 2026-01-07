@@ -31,10 +31,10 @@ fn truncate_str(s: &str, max_chars: usize) -> String {
 /// Render the entire UI.
 pub fn render(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::vertical([
-        Constraint::Length(3), // Header
-        Constraint::Length(3), // Tabs
-        Constraint::Min(0),    // Content
-        Constraint::Length(5), // Log viewer (3 lines + border)
+        Constraint::Length(3),  // Header
+        Constraint::Length(3),  // Tabs
+        Constraint::Min(0),     // Content
+        Constraint::Length(12), // Log viewer (10 lines + border)
     ])
     .split(frame.area());
 
@@ -2076,8 +2076,8 @@ fn render_logs(frame: &mut Frame, app: &App, area: Rect) {
         String::new()
     };
 
-    // Get visible lines (3 lines, accounting for scroll)
-    let visible_lines = 3;
+    // Get visible lines (10 lines, accounting for scroll)
+    let visible_lines = 10;
     let start_idx = if log_count > visible_lines {
         log_count - visible_lines - app.log_scroll.min(log_count.saturating_sub(visible_lines))
     } else {
@@ -2111,7 +2111,7 @@ fn render_logs(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    // Pad with empty lines if we have fewer than 3 log lines
+    // Pad with empty lines if we have fewer log lines than visible area
     let mut display_lines = lines;
     while display_lines.len() < visible_lines {
         display_lines.insert(0, Line::from(""));
