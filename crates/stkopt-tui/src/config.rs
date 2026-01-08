@@ -238,8 +238,16 @@ mod tests {
     #[test]
     fn test_multiple_accounts() {
         let mut config = AppConfig::default();
-        config.add_account("addr1".to_string(), Some("Account 1".to_string()), Some("Polkadot".to_string()));
-        config.add_account("addr2".to_string(), Some("Account 2".to_string()), Some("Kusama".to_string()));
+        config.add_account(
+            "addr1".to_string(),
+            Some("Account 1".to_string()),
+            Some("Polkadot".to_string()),
+        );
+        config.add_account(
+            "addr2".to_string(),
+            Some("Account 2".to_string()),
+            Some("Kusama".to_string()),
+        );
         config.add_account("addr3".to_string(), None, None);
 
         assert_eq!(config.accounts.len(), 3);

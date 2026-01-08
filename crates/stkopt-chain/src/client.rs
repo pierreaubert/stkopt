@@ -546,7 +546,7 @@ impl TxSubmissionProgress {
                 TransactionStatus::Validated => {
                     tracing::debug!("Transaction validated");
                 }
-                TransactionStatus::Broadcasted { .. } => {
+                TransactionStatus::Broadcasted => {
                     tracing::debug!("Transaction broadcasted");
                 }
                 TransactionStatus::NoLongerInBestBlock => {
@@ -601,7 +601,7 @@ impl TxSubmissionProgress {
                     )));
                 }
                 TransactionStatus::Validated
-                | TransactionStatus::Broadcasted { .. }
+                | TransactionStatus::Broadcasted
                 | TransactionStatus::InBestBlock { .. }
                 | TransactionStatus::NoLongerInBestBlock => {
                     // Continue waiting for finalization

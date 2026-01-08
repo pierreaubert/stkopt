@@ -7,6 +7,7 @@ mod db;
 mod event;
 mod log_buffer;
 mod qr_reader;
+mod tcc;
 mod theme;
 mod tui;
 mod ui;
@@ -19,12 +20,61 @@ use config::AppConfig;
 use event::{Event, EventHandler};
 use log_buffer::{LogBuffer, LogBufferLayer};
 use ratatui::crossterm::event::KeyCode;
-use stkopt_chain::ChainClient;
+use stkopt_chain::{ChainClient, RewardDestination};
 use stkopt_core::{ConnectionStatus, Network};
 use tokio::sync::mpsc;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tui::Tui;
+
+/// Staking operation to be performed by the chain task.
+#[derive(Debug)]
+enum StakingOp {
+    // Direct staking
+    Bond {
+        signer: subxt::utils::AccountId32,
+        value: u128,
+    },
+    Unbond {
+        signer: subxt::utils::AccountId32,
+        value: u128,
+    },
+    BondExtra {
+        signer: subxt::utils::AccountId32,
+        value: u128,
+    },
+    SetPayee {
+        signer: subxt::utils::AccountId32,
+        destination: RewardDestination,
+    },
+    WithdrawUnbonded {
+        signer: subxt::utils::AccountId32,
+    },
+    Chill {
+        signer: subxt::utils::AccountId32,
+    },
+
+    // Pool operations
+    PoolJoin {
+        signer: subxt::utils::AccountId32,
+        pool_id: u32,
+        amount: u128,
+    },
+    PoolBondExtra {
+        signer: subxt::utils::AccountId32,
+        amount: u128,
+    },
+    PoolClaim {
+        signer: subxt::utils::AccountId32,
+    },
+    PoolUnbond {
+        signer: subxt::utils::AccountId32,
+        amount: u128,
+    },
+    PoolWithdraw {
+        signer: subxt::utils::AccountId32,
+    },
+}
 
 /// Staking Optimizer TUI - Terminal interface for Polkadot staking optimization.
 #[derive(Parser, Debug)]
@@ -167,6 +217,10 @@ async fn main() -> Result<()> {
         tokio::sync::watch::Receiver<bool>,
     )>(HISTORY_CHANNEL_CAPACITY);
 
+    // Create staking operation channel
+    const STAKING_OP_CHANNEL_CAPACITY: usize = 10;
+    let (staking_op_tx, staking_op_rx) = mpsc::channel::<StakingOp>(STAKING_OP_CHANNEL_CAPACITY);
+
     // Cancellation sender for history loading
     let (history_cancel_tx, history_cancel_rx) = tokio::sync::watch::channel(false);
 
@@ -217,6 +271,18 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Check and request camera permission on macOS
+    #[cfg(target_os = "macos")]
+    {
+        tcc::print_camera_permission_status();
+        if let Err(e) = tcc::ensure_camera_permission() {
+            tracing::warn!(
+                "Camera permission not available: {}. QR scanning may not work.",
+                e
+            );
+        }
+    }
+
     // Initialize terminal
     let mut tui = Tui::new()?;
     tui.enter()?;
@@ -232,6 +298,7 @@ async fn main() -> Result<()> {
     let account_action_tx = action_tx.clone();
     let qr_action_tx = action_tx.clone();
     let history_action_tx = action_tx.clone();
+    let staking_op_action_tx = action_tx.clone();
     tokio::spawn(async move {
         chain_task(
             network,
@@ -243,6 +310,8 @@ async fn main() -> Result<()> {
             qr_action_tx,
             history_rx,
             history_action_tx,
+            staking_op_rx,
+            staking_op_action_tx,
         )
         .await;
     });
@@ -394,6 +463,113 @@ async fn main() -> Result<()> {
                         let result = stkopt_core::select_validators(&candidates, &criteria);
                         let _ = action_tx.send(Action::SetOptimizationResult(result)).await;
                     }
+                    Action::GenerateBondQR { value } => {
+                        if let Some(account) = &app.watched_account {
+                            let _ = staking_op_tx
+                                .send(StakingOp::Bond {
+                                    signer: account.clone(),
+                                    value: *value,
+                                })
+                                .await;
+                        }
+                    }
+                    Action::GenerateUnbondQR { value } => {
+                        if let Some(account) = &app.watched_account {
+                            let _ = staking_op_tx
+                                .send(StakingOp::Unbond {
+                                    signer: account.clone(),
+                                    value: *value,
+                                })
+                                .await;
+                        }
+                    }
+                    Action::GenerateBondExtraQR { value } => {
+                        if let Some(account) = &app.watched_account {
+                            let _ = staking_op_tx
+                                .send(StakingOp::BondExtra {
+                                    signer: account.clone(),
+                                    value: *value,
+                                })
+                                .await;
+                        }
+                    }
+                    Action::GenerateSetPayeeQR { destination } => {
+                        if let Some(account) = &app.watched_account {
+                            let _ = staking_op_tx
+                                .send(StakingOp::SetPayee {
+                                    signer: account.clone(),
+                                    destination: destination.clone(),
+                                })
+                                .await;
+                        }
+                    }
+                    Action::GenerateWithdrawUnbondedQR => {
+                        if let Some(account) = &app.watched_account {
+                            let _ = staking_op_tx
+                                .send(StakingOp::WithdrawUnbonded {
+                                    signer: account.clone(),
+                                })
+                                .await;
+                        }
+                    }
+                    Action::GenerateChillQR => {
+                        if let Some(account) = &app.watched_account {
+                            let _ = staking_op_tx
+                                .send(StakingOp::Chill {
+                                    signer: account.clone(),
+                                })
+                                .await;
+                        }
+                    }
+                    Action::GeneratePoolJoinQR { pool_id, amount } => {
+                        if let Some(account) = &app.watched_account {
+                            let _ = staking_op_tx
+                                .send(StakingOp::PoolJoin {
+                                    signer: account.clone(),
+                                    pool_id: *pool_id,
+                                    amount: *amount,
+                                })
+                                .await;
+                        }
+                    }
+                    Action::GeneratePoolBondExtraQR { amount } => {
+                        if let Some(account) = &app.watched_account {
+                            let _ = staking_op_tx
+                                .send(StakingOp::PoolBondExtra {
+                                    signer: account.clone(),
+                                    amount: *amount,
+                                })
+                                .await;
+                        }
+                    }
+                    Action::GeneratePoolUnbondQR { amount } => {
+                        if let Some(account) = &app.watched_account {
+                            let _ = staking_op_tx
+                                .send(StakingOp::PoolUnbond {
+                                    signer: account.clone(),
+                                    amount: *amount,
+                                })
+                                .await;
+                        }
+                    }
+                    Action::GeneratePoolClaimQR => {
+                        if let Some(account) = &app.watched_account {
+                            let _ = staking_op_tx
+                                .send(StakingOp::PoolClaim {
+                                    signer: account.clone(),
+                                })
+                                .await;
+                        }
+                    }
+                    Action::GeneratePoolWithdrawQR => {
+                        if let Some(account) = &app.watched_account {
+                            let _ = staking_op_tx
+                                .send(StakingOp::PoolWithdraw {
+                                    signer: account.clone(),
+                                })
+                                .await;
+                        }
+                    }
                     Action::GenerateNominationQR => {
                         // Get selected validator addresses
                         if let Some(account) = &app.watched_account {
@@ -423,7 +599,7 @@ async fn main() -> Result<()> {
                             &signature_data[..signature_data.len().min(20)]
                         );
                         // Decode the signature from Vault's QR code
-                        match stkopt_chain::decode_vault_signature(&signature_data) {
+                        match stkopt_chain::decode_vault_signature(signature_data) {
                             Ok(signature) => {
                                 if let Some(ref pending) = app.pending_unsigned_tx {
                                     // Build the signed extrinsic
@@ -613,6 +789,8 @@ async fn chain_task(
         tokio::sync::watch::Receiver<bool>,
     )>,
     history_action_tx: mpsc::Sender<Action>,
+    mut staking_op_rx: mpsc::Receiver<StakingOp>,
+    staking_op_action_tx: mpsc::Sender<Action>,
 ) {
     use crate::action::{DisplayPool, DisplayValidator};
     use std::collections::HashMap;
@@ -1484,6 +1662,115 @@ async fn chain_task(
                 if !*cancel_rx.borrow() {
                     let _ = history_action_tx.send(Action::HistoryLoadingComplete).await;
                     tracing::info!("Staking history loaded");
+                }
+            }
+            Some(op) = staking_op_rx.recv() => {
+                tracing::info!("Processing staking op: {:?}", op);
+                let use_mortal_era = true;
+
+                let (signer, result) = match &op {
+                    StakingOp::Bond { signer, value } => (
+                        signer,
+                        client.create_bond_payload(signer, *value, use_mortal_era).await,
+                    ),
+                    StakingOp::Unbond { signer, value } => (
+                        signer,
+                        client.create_unbond_payload(signer, *value, use_mortal_era).await,
+                    ),
+                    StakingOp::BondExtra { signer, value } => (
+                        signer,
+                        client.create_bond_extra_payload(signer, *value, use_mortal_era).await,
+                    ),
+                    StakingOp::SetPayee {
+                        signer,
+                        destination,
+                    } => (
+                        signer,
+                        client
+                            .create_set_payee_payload(signer, destination.clone(), use_mortal_era)
+                            .await,
+                    ),
+                    StakingOp::WithdrawUnbonded { signer } => (
+                        signer,
+                        client
+                            .create_withdraw_unbonded_payload(signer, 0, use_mortal_era)
+                            .await,
+                    ),
+                    StakingOp::Chill { signer } => (
+                        signer,
+                        client.create_chill_payload(signer, use_mortal_era).await,
+                    ),
+                    StakingOp::PoolJoin {
+                        signer,
+                        pool_id,
+                        amount,
+                    } => (
+                        signer,
+                        client
+                            .create_pool_join_payload(signer, *pool_id, *amount, use_mortal_era)
+                            .await,
+                    ),
+                    StakingOp::PoolBondExtra { signer, amount } => (
+                        signer,
+                        client
+                            .create_pool_bond_extra_payload(signer, *amount, use_mortal_era)
+                            .await,
+                    ),
+                    StakingOp::PoolClaim { signer } => (
+                        signer,
+                        client.create_pool_claim_payload(signer, use_mortal_era).await,
+                    ),
+                    StakingOp::PoolUnbond { signer, amount } => (
+                        signer,
+                        client
+                            .create_pool_unbond_payload(signer, signer, *amount, use_mortal_era)
+                            .await,
+                    ),
+                    StakingOp::PoolWithdraw { signer } => (
+                        signer,
+                        client
+                            .create_pool_withdraw_payload(signer, signer, 0, use_mortal_era)
+                            .await,
+                    ),
+                };
+
+                match result {
+                    Ok(payload) => {
+                        let qr_data = stkopt_chain::encode_for_qr(&payload, signer);
+                        let qr_len = qr_data.len();
+
+                        let tx_info = crate::action::TransactionInfo {
+                            signer: signer.to_string(),
+                            call: payload.description.clone(),
+                            targets: vec![],
+                            call_data_size: payload.call_data.len(),
+                            spec_version: payload.spec_version,
+                            tx_version: payload.tx_version,
+                            nonce: payload.nonce,
+                            include_metadata_hash: payload.include_metadata_hash,
+                        };
+
+                        let pending = crate::action::PendingUnsignedTx {
+                            payload: payload.clone(),
+                            signer: signer.clone(),
+                        };
+                        let _ = staking_op_action_tx
+                            .send(Action::SetPendingUnsignedTx(Some(pending)))
+                            .await;
+                        let _ = staking_op_action_tx
+                            .send(Action::SetQRData(Some(qr_data), Some(tx_info)))
+                            .await;
+                        tracing::info!("QR data generated ({} bytes)", qr_len);
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to generate payload: {}", e);
+                        let _ = staking_op_action_tx
+                            .send(Action::SetPendingUnsignedTx(None))
+                            .await;
+                        let _ = staking_op_action_tx
+                            .send(Action::SetQRData(None, None))
+                            .await;
+                    }
                 }
             }
             else => break,

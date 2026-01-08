@@ -13,7 +13,7 @@ pub use config::*;
 pub use error::*;
 pub use lightclient::LightClientConnections;
 pub use queries::account::{
-    AccountBalance, NominatorInfo, PoolMembership, StakingLedger, UnlockChunk,
+    AccountBalance, NominatorInfo, PoolMembership, StakingLedger, UnlockChunk, UnlockChunkInfo,
 };
 pub use queries::identity::{PeopleChainClient, ValidatorIdentity};
 pub use queries::pools::{
@@ -22,6 +22,6 @@ pub use queries::pools::{
 };
 pub use queries::validators::{ValidatorExposure, ValidatorInfo, ValidatorPoints};
 pub use transactions::{
-    Era, SignedExtrinsic, TxStatus, UnsignedPayload, build_signed_extrinsic,
+    Era, RewardDestination, SignedExtrinsic, TxStatus, UnsignedPayload, build_signed_extrinsic,
     decode_vault_signature, encode_for_qr,
 };

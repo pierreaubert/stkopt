@@ -1,11 +1,37 @@
 //! Actions for state updates.
 
 use stkopt_chain::{
-    AccountBalance, ChainInfo, NominatorInfo, PoolMembership, PoolState, StakingLedger,
-    UnsignedPayload, ValidatorExposure, ValidatorInfo,
+    AccountBalance, ChainInfo, NominatorInfo, PoolMembership, PoolState, RewardDestination,
+    StakingLedger, UnsignedPayload, ValidatorExposure, ValidatorInfo,
 };
 use stkopt_core::{ConnectionStatus, EraIndex, EraInfo, Network, OptimizationResult};
 use subxt::utils::AccountId32;
+
+/// Input mode for staking operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StakingInputMode {
+    #[default]
+    None,
+    Bond,
+    Unbond,
+    BondExtra,
+    SetPayee,
+    PoolJoin,
+    PoolUnbond,
+    PoolBondExtra,
+}
+
+/// Pool operation type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PoolOperation {
+    #[default]
+    None,
+    Join,
+    BondExtra,
+    Claim,
+    Unbond,
+    Withdraw,
+}
 
 /// Aggregated validator data for display.
 #[derive(Debug, Clone)]
@@ -177,6 +203,45 @@ pub enum Action {
     ClearNominations,
     /// Generate QR code for nomination transaction.
     GenerateNominationQR,
+
+    // === Staking Operations ===
+    /// Generate QR for bonding.
+    GenerateBondQR { value: u128 },
+    /// Generate QR for unbonding.
+    GenerateUnbondQR { value: u128 },
+    /// Generate QR for bonding extra.
+    GenerateBondExtraQR { value: u128 },
+    /// Generate QR for setting payee.
+    GenerateSetPayeeQR { destination: RewardDestination },
+    /// Generate QR for withdrawing unbonded.
+    GenerateWithdrawUnbondedQR,
+    /// Generate QR for chill.
+    GenerateChillQR,
+
+    // === Pool Operations ===
+    /// Generate QR for joining a pool.
+    GeneratePoolJoinQR { pool_id: u32, amount: u128 },
+    /// Generate QR for bonding extra to pool.
+    GeneratePoolBondExtraQR { amount: u128 },
+    /// Generate QR for claiming pool rewards.
+    GeneratePoolClaimQR,
+    /// Generate QR for unbonding from pool.
+    GeneratePoolUnbondQR { amount: u128 },
+    /// Generate QR for withdrawing unbonded from pool.
+    GeneratePoolWithdrawQR,
+
+    // === UI State Updates ===
+    /// Set the input mode for staking operations.
+    SetStakingInputMode(StakingInputMode),
+    /// Update the staking amount input.
+    UpdateStakingAmount(String),
+    /// Set the selected reward destination.
+    SetRewardsDestination(RewardDestination),
+    /// Set the current pool operation.
+    SetPoolOperation(PoolOperation),
+    /// Select a pool for joining.
+    SelectPoolForJoin(usize),
+
     /// Set QR code data to display (raw bytes + transaction info).
     SetQRData(Option<Vec<u8>>, Option<TransactionInfo>),
     /// Store the pending unsigned transaction for later signature.

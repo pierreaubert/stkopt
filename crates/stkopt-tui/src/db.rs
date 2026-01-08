@@ -737,9 +737,7 @@ mod tests {
         db.insert_history_batch(Network::Polkadot, "addr1", &points)
             .unwrap();
 
-        let history = db
-            .get_history(Network::Polkadot, "addr1", Some(3))
-            .unwrap();
+        let history = db.get_history(Network::Polkadot, "addr1", Some(3)).unwrap();
         assert_eq!(history.len(), 3);
     }
 
@@ -755,7 +753,11 @@ mod tests {
     #[test]
     fn test_get_latest_era() {
         let mut db = HistoryDb::open_memory().unwrap();
-        let points = vec![make_test_point(1500), make_test_point(1505), make_test_point(1503)];
+        let points = vec![
+            make_test_point(1500),
+            make_test_point(1505),
+            make_test_point(1503),
+        ];
         db.insert_history_batch(Network::Polkadot, "addr1", &points)
             .unwrap();
 

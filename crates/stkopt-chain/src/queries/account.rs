@@ -30,6 +30,14 @@ pub struct UnlockChunk {
     pub era: EraIndex,
 }
 
+/// Unlocking chunk with status info.
+#[derive(Debug, Clone)]
+pub struct UnlockChunkInfo {
+    pub value: Balance,
+    pub era: EraIndex,
+    pub remaining_eras: u32,
+}
+
 /// Nomination information for a nominator.
 #[derive(Debug, Clone)]
 pub struct NominatorInfo {
@@ -46,6 +54,29 @@ pub struct PoolMembership {
 }
 
 impl ChainClient {
+    /// Get unlocking chunks with status.
+    pub async fn get_unlocking_chunks(
+        &self,
+        account: &AccountId32,
+        current_era: u32,
+    ) -> Result<Vec<UnlockChunkInfo>, ChainError> {
+        let ledger = self.get_staking_ledger(account).await?;
+
+        let mut chunks = Vec::new();
+        if let Some(ledger) = ledger {
+            for chunk in ledger.unlocking {
+                let remaining_eras = chunk.era.saturating_sub(current_era);
+                chunks.push(UnlockChunkInfo {
+                    value: chunk.value,
+                    era: chunk.era,
+                    remaining_eras,
+                });
+            }
+        }
+
+        Ok(chunks)
+    }
+
     /// Get account balance information.
     pub async fn get_account_balance(
         &self,

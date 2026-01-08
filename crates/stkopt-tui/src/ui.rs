@@ -1,5 +1,6 @@
 //! UI rendering.
 
+use crate::action::StakingInputMode;
 use crate::app::{App, InputMode, PoolSortField, ValidatorSortField, View};
 use crate::log_buffer::LogLevel;
 use crate::theme::Palette;
@@ -11,7 +12,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Tabs},
 };
-use stkopt_chain::PoolState;
+use stkopt_chain::{PoolState, RewardDestination};
 use stkopt_core::ConnectionStatus;
 
 /// Safely truncate a string to a maximum number of characters (not bytes).
@@ -61,6 +62,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // Render strategy menu overlay
     if app.input_mode == InputMode::StrategyMenu {
         render_strategy_menu(frame, app);
+    }
+
+    // Render staking/pool operation modal
+    if app.input_mode == InputMode::Staking {
+        render_staking_modal(frame, app);
     }
 
     // Render account prompt popup if showing
@@ -244,9 +250,67 @@ fn render_content(frame: &mut Frame, app: &mut App, area: Rect) {
         View::Validators => render_validators(frame, app, area),
         View::Pools => render_pools(frame, app, area),
         View::Nominate => render_nominate(frame, app, area),
-        View::Account => render_account(frame, app, area),
-        View::History => render_history(frame, app, area),
+        View::AccountStatus => render_account_status(frame, app, area),
+        View::AccountChanges => render_account_changes(frame, app, area),
+        View::AccountHistory => render_account_history(frame, app, area),
     }
+}
+
+/// Render the account changes view (staking operations).
+fn render_account_changes(frame: &mut Frame, app: &App, area: Rect) {
+    let pal = &app.palette;
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(pal.border))
+        .title(" Account Changes | Staking Operations ");
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if app.watched_account.is_none() {
+        let msg = vec![
+            Line::from("No account loaded."),
+            Line::from(""),
+            Line::from("Go to 'Account Status' tab (press 1) and press 'a' to set an account."),
+        ];
+        let p = Paragraph::new(msg)
+            .style(Style::default().fg(pal.warning))
+            .alignment(Alignment::Center);
+        frame.render_widget(p, inner);
+        return;
+    }
+
+    // List of operations
+    let ops = vec![
+        ("b", "Bond Funds", "Stake more funds (generates QR)"),
+        ("u", "Unbond Funds", "Start unbonding process (generates QR)"),
+        ("+", "Bond Extra", "Bond additional funds to existing stash"),
+        ("r", "Set Payee", "Change reward destination (Staked, Stash, Controller, None)"),
+        ("w", "Withdraw Unbonded", "Withdraw unbonded funds that are ready"),
+        ("x", "Chill", "Stop nominating (chill)"),
+    ];
+
+    let mut lines = Vec::new();
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  Available Operations:",
+        Style::default().fg(pal.primary).bold(),
+    )));
+    lines.push(Line::from(""));
+
+    for (key, name, desc) in ops {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(format!("[{}]", key), Style::default().fg(pal.highlight).bold()),
+            Span::styled(format!(" {:<20}", name), Style::default().bold()),
+            Span::styled(desc, Style::default().fg(pal.muted)),
+        ]));
+        lines.push(Line::from(""));
+    }
+
+    let p = Paragraph::new(lines);
+    frame.render_widget(p, inner);
 }
 
 /// Format balance with proper decimals.
@@ -461,21 +525,44 @@ fn render_validators(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_stateful_widget(table, table_area, &mut app.validators_table_state);
 }
 
-/// Render the nomination pools view with table.
+/// Render the nomination pools view with status and table.
 fn render_pools(frame: &mut Frame, app: &mut App, area: Rect) {
     let pal = &app.palette;
     let decimals = app.network.token_decimals();
+    let symbol = app.network.token_symbol();
 
-    // Split area if searching
-    let (search_area, table_area) = if app.input_mode == InputMode::Searching {
-        let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(area);
-        (Some(chunks[0]), chunks[1])
+    // Determine layout: Status (optional) -> Search (optional) -> Table
+    let mut constraints = Vec::new();
+    
+    // 1. Status Panel (only if account is watched)
+    if app.watched_account.is_some() {
+        constraints.push(Constraint::Length(8));
     } else {
-        (None, area)
-    };
+        constraints.push(Constraint::Length(0));
+    }
 
-    // Render search bar if in search mode
-    if let Some(search_area) = search_area {
+    // 2. Search Bar (only if searching)
+    if app.input_mode == InputMode::Searching {
+        constraints.push(Constraint::Length(3));
+    } else {
+        constraints.push(Constraint::Length(0));
+    }
+
+    // 3. Table (Remaining)
+    constraints.push(Constraint::Min(0));
+
+    let chunks = Layout::vertical(constraints).split(area);
+    let status_area = chunks[0];
+    let search_area = chunks[1];
+    let table_area = chunks[2];
+
+    // --- Render Status Panel ---
+    if app.watched_account.is_some() {
+        render_pool_status(frame, app, status_area);
+    }
+
+    // --- Render Search Bar ---
+    if app.input_mode == InputMode::Searching {
         let search_text = format!("/{}", app.search_query);
         let search = Paragraph::new(search_text)
             .style(Style::default().fg(pal.highlight))
@@ -488,6 +575,7 @@ fn render_pools(frame: &mut Frame, app: &mut App, area: Rect) {
         frame.render_widget(search, search_area);
     }
 
+    // --- Render Pools Table ---
     if app.pools.is_empty() {
         let loading_text = if app.connection_status == ConnectionStatus::Connected {
             "Fetching nomination pools...".to_string()
@@ -615,6 +703,99 @@ fn render_pools(frame: &mut Frame, app: &mut App, area: Rect) {
         .highlight_symbol(">> ");
 
     frame.render_stateful_widget(table, table_area, &mut app.pools_table_state);
+}
+
+/// Render the pool status panel.
+fn render_pool_status(frame: &mut Frame, app: &App, area: Rect) {
+    let pal = &app.palette;
+    let decimals = app.network.token_decimals();
+    let symbol = app.network.token_symbol();
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(pal.border))
+        .title(" My Pool Status ");
+
+    let inner_area = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut lines = Vec::new();
+
+    if let Some(status) = &app.account_status {
+        if let Some(membership) = &status.pool_membership {
+            // Find pool name
+            let pool_name = app.pools.iter()
+                .find(|p| p.id == membership.pool_id)
+                .map(|p| p.name.as_str())
+                .unwrap_or("Unknown");
+
+            // Line 1: Membership Info
+            lines.push(Line::from(vec![
+                Span::styled("Member of: ", Style::default().fg(pal.fg_dim)),
+                Span::styled(format!("Pool {} ({})", membership.pool_id, pool_name), Style::default().bold()),
+            ]));
+
+            // Line 2: Stake & Rewards
+            lines.push(Line::from(vec![
+                Span::styled("Active Stake: ", Style::default().fg(pal.fg_dim)),
+                Span::styled(format!("{} {}", format_balance(membership.points, decimals), symbol), Style::default().fg(pal.primary).bold()),
+                Span::raw("    "),
+                Span::styled("Rewards: ", Style::default().fg(pal.fg_dim)),
+                Span::styled("Claimable ", Style::default().fg(pal.success)),
+                Span::raw("(use 'C')"),
+            ]));
+
+            // Line 3: Unbonding
+            if !membership.unbonding_eras.is_empty() {
+                let total_unbonding: u128 = membership.unbonding_eras.iter().map(|(_, val)| val).sum();
+                lines.push(Line::from(vec![
+                    Span::styled("Unbonding: ", Style::default().fg(pal.fg_dim)),
+                    Span::styled(format!("{} {}", format_balance(total_unbonding, decimals), symbol), Style::default().fg(pal.warning)),
+                    Span::raw(format!(" ({} chunks)", membership.unbonding_eras.len())),
+                ]));
+            } else {
+                 lines.push(Line::from(vec![
+                    Span::styled("Unbonding: ", Style::default().fg(pal.fg_dim)),
+                    Span::raw("None"),
+                ]));
+            }
+
+            // Line 4: Operations
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("Actions: ", Style::default().fg(pal.fg_dim)),
+                Span::styled("J", Style::default().fg(pal.highlight).bold()),
+                Span::raw(":Bond Extra  "),
+                Span::styled("U", Style::default().fg(pal.highlight).bold()),
+                Span::raw(":Unbond  "),
+                Span::styled("C", Style::default().fg(pal.highlight).bold()),
+                Span::raw(":Claim  "),
+                Span::styled("W", Style::default().fg(pal.highlight).bold()),
+                Span::raw(":Withdraw"),
+            ]));
+
+        } else {
+            // Not in a pool
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("You are not currently a member of any nomination pool.", Style::default().fg(pal.warning)),
+            ]));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::raw("To join a pool: "),
+                Span::styled("Select a pool", Style::default().bold()),
+                Span::raw(" from the list below and press "),
+                Span::styled("j", Style::default().fg(pal.highlight).bold()),
+                Span::raw("."),
+            ]));
+        }
+    } else {
+        // Account status not loaded yet
+        lines.push(Line::from("Loading account status..."));
+    }
+
+    let p = Paragraph::new(lines).block(Block::default().borders(Borders::NONE));
+    frame.render_widget(p, inner_area);
 }
 
 /// Render the nomination optimizer view.
@@ -779,7 +960,7 @@ fn render_nominate(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 /// Render the account status view.
-fn render_account(frame: &mut Frame, app: &mut App, area: Rect) {
+fn render_account_status(frame: &mut Frame, app: &mut App, area: Rect) {
     let decimals = app.network.token_decimals();
     let symbol = app.network.token_symbol();
     let pal = &app.palette;
@@ -985,10 +1166,9 @@ fn render_account(frame: &mut Frame, app: &mut App, area: Rect) {
                     .find(|p| p.id == membership.pool_id)
                     .map(|p| p.name.as_str());
                 let pool_display = match pool_name {
-                    Some(name) if !name.is_empty() => format!(
-                        "    Member of Pool {} ({})",
-                        membership.pool_id, name
-                    ),
+                    Some(name) if !name.is_empty() => {
+                        format!("    Member of Pool {} ({})", membership.pool_id, name)
+                    }
                     _ => format!("    Member of Pool {}", membership.pool_id),
                 };
                 lines.push(Line::from(pool_display));
@@ -1087,7 +1267,7 @@ fn render_account(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 /// Render the staking history view with bar chart and table.
-fn render_history(frame: &mut Frame, app: &App, area: Rect) {
+fn render_account_history(frame: &mut Frame, app: &App, area: Rect) {
     let pal = &app.palette;
     let chunks = Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
@@ -1950,12 +2130,7 @@ fn render_qr_details(frame: &mut Frame, app: &App, area: Rect) {
 /// 3  6
 /// 7  8
 /// ```
-fn grayscale_to_braille(
-    pixels: &[u8],
-    width: usize,
-    height: usize,
-    threshold: u8,
-) -> Vec<String> {
+fn grayscale_to_braille(pixels: &[u8], width: usize, height: usize, threshold: u8) -> Vec<String> {
     // Braille patterns: U+2800 to U+28FF
     // Bit mapping: dot 1 = bit 0, dot 2 = bit 1, dot 3 = bit 2, dot 4 = bit 3,
     //              dot 5 = bit 4, dot 6 = bit 5, dot 7 = bit 6, dot 8 = bit 7
@@ -2073,7 +2248,9 @@ fn render_scan_camera(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let border_color = match app.camera_scan_status {
-        None | Some(CameraScanStatus::Initializing) | Some(CameraScanStatus::Scanning) => pal.border,
+        None | Some(CameraScanStatus::Initializing) | Some(CameraScanStatus::Scanning) => {
+            pal.border
+        }
         Some(CameraScanStatus::Detected) => pal.success,
         Some(CameraScanStatus::Success) => pal.success,
         Some(CameraScanStatus::Error) => pal.error,
@@ -2235,7 +2412,10 @@ fn render_submit_tab(frame: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(pal.success).bold(),
             ),
             TxSubmissionStatus::Submitting => (
-                format!("⏳ Submitting{}", ".".repeat((app.tick_count() % 4) as usize)),
+                format!(
+                    "⏳ Submitting{}",
+                    ".".repeat((app.tick_count() % 4) as usize)
+                ),
                 Style::default().fg(pal.warning),
             ),
             TxSubmissionStatus::InBlock { block_hash } => (
@@ -2406,10 +2586,7 @@ fn render_multipart_qr(
         Ok(qr) => {
             let qr_lines = render_qr_halfblock(&qr, dark_theme);
             // Width in chars (each module is 2 chars wide now)
-            *qr_width = qr_lines
-                .first()
-                .map(|l| l.width() as u16)
-                .unwrap_or(0);
+            *qr_width = qr_lines.first().map(|l| l.width() as u16).unwrap_or(0);
 
             lines.push(Line::from(""));
             lines.push(Line::from(vec![
@@ -2911,6 +3088,135 @@ fn render_strategy_menu(frame: &mut Frame, app: &App) {
                 .title(" Strategy Selection "),
         )
         .style(Style::default().bg(pal.bg));
+
+    frame.render_widget(paragraph, modal_area);
+}
+
+/// Render modal for staking operations.
+fn render_staking_modal(frame: &mut Frame, app: &App) {
+    let pal = &app.palette;
+    let area = frame.area();
+
+    // Center the modal
+    let modal_width = 60;
+    let modal_height = 12;
+    let x = (area.width.saturating_sub(modal_width)) / 2;
+    let y = (area.height.saturating_sub(modal_height)) / 2;
+    let modal_area = Rect::new(x, y, modal_width, modal_height);
+
+    frame.render_widget(Clear, modal_area);
+
+    let symbol = app.network.token_symbol();
+
+    let (title, content, hint) = match app.staking_input_mode {
+        StakingInputMode::Bond => (
+            " Bond Tokens ",
+            format!("Enter amount to BOND ({})", symbol),
+            app.staking_input_amount.clone(),
+        ),
+        StakingInputMode::Unbond => (
+            " Unbond Tokens ",
+            format!("Enter amount to UNBOND ({})", symbol),
+            app.staking_input_amount.clone(),
+        ),
+        StakingInputMode::BondExtra => (
+            " Bond Extra ",
+            format!("Enter additional amount to BOND ({})", symbol),
+            app.staking_input_amount.clone(),
+        ),
+        StakingInputMode::PoolJoin => {
+            let pool_name = app
+                .selected_pool_for_join
+                .and_then(|idx| app.pools.get(idx))
+                .map(|p| p.name.as_str())
+                .unwrap_or("Unknown Pool");
+            (
+                " Join Pool ",
+                format!("Join '{}'\nEnter amount to BOND ({})", pool_name, symbol),
+                app.pool_input_amount.clone(),
+            )
+        }
+        StakingInputMode::PoolBondExtra => (
+            " Bond Extra to Pool ",
+            format!("Enter additional amount to BOND ({})", symbol),
+            app.pool_input_amount.clone(),
+        ),
+        StakingInputMode::PoolUnbond => (
+            " Unbond from Pool ",
+            format!("Enter amount to UNBOND ({})", symbol),
+            app.pool_input_amount.clone(),
+        ),
+        StakingInputMode::SetPayee => (" Set Rewards Destination ", String::new(), String::new()),
+        _ => return,
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(pal.primary))
+        .title(title)
+        .style(Style::default().bg(pal.bg));
+
+    let mut lines = Vec::new();
+    match app.staking_input_mode {
+        StakingInputMode::SetPayee => {
+            lines.push(Line::from("Select destination:"));
+            lines.push(Line::from(""));
+
+            let options = [
+                (RewardDestination::Staked, "Staked (Compounding)"),
+                (RewardDestination::Controller, "Controller Account"),
+                (
+                    RewardDestination::Account(subxt::utils::AccountId32::from([0u8; 32])),
+                    "Custom Account",
+                ),
+                (RewardDestination::None, "None (Burned)"),
+            ];
+
+            for (opt_enum, label) in options.iter() {
+                let is_selected = std::mem::discriminant(&app.rewards_destination)
+                    == std::mem::discriminant(opt_enum);
+                let checkbox = if is_selected { "[x]" } else { "[ ]" };
+                let style = if is_selected {
+                    Style::default().fg(pal.success).bold()
+                } else {
+                    Style::default()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(checkbox, style),
+                    Span::raw(format!(" {}", label)),
+                ]));
+            }
+
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "r/arrows:Cycle  Enter:Confirm  Esc:Cancel",
+                Style::default().fg(pal.muted),
+            )));
+        }
+        _ => {
+            // Amount input modes
+            for line in content.split('\n') {
+                lines.push(Line::from(line));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("> ", Style::default().fg(pal.accent)),
+                Span::styled(
+                    format!("{} _", hint),
+                    Style::default().fg(pal.highlight).bold(),
+                ),
+            ]));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Enter:Confirm  Esc:Cancel",
+                Style::default().fg(pal.muted),
+            )));
+        }
+    }
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .alignment(Alignment::Center);
 
     frame.render_widget(paragraph, modal_area);
 }

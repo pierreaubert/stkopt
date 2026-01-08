@@ -2,8 +2,22 @@
 
 use crate::ChainClient;
 use crate::error::ChainError;
-use subxt::dynamic::{At, Value};
+use subxt::dynamic::At;
+use subxt::ext::scale_value::{Primitive, Value};
 pub use subxt::utils::AccountId32;
+
+/// Reward destination for staking rewards.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RewardDestination {
+    /// Rewards are automatically bonded (compounding).
+    Staked,
+    /// Rewards are paid to the controller account (usually same as stash now).
+    Controller,
+    /// Rewards are paid to a specific account.
+    Account(AccountId32),
+    /// Rewards are burned (do not use).
+    None,
+}
 
 /// Unsigned extrinsic payload for QR code signing.
 #[derive(Debug, Clone)]
@@ -42,44 +56,18 @@ pub enum Era {
 }
 
 impl ChainClient {
-    /// Generate an unsigned nomination extrinsic.
-    ///
-    /// Staking transactions go to Asset Hub where the Staking pallet lives (Polkadot 2.0).
-    ///
-    /// # Arguments
-    /// * `signer` - The account that will sign the transaction
-    /// * `targets` - List of validator addresses to nominate
-    /// * `use_mortal_era` - If true, use mortal era (expires after ~12 min); if false, use immortal era
-    pub async fn create_nominate_payload(
+    /// Common logic for creating a transaction payload.
+    async fn create_payload_internal<Call: subxt::tx::Payload>(
         &self,
         signer: &AccountId32,
-        targets: &[AccountId32],
+        call: Call,
+        description: String,
         use_mortal_era: bool,
     ) -> Result<UnsignedPayload, ChainError> {
-        // Build the nominate call
-        let target_values: Vec<Value<()>> = targets
-            .iter()
-            .map(|t| {
-                // MultiAddress::Id variant
-                Value::named_variant("Id", [("0", Value::from_bytes(t.clone()))])
-            })
-            .collect();
-
-        let call = subxt::dynamic::tx(
-            "Staking",
-            "nominate",
-            vec![Value::unnamed_composite(target_values)],
-        );
-
-        // Use Asset Hub client
         let client = self.client();
-
-        // Get the call data (using Asset Hub's metadata)
         let call_data = client.tx().call_data(&call)?;
 
-        // Check extensions in metadata
         let metadata = client.metadata();
-        // Try to find extensions for common versions (usually 4, but subxt might index at 0)
         let extensions: Vec<_> = (0..=5)
             .find_map(|v| metadata.extrinsic().transaction_extensions_by_version(v))
             .map(|iter| iter.collect())
@@ -92,122 +80,22 @@ impl ChainClient {
             .iter()
             .any(|e| e.identifier() == "ChargeAssetTxPayment");
 
-        // Use Asset Hub genesis hash
         let genesis_hash: [u8; 32] = self.genesis_hash();
-
         let runtime = client.runtime_version();
-        let spec_version = runtime.spec_version;
-        let tx_version = runtime.transaction_version;
-
-        // Get account nonce from Asset Hub
         let nonce = self.get_account_nonce(signer).await?;
 
-        // Choose era and block_hash based on use_mortal_era flag
         let (era, block_hash) = if use_mortal_era {
-            // Mortal era for security (replay protection)
-            // 128 blocks ~ 12 minutes (at 6s block time), plenty for QR scan flow
             let (block_number, block_hash) = self.get_latest_block().await?;
             let period = 128;
             let phase = block_number as u64 % period;
             (Era::Mortal { period, phase }, block_hash)
         } else {
-            // Immortal era - use genesis hash as block_hash
             (Era::Immortal, genesis_hash)
         };
-
-        // Create description
-        let description = format!("Nominate {} validators", targets.len());
-
-        let metadata_hash = [0u8; 32];
-        let genesis_hex: String = genesis_hash.iter().map(|b| format!("{:02x}", b)).collect();
-        let era_str = match &era {
-            Era::Immortal => "Immortal".to_string(),
-            Era::Mortal { period, phase } => format!("Mortal({}/{})", period, phase),
-        };
-        tracing::info!(
-            "Created nominate payload: genesis=0x{}, spec={}, tx={}, nonce={}, meta_hash={}, asset_pay={}, era={}",
-            genesis_hex,
-            spec_version,
-            tx_version,
-            nonce,
-            include_metadata_hash,
-            use_asset_payment,
-            era_str
-        );
 
         Ok(UnsignedPayload {
             call_data,
             description,
-            metadata_hash,
-            genesis_hash,
-            block_hash,
-            spec_version,
-            tx_version,
-            nonce,
-            era,
-            include_metadata_hash,
-            use_asset_payment,
-        })
-    }
-
-    /// Generate an unsigned bond extrinsic.
-    ///
-    /// Staking transactions go to Asset Hub where the Staking pallet lives.
-    ///
-    /// # Arguments
-    /// * `signer` - The account that will sign the transaction
-    /// * `value` - Amount to bond
-    /// * `use_mortal_era` - If true, use mortal era (expires after ~12 min); if false, use immortal era
-    pub async fn create_bond_payload(
-        &self,
-        signer: &AccountId32,
-        value: u128,
-        use_mortal_era: bool,
-    ) -> Result<UnsignedPayload, ChainError> {
-        // Build the bond call (bond to self with Staked payee)
-        let payee = Value::unnamed_variant("Staked", std::iter::empty::<Value<()>>());
-        let call = subxt::dynamic::tx("Staking", "bond", vec![Value::u128(value), payee]);
-
-        // Use Asset Hub client
-        let client = self.client();
-
-        let call_data = client.tx().call_data(&call)?;
-
-        // Check extensions in metadata
-        let metadata = client.metadata();
-        let extensions: Vec<_> = (0..=5)
-            .find_map(|v| metadata.extrinsic().transaction_extensions_by_version(v))
-            .map(|iter| iter.collect())
-            .unwrap_or_default();
-
-        let include_metadata_hash = extensions
-            .iter()
-            .any(|e| e.identifier() == "CheckMetadataHash");
-        let use_asset_payment = extensions
-            .iter()
-            .any(|e| e.identifier() == "ChargeAssetTxPayment");
-
-        let genesis_hash: [u8; 32] = self.genesis_hash();
-
-        let runtime = client.runtime_version();
-        let nonce = self.get_account_nonce(signer).await?;
-
-        // Choose era and block_hash based on use_mortal_era flag
-        let (era, block_hash) = if use_mortal_era {
-            // Mortal era for security (replay protection)
-            let (block_number, block_hash) = self.get_latest_block().await?;
-            let period = 128;
-            let phase = block_number as u64 % period;
-            (Era::Mortal { period, phase }, block_hash)
-        } else {
-            // Immortal era - use genesis hash as block_hash
-            (Era::Immortal, genesis_hash)
-        };
-
-        Ok(UnsignedPayload {
-            call_data,
-            description: format!("Bond {} tokens", value),
-            // NOTE: Placeholder for metadata hash. See nominate payload for details.
             metadata_hash: [0u8; 32],
             genesis_hash,
             block_hash,
@@ -218,6 +106,283 @@ impl ChainClient {
             include_metadata_hash,
             use_asset_payment,
         })
+    }
+
+    /// Generate an unsigned nomination extrinsic.
+    pub async fn create_nominate_payload(
+        &self,
+        signer: &AccountId32,
+        targets: &[AccountId32],
+        use_mortal_era: bool,
+    ) -> Result<UnsignedPayload, ChainError> {
+        let target_values: Vec<Value<()>> = targets
+            .iter()
+            .map(|t| Value::named_variant("Id", [("0", Value::from_bytes(t.clone()))]))
+            .collect();
+
+        let call = subxt::dynamic::tx(
+            "Staking",
+            "nominate",
+            vec![Value::unnamed_composite(target_values)],
+        );
+
+        self.create_payload_internal(
+            signer,
+            call,
+            format!("Nominate {} validators", targets.len()),
+            use_mortal_era,
+        )
+        .await
+    }
+
+    /// Generate an unsigned bond extrinsic.
+    pub async fn create_bond_payload(
+        &self,
+        signer: &AccountId32,
+        value: u128,
+        use_mortal_era: bool,
+    ) -> Result<UnsignedPayload, ChainError> {
+        let payee = Value::unnamed_variant("Staked", std::iter::empty::<Value<()>>());
+        let call = subxt::dynamic::tx(
+            "Staking",
+            "bond",
+            vec![Value::primitive(Primitive::U128(value)), payee],
+        );
+
+        self.create_payload_internal(
+            signer,
+            call,
+            format!("Bond {} tokens", value),
+            use_mortal_era,
+        )
+        .await
+    }
+
+    /// Generate an unsigned unbond extrinsic.
+    pub async fn create_unbond_payload(
+        &self,
+        signer: &AccountId32,
+        value: u128,
+        use_mortal_era: bool,
+    ) -> Result<UnsignedPayload, ChainError> {
+        let call = subxt::dynamic::tx(
+            "Staking",
+            "unbond",
+            vec![Value::primitive(Primitive::U128(value))],
+        );
+        self.create_payload_internal(
+            signer,
+            call,
+            format!("Unbond {} tokens", value),
+            use_mortal_era,
+        )
+        .await
+    }
+
+    /// Generate an unsigned bond_extra extrinsic.
+    pub async fn create_bond_extra_payload(
+        &self,
+        signer: &AccountId32,
+        value: u128,
+        use_mortal_era: bool,
+    ) -> Result<UnsignedPayload, ChainError> {
+        let call = subxt::dynamic::tx(
+            "Staking",
+            "bond_extra",
+            vec![Value::primitive(Primitive::U128(value))],
+        );
+        self.create_payload_internal(
+            signer,
+            call,
+            format!("Bond extra {} tokens", value),
+            use_mortal_era,
+        )
+        .await
+    }
+
+    /// Generate an unsigned set_payee extrinsic.
+    pub async fn create_set_payee_payload(
+        &self,
+        signer: &AccountId32,
+        payee: RewardDestination,
+        use_mortal_era: bool,
+    ) -> Result<UnsignedPayload, ChainError> {
+        let payee_value = match payee {
+            RewardDestination::Staked => {
+                Value::unnamed_variant("Staked", std::iter::empty::<Value<()>>())
+            }
+            RewardDestination::Controller => {
+                Value::unnamed_variant("Controller", std::iter::empty::<Value<()>>())
+            }
+            RewardDestination::Account(addr) => Value::unnamed_variant(
+                "Account",
+                vec![Value::from_bytes(addr)], // AccountId32 bytes directly
+            ),
+            RewardDestination::None => {
+                Value::unnamed_variant("None", std::iter::empty::<Value<()>>())
+            }
+        };
+
+        let call = subxt::dynamic::tx("Staking", "set_payee", vec![payee_value]);
+        self.create_payload_internal(
+            signer,
+            call,
+            "Set reward destination".to_string(),
+            use_mortal_era,
+        )
+        .await
+    }
+
+    /// Generate an unsigned chill extrinsic.
+    pub async fn create_chill_payload(
+        &self,
+        signer: &AccountId32,
+        use_mortal_era: bool,
+    ) -> Result<UnsignedPayload, ChainError> {
+        let call = subxt::dynamic::tx("Staking", "chill", Vec::<Value<()>>::new());
+        self.create_payload_internal(
+            signer,
+            call,
+            "Chill (stop nominating)".to_string(),
+            use_mortal_era,
+        )
+        .await
+    }
+
+    /// Generate an unsigned withdraw_unbonded extrinsic.
+    pub async fn create_withdraw_unbonded_payload(
+        &self,
+        signer: &AccountId32,
+        num_slashing_spans: u32,
+        use_mortal_era: bool,
+    ) -> Result<UnsignedPayload, ChainError> {
+        let call = subxt::dynamic::tx(
+            "Staking",
+            "withdraw_unbonded",
+            vec![Value::primitive(Primitive::U128(
+                num_slashing_spans as u128,
+            ))],
+        );
+        self.create_payload_internal(
+            signer,
+            call,
+            "Withdraw unbonded tokens".to_string(),
+            use_mortal_era,
+        )
+        .await
+    }
+
+    /// Generate an unsigned pool join extrinsic.
+    pub async fn create_pool_join_payload(
+        &self,
+        signer: &AccountId32,
+        pool_id: u32,
+        amount: u128,
+        use_mortal_era: bool,
+    ) -> Result<UnsignedPayload, ChainError> {
+        let call = subxt::dynamic::tx(
+            "NominationPools",
+            "join",
+            vec![
+                Value::primitive(Primitive::U128(amount)),
+                Value::primitive(Primitive::U128(pool_id as u128)),
+            ],
+        );
+        self.create_payload_internal(
+            signer,
+            call,
+            format!("Join pool #{} with {} tokens", pool_id, amount),
+            use_mortal_era,
+        )
+        .await
+    }
+
+    /// Generate an unsigned pool bond_extra extrinsic.
+    pub async fn create_pool_bond_extra_payload(
+        &self,
+        signer: &AccountId32,
+        amount: u128,
+        use_mortal_era: bool,
+    ) -> Result<UnsignedPayload, ChainError> {
+        // BondExtra::FreeBalance(amount)
+        let extra = Value::unnamed_variant(
+            "FreeBalance",
+            vec![Value::primitive(Primitive::U128(amount))],
+        );
+        let call = subxt::dynamic::tx("NominationPools", "bond_extra", vec![extra]);
+        self.create_payload_internal(
+            signer,
+            call,
+            format!("Bond extra {} tokens to pool", amount),
+            use_mortal_era,
+        )
+        .await
+    }
+
+    /// Generate an unsigned pool unbond extrinsic.
+    pub async fn create_pool_unbond_payload(
+        &self,
+        signer: &AccountId32,
+        member_account: &AccountId32,
+        amount: u128,
+        use_mortal_era: bool,
+    ) -> Result<UnsignedPayload, ChainError> {
+        let call = subxt::dynamic::tx(
+            "NominationPools",
+            "unbond",
+            vec![
+                Value::named_variant("Id", [("0", Value::from_bytes(member_account.clone()))]),
+                Value::primitive(Primitive::U128(amount)),
+            ],
+        );
+        self.create_payload_internal(
+            signer,
+            call,
+            format!("Unbond {} tokens from pool", amount),
+            use_mortal_era,
+        )
+        .await
+    }
+
+    /// Generate an unsigned pool claim_payout extrinsic.
+    pub async fn create_pool_claim_payload(
+        &self,
+        signer: &AccountId32,
+        use_mortal_era: bool,
+    ) -> Result<UnsignedPayload, ChainError> {
+        let call = subxt::dynamic::tx("NominationPools", "claim_payout", Vec::<Value<()>>::new());
+        self.create_payload_internal(
+            signer,
+            call,
+            "Claim pool rewards".to_string(),
+            use_mortal_era,
+        )
+        .await
+    }
+
+    /// Generate an unsigned pool withdraw_unbonded extrinsic.
+    pub async fn create_pool_withdraw_payload(
+        &self,
+        signer: &AccountId32,
+        member_account: &AccountId32,
+        num_slashing_spans: u32,
+        use_mortal_era: bool,
+    ) -> Result<UnsignedPayload, ChainError> {
+        let call = subxt::dynamic::tx(
+            "NominationPools",
+            "withdraw_unbonded",
+            vec![
+                Value::named_variant("Id", [("0", Value::from_bytes(member_account.clone()))]),
+                Value::primitive(Primitive::U128(num_slashing_spans as u128)),
+            ],
+        );
+        self.create_payload_internal(
+            signer,
+            call,
+            "Withdraw unbonded pool tokens".to_string(),
+            use_mortal_era,
+        )
+        .await
     }
 
     /// Get account nonce from Asset Hub (for transactions).
@@ -485,9 +650,7 @@ pub enum TxStatus {
 /// Returns the 64-byte signature if valid.
 pub fn decode_vault_signature(qr_data: &[u8]) -> Result<[u8; 64], String> {
     // Try to detect if this is hex-encoded (ASCII hex characters)
-    let is_hex = qr_data.iter().all(|&b| {
-        (b >= b'0' && b <= b'9') || (b >= b'a' && b <= b'f') || (b >= b'A' && b <= b'F')
-    });
+    let is_hex = qr_data.iter().all(|b| b.is_ascii_hexdigit());
 
     let binary_data = if is_hex && qr_data.len() >= 128 {
         // Hex-encoded format: decode from hex
@@ -669,7 +832,10 @@ mod tests {
             spec_version: 1002000,
             tx_version: 26,
             nonce: 42,
-            era: Era::Mortal { period: 128, phase: 64 },
+            era: Era::Mortal {
+                period: 128,
+                phase: 64,
+            },
             include_metadata_hash: false,
             use_asset_payment: false,
         }
@@ -691,7 +857,10 @@ mod tests {
 
     #[test]
     fn test_era_mortal() {
-        let era = Era::Mortal { period: 128, phase: 64 };
+        let era = Era::Mortal {
+            period: 128,
+            phase: 64,
+        };
         match era {
             Era::Mortal { period, phase } => {
                 assert_eq!(period, 128);
@@ -909,7 +1078,9 @@ mod tests {
 
         // Check that extrinsic starts with length prefix and version
         // The first bytes are compact-encoded length, followed by 0x84 (signed v4)
-        let body_start = signed.encoded.iter()
+        let body_start = signed
+            .encoded
+            .iter()
             .position(|&b| b == 0x84)
             .expect("Should contain 0x84 version byte");
 
@@ -1032,8 +1203,14 @@ mod tests {
 
         match (status, status_clone) {
             (
-                TxStatus::InBlock { block_hash: h1, block_number: n1 },
-                TxStatus::InBlock { block_hash: h2, block_number: n2 },
+                TxStatus::InBlock {
+                    block_hash: h1,
+                    block_number: n1,
+                },
+                TxStatus::InBlock {
+                    block_hash: h2,
+                    block_number: n2,
+                },
             ) => {
                 assert_eq!(h1, h2);
                 assert_eq!(n1, n2);
@@ -1068,9 +1245,7 @@ mod tests {
 
         // Should contain spec_version somewhere in the payload
         let spec_bytes = payload.spec_version.to_le_bytes();
-        let has_spec = signing_payload
-            .windows(4)
-            .any(|w| w == spec_bytes);
+        let has_spec = signing_payload.windows(4).any(|w| w == spec_bytes);
         assert!(has_spec);
     }
 

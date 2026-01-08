@@ -301,7 +301,15 @@ mod tests {
     fn test_select_validators_random_from_top() {
         // Create many candidates to test random selection
         let candidates: Vec<_> = (0..100)
-            .map(|i| make_candidate(&format!("v{}", i), 0.05, 0.10 + i as f64 * 0.001, false, 1000 + i as u128))
+            .map(|i| {
+                make_candidate(
+                    &format!("v{}", i),
+                    0.05,
+                    0.10 + i as f64 * 0.001,
+                    false,
+                    1000 + i as u128,
+                )
+            })
             .collect();
 
         let criteria = OptimizationCriteria {
@@ -325,7 +333,15 @@ mod tests {
     fn test_select_validators_random_from_top_small_pool() {
         // Small pool where top 10% < target_count
         let candidates: Vec<_> = (0..20)
-            .map(|i| make_candidate(&format!("v{}", i), 0.05, 0.10 + i as f64 * 0.01, false, 1000))
+            .map(|i| {
+                make_candidate(
+                    &format!("v{}", i),
+                    0.05,
+                    0.10 + i as f64 * 0.01,
+                    false,
+                    1000,
+                )
+            })
             .collect();
 
         let criteria = OptimizationCriteria {
@@ -343,7 +359,7 @@ mod tests {
     #[test]
     fn test_select_validators_filters_zero_apy() {
         let candidates = vec![
-            make_candidate("v1", 0.05, 0.0, false, 1000),  // Zero APY - should be filtered
+            make_candidate("v1", 0.05, 0.0, false, 1000), // Zero APY - should be filtered
             make_candidate("v2", 0.05, 0.15, false, 2000),
             make_candidate("v3", 0.05, -0.01, false, 1500), // Negative APY - should be filtered
         ];
@@ -448,7 +464,10 @@ mod tests {
     fn test_selection_strategy_equality() {
         assert_eq!(SelectionStrategy::TopApy, SelectionStrategy::TopApy);
         assert_ne!(SelectionStrategy::TopApy, SelectionStrategy::RandomFromTop);
-        assert_ne!(SelectionStrategy::RandomFromTop, SelectionStrategy::DiversifyByStake);
+        assert_ne!(
+            SelectionStrategy::RandomFromTop,
+            SelectionStrategy::DiversifyByStake
+        );
     }
 
     #[test]

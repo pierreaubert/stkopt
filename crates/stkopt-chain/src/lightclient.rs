@@ -123,10 +123,9 @@ impl LightClientConnections {
         );
         tracing::info!("Smoldot will discover and connect to P2P network peers...");
         let start = std::time::Instant::now();
-        let (light_client, relay_rpc) =
-            LightClient::relay_chain(relay_spec).map_err(|e| {
-                ChainError::LightClient(format!("Failed to start relay chain light client: {}", e))
-            })?;
+        let (light_client, relay_rpc) = LightClient::relay_chain(relay_spec).map_err(|e| {
+            ChainError::LightClient(format!("Failed to start relay chain light client: {}", e))
+        })?;
         tracing::debug!("Relay chain light client started in {:?}", start.elapsed());
 
         // Connect to Asset Hub as a parachain
@@ -135,11 +134,9 @@ impl LightClientConnections {
             network
         );
         let start = std::time::Instant::now();
-        let asset_hub_rpc = light_client
-            .parachain(asset_hub_spec)
-            .map_err(|e| {
-                ChainError::LightClient(format!("Failed to connect to Asset Hub: {}", e))
-            })?;
+        let asset_hub_rpc = light_client.parachain(asset_hub_spec).map_err(|e| {
+            ChainError::LightClient(format!("Failed to connect to Asset Hub: {}", e))
+        })?;
         tracing::debug!("Asset Hub parachain added in {:?}", start.elapsed());
 
         // Create subxt clients from the light client RPCs
@@ -196,19 +193,19 @@ impl LightClientConnections {
             ))
         })?;
 
-        tracing::debug!("Using embedded People chain spec: {} bytes", people_spec.len());
+        tracing::debug!(
+            "Using embedded People chain spec: {} bytes",
+            people_spec.len()
+        );
 
         tracing::info!(
             "Adding {} People chain as parachain to light client...",
             self.network
         );
         let start = std::time::Instant::now();
-        let people_rpc = self
-            .light_client
-            .parachain(people_spec)
-            .map_err(|e| {
-                ChainError::LightClient(format!("Failed to connect to People chain: {}", e))
-            })?;
+        let people_rpc = self.light_client.parachain(people_spec).map_err(|e| {
+            ChainError::LightClient(format!("Failed to connect to People chain: {}", e))
+        })?;
         tracing::debug!("People chain parachain added in {:?}", start.elapsed());
 
         tracing::info!("Waiting for People chain to sync...");

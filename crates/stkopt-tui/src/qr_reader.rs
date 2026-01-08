@@ -217,7 +217,8 @@ fn camera_capture_loop(
         }
 
         // Create downsampled preview for TUI display
-        let preview_pixels = downsample_grayscale(&gray_data, width, height, PREVIEW_WIDTH, PREVIEW_HEIGHT);
+        let preview_pixels =
+            downsample_grayscale(&gray_data, width, height, PREVIEW_WIDTH, PREVIEW_HEIGHT);
 
         // Try to decode QR code
         let mut decoder = rqrr::PreparedImage::prepare_from_greyscale(width, height, |x, y| {
@@ -227,7 +228,12 @@ fn camera_capture_loop(
         let grids = decoder.detect_grids();
 
         if !grids.is_empty() {
-            tracing::info!("Detected {} QR grid(s) in {}x{} frame", grids.len(), width, height);
+            tracing::info!(
+                "Detected {} QR grid(s) in {}x{} frame",
+                grids.len(),
+                width,
+                height
+            );
         }
 
         if grids.is_empty() {
@@ -260,10 +266,7 @@ fn camera_capture_loop(
                             meta.version
                         );
                         if !bytes.is_empty() {
-                            tracing::info!(
-                                "First bytes: {:02x?}",
-                                &bytes[..bytes.len().min(10)]
-                            );
+                            tracing::info!("First bytes: {:02x?}", &bytes[..bytes.len().min(10)]);
                         }
                         let preview = CameraPreview {
                             pixels: preview_pixels.clone(),

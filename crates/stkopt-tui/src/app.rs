@@ -2,7 +2,8 @@
 
 use crate::action::{
     AccountStatus, Action, DisplayPool, DisplayValidator, PendingTransaction, PendingUnsignedTx,
-    QrScanStatus, StakingHistoryPoint, TransactionInfo, TxSubmissionStatus,
+    PoolOperation, QrScanStatus, StakingHistoryPoint, StakingInputMode, TransactionInfo,
+    TxSubmissionStatus,
 };
 use crate::log_buffer::LogBuffer;
 use crate::theme::{Palette, Theme};
@@ -10,7 +11,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::TableState;
 use ratatui_image::picker::Picker;
 use std::collections::HashSet;
-use stkopt_chain::ChainInfo;
+use stkopt_chain::{ChainInfo, RewardDestination, UnlockChunkInfo};
 use stkopt_core::{ConnectionStatus, Network, OptimizationResult};
 use subxt::utils::AccountId32;
 
@@ -42,6 +43,8 @@ pub enum InputMode {
     SortMenu,
     /// Showing strategy menu in nominate view.
     StrategyMenu,
+    /// Handling staking/pool operation inputs.
+    Staking,
 }
 
 /// Sort field for validators.
@@ -162,52 +165,57 @@ impl PoolSortField {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum View {
     #[default]
-    Account,
-    History,
+    AccountStatus,
+    AccountChanges,
+    AccountHistory,
     Nominate,
-    Pools,
     Validators,
+    Pools,
 }
 
 impl View {
     pub fn all() -> &'static [View] {
         &[
-            View::Account,
-            View::History,
+            View::AccountStatus,
+            View::AccountChanges,
+            View::AccountHistory,
             View::Nominate,
-            View::Pools,
             View::Validators,
+            View::Pools,
         ]
     }
 
     pub fn label(&self) -> &'static str {
         match self {
-            View::Account => "Account",
-            View::History => "History",
+            View::AccountStatus => "Account Status",
+            View::AccountChanges => "Account Changes",
+            View::AccountHistory => "Account History",
             View::Nominate => "Nominate",
-            View::Pools => "Pools",
             View::Validators => "Validators",
+            View::Pools => "Pools",
         }
     }
 
     pub fn index(&self) -> usize {
         match self {
-            View::Account => 0,
-            View::History => 1,
-            View::Nominate => 2,
-            View::Pools => 3,
+            View::AccountStatus => 0,
+            View::AccountChanges => 1,
+            View::AccountHistory => 2,
+            View::Nominate => 3,
             View::Validators => 4,
+            View::Pools => 5,
         }
     }
 
     pub fn from_index(index: usize) -> View {
         match index {
-            0 => View::Account,
-            1 => View::History,
-            2 => View::Nominate,
-            3 => View::Pools,
+            0 => View::AccountStatus,
+            1 => View::AccountChanges,
+            2 => View::AccountHistory,
+            3 => View::Nominate,
             4 => View::Validators,
-            _ => View::Account,
+            5 => View::Pools,
+            _ => View::AccountStatus,
         }
     }
 }
@@ -339,20 +347,43 @@ pub struct App {
     pub load_start_time: Option<std::time::Instant>,
     /// Estimated bandwidth in bytes per second (computed after initial period).
     pub estimated_bandwidth: Option<f64>,
+    /// Last time we measured progress rate.
+    pub last_rate_check: Option<std::time::Instant>,
+    /// Progress value at last rate check.
+    pub last_rate_progress: f32,
     /// Validation error message for account input (None if valid or not validating).
     pub validation_error: Option<String>,
+
+    // === Staking Operations State ===
+    /// Current staking input mode.
+    pub staking_input_mode: StakingInputMode,
+    /// Input buffer for staking amount.
+    pub staking_input_amount: String,
+    /// Selected rewards destination.
+    pub rewards_destination: RewardDestination,
+    /// Custom payee address input.
+    pub custom_payee_address: String,
+
+    // === Pool Operations State ===
+    /// Current pool operation.
+    pub pool_operation: PoolOperation,
+    /// Input buffer for pool amount.
+    pub pool_input_amount: String,
+    /// Selected pool for join operation.
+    pub selected_pool_for_join: Option<usize>,
+
+    // === Pending Unlock Info ===
+    /// Pending unlock chunks info.
+    pub pending_unlocks: Vec<UnlockChunkInfo>,
 }
 
 impl App {
     /// Create a new application instance.
     pub fn new(network: Network, log_buffer: LogBuffer, theme: Theme) -> Self {
         let palette = theme.palette();
-        // Try to detect terminal graphics protocol, fall back to halfblocks
-        let image_picker = Picker::from_query_stdio().unwrap_or_else(|e| {
-            tracing::debug!("Could not query terminal graphics: {}, using halfblocks", e);
-            Picker::from_fontsize((8, 16)) // Standard font size for halfblocks
-        });
-        tracing::info!("Image picker protocol: {:?}", image_picker.protocol_type());
+        // Use font-size-based picker to avoid querying terminal before raw mode
+        // (querying via stdio can print spurious characters like "Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA")
+        let image_picker = Picker::from_fontsize((8, 16));
         Self {
             theme,
             palette,
@@ -416,7 +447,19 @@ impl App {
             estimated_total_bytes: None,
             load_start_time: Some(std::time::Instant::now()),
             estimated_bandwidth: None,
+            last_rate_check: None,
+            last_rate_progress: 0.0,
             validation_error: None,
+
+            // New fields initialization
+            staking_input_mode: StakingInputMode::default(),
+            staking_input_amount: String::new(),
+            rewards_destination: RewardDestination::Staked,
+            custom_payee_address: String::new(),
+            pool_operation: PoolOperation::default(),
+            pool_input_amount: String::new(),
+            selected_pool_for_join: None,
+            pending_unlocks: Vec::new(),
         }
     }
 
@@ -451,6 +494,36 @@ impl App {
         if self.loading_chain || self.loading_validators {
             self.spinner_tick = self.spinner_tick.wrapping_add(1);
         }
+
+        // Recompute progress rate every 30 seconds during loading
+        if self.loading_chain && self.loading_progress > 0.0 && self.loading_progress < 1.0 {
+            let now = std::time::Instant::now();
+            let should_compute = match self.last_rate_check {
+                Some(last) => now.duration_since(last).as_secs() >= 30,
+                None => self.load_start_time.is_some_and(|start| now.duration_since(start).as_secs() >= 10),
+            };
+
+            if should_compute {
+                let (elapsed_secs, progress_delta) = if let Some(last) = self.last_rate_check {
+                    (now.duration_since(last).as_secs_f64(), self.loading_progress - self.last_rate_progress)
+                } else if let Some(start) = self.load_start_time {
+                    (now.duration_since(start).as_secs_f64(), self.loading_progress)
+                } else {
+                    (0.0, 0.0)
+                };
+
+                if elapsed_secs > 0.0 && progress_delta > 0.0 {
+                    // Progress rate as fraction per second
+                    let rate = progress_delta as f64 / elapsed_secs;
+                    // Convert to "equivalent bytes per second" for display (using 10MB as total estimate)
+                    // This gives a rough indicator of loading speed
+                    self.estimated_bandwidth = Some(rate * 10_000_000.0);
+                }
+
+                self.last_rate_check = Some(now);
+                self.last_rate_progress = self.loading_progress;
+            }
+        }
     }
 
     /// Get the current spinner character for loading animation.
@@ -459,16 +532,21 @@ impl App {
         SPINNER_CHARS[self.spinner_tick % SPINNER_CHARS.len()]
     }
 
-    /// Estimate remaining time in seconds based on bandwidth and progress.
+    /// Estimate remaining time in seconds based on progress rate.
     pub fn estimated_remaining_secs(&self) -> Option<f64> {
         let bw = self.estimated_bandwidth?;
         if bw <= 0.0 {
             return None;
         }
 
-        let total = self.estimated_total_bytes?;
-        let remaining = total.saturating_sub(self.bytes_loaded);
-        Some(remaining as f64 / bw)
+        // bw is progress rate * 10MB, so reverse to get progress rate
+        let progress_rate = bw / 10_000_000.0;
+        let remaining_progress = 1.0 - self.loading_progress as f64;
+        if progress_rate > 0.0 {
+            Some(remaining_progress / progress_rate)
+        } else {
+            None
+        }
     }
 
     /// Format estimated time remaining as a human-readable string.
@@ -491,6 +569,7 @@ impl App {
             InputMode::Searching => self.handle_search_key(key),
             InputMode::SortMenu => self.handle_sort_menu_key(key),
             InputMode::StrategyMenu => self.handle_strategy_menu_key(key),
+            InputMode::Staking => self.handle_staking_key(key),
         }
     }
 
@@ -599,25 +678,98 @@ impl App {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Tab => return self.next_view(),
             KeyCode::BackTab => return self.prev_view(),
-            KeyCode::Char('1') => self.current_view = View::Validators,
-            KeyCode::Char('2') => self.current_view = View::Pools,
-            KeyCode::Char('3') => self.current_view = View::Nominate,
-            KeyCode::Char('4') => self.current_view = View::Account,
-            KeyCode::Char('5') => {
-                self.current_view = View::History;
+            KeyCode::Char('1') => self.current_view = View::AccountStatus,
+            KeyCode::Char('2') => self.current_view = View::AccountChanges,
+            KeyCode::Char('3') => {
+                self.current_view = View::AccountHistory;
                 return self.maybe_auto_load_history();
             }
+            KeyCode::Char('4') => self.current_view = View::Nominate,
+            KeyCode::Char('5') => self.current_view = View::Validators,
+            KeyCode::Char('6') => self.current_view = View::Pools,
             KeyCode::Char('n') => self.next_network(),
-            KeyCode::Up | KeyCode::Char('k') => self.select_previous(),
-            KeyCode::Down | KeyCode::Char('j') => self.select_next(),
             KeyCode::Char('a')
-                if self.current_view == View::Account || self.show_account_prompt =>
+                if self.current_view == View::AccountStatus || self.show_account_prompt =>
             {
                 self.input_mode = InputMode::EnteringAccount;
                 self.account_input.clear();
                 self.show_account_prompt = false;
             }
-            KeyCode::Char('c') if self.current_view == View::Account => {
+            // Account Staking Operations (Now in AccountChanges)
+            KeyCode::Char('b')
+                if self.current_view == View::AccountChanges && self.watched_account.is_some() =>
+            {
+                self.input_mode = InputMode::Staking;
+                self.staking_input_mode = StakingInputMode::Bond;
+                self.staking_input_amount.clear();
+            }
+            KeyCode::Char('u')
+                if self.current_view == View::AccountChanges && self.watched_account.is_some() =>
+            {
+                self.input_mode = InputMode::Staking;
+                self.staking_input_mode = StakingInputMode::Unbond;
+                self.staking_input_amount.clear();
+            }
+            KeyCode::Char('+')
+                if self.current_view == View::AccountChanges && self.watched_account.is_some() =>
+            {
+                self.input_mode = InputMode::Staking;
+                self.staking_input_mode = StakingInputMode::BondExtra;
+                self.staking_input_amount.clear();
+            }
+            KeyCode::Char('r')
+                if self.current_view == View::AccountChanges && self.watched_account.is_some() =>
+            {
+                self.input_mode = InputMode::Staking;
+                self.staking_input_mode = StakingInputMode::SetPayee;
+            }
+            KeyCode::Char('w')
+                if self.current_view == View::AccountChanges && self.watched_account.is_some() =>
+            {
+                return Some(Action::GenerateWithdrawUnbondedQR);
+            }
+            KeyCode::Char('x')
+                if self.current_view == View::AccountChanges && self.watched_account.is_some() =>
+            {
+                return Some(Action::GenerateChillQR);
+            }
+            // Pool Operations
+            KeyCode::Char('j')
+                if self.current_view == View::Pools && self.watched_account.is_some() =>
+            {
+                if let Some(idx) = self.pools_table_state.selected() {
+                    self.selected_pool_for_join = Some(idx);
+                    self.input_mode = InputMode::Staking;
+                    self.staking_input_mode = StakingInputMode::PoolJoin;
+                    self.pool_input_amount.clear();
+                    return Some(Action::SelectPoolForJoin(idx));
+                }
+            }
+            KeyCode::Char('J')
+                if self.current_view == View::Pools && self.watched_account.is_some() =>
+            {
+                self.input_mode = InputMode::Staking;
+                self.staking_input_mode = StakingInputMode::PoolBondExtra;
+                self.pool_input_amount.clear();
+            }
+            KeyCode::Char('U')
+                if self.current_view == View::Pools && self.watched_account.is_some() =>
+            {
+                self.input_mode = InputMode::Staking;
+                self.staking_input_mode = StakingInputMode::PoolUnbond;
+                self.pool_input_amount.clear();
+            }
+            KeyCode::Char('C')
+                if self.current_view == View::Pools && self.watched_account.is_some() =>
+            {
+                return Some(Action::GeneratePoolClaimQR);
+            }
+            KeyCode::Char('W')
+                if self.current_view == View::Pools && self.watched_account.is_some() =>
+            {
+                return Some(Action::GeneratePoolWithdrawQR);
+            }
+            KeyCode::Char('c') if self.current_view == View::AccountStatus => {
                 return Some(Action::ClearAccount);
             }
             // Nominate view keys
@@ -638,12 +790,12 @@ impl App {
                 }
             }
             // History view keys
-            KeyCode::Char('l') if self.current_view == View::History => {
+            KeyCode::Char('l') if self.current_view == View::AccountHistory => {
                 if !self.loading_history && self.watched_account.is_some() {
                     return Some(Action::LoadStakingHistory);
                 }
             }
-            KeyCode::Char('c') if self.current_view == View::History => {
+            KeyCode::Char('c') if self.current_view == View::AccountHistory => {
                 if self.loading_history {
                     return Some(Action::CancelLoadingHistory);
                 }
@@ -676,21 +828,24 @@ impl App {
                 self.input_mode = InputMode::StrategyMenu;
             }
             // Account view panel switching
-            KeyCode::Left if self.current_view == View::Account => {
+            KeyCode::Left if self.current_view == View::AccountStatus => {
                 self.account_panel_focus = 0;
             }
-            KeyCode::Right if self.current_view == View::Account => {
+            KeyCode::Right if self.current_view == View::AccountStatus => {
                 self.account_panel_focus = 1;
             }
             // Select from address book with Enter when focused on address book
             KeyCode::Enter
-                if self.current_view == View::Account && self.account_panel_focus == 1 =>
+                if self.current_view == View::AccountStatus && self.account_panel_focus == 1 =>
             {
                 if let Some(idx) = self.address_book_state.selected() {
                     // Return action to select this address
                     return Some(Action::SelectAddressBookEntry(idx));
                 }
             }
+            // Navigation
+            KeyCode::Up | KeyCode::Char('k') => self.select_previous(),
+            KeyCode::Down | KeyCode::Char('j') => self.select_next(),
             // Log scrolling
             KeyCode::PageUp => {
                 self.scroll_logs_up();
@@ -787,6 +942,156 @@ impl App {
             _ => {}
         }
         None
+    }
+
+    /// Handle keyboard input during staking operations.
+    fn handle_staking_key(&mut self, key: KeyEvent) -> Option<Action> {
+        match self.staking_input_mode {
+            StakingInputMode::None => {
+                self.input_mode = InputMode::Normal;
+                None
+            }
+            StakingInputMode::Bond
+            | StakingInputMode::Unbond
+            | StakingInputMode::BondExtra
+            | StakingInputMode::PoolJoin
+            | StakingInputMode::PoolUnbond
+            | StakingInputMode::PoolBondExtra => match key.code {
+                KeyCode::Esc => {
+                    self.input_mode = InputMode::Normal;
+                    self.staking_input_mode = StakingInputMode::None;
+                    self.staking_input_amount.clear();
+                    self.pool_input_amount.clear();
+                    None
+                }
+                KeyCode::Enter => self.confirm_staking_operation(),
+                KeyCode::Backspace => {
+                    if matches!(
+                        self.staking_input_mode,
+                        StakingInputMode::PoolJoin
+                            | StakingInputMode::PoolUnbond
+                            | StakingInputMode::PoolBondExtra
+                    ) {
+                        self.pool_input_amount.pop();
+                    } else {
+                        self.staking_input_amount.pop();
+                    }
+                    None
+                }
+                KeyCode::Char(c) => {
+                    if c.is_ascii_digit() || c == '.' {
+                        if matches!(
+                            self.staking_input_mode,
+                            StakingInputMode::PoolJoin
+                                | StakingInputMode::PoolUnbond
+                                | StakingInputMode::PoolBondExtra
+                        ) {
+                            self.pool_input_amount.push(c);
+                        } else {
+                            self.staking_input_amount.push(c);
+                        }
+                    }
+                    None
+                }
+                _ => None,
+            },
+            StakingInputMode::SetPayee => match key.code {
+                KeyCode::Esc => {
+                    self.input_mode = InputMode::Normal;
+                    self.staking_input_mode = StakingInputMode::None;
+                    None
+                }
+                KeyCode::Char('r') | KeyCode::Right | KeyCode::Left => {
+                    let next = match self.rewards_destination {
+                        RewardDestination::Staked => RewardDestination::Controller,
+                        RewardDestination::Controller => {
+                            RewardDestination::Account(AccountId32::from([0u8; 32]))
+                        }
+                        RewardDestination::Account(_) => RewardDestination::None,
+                        RewardDestination::None => RewardDestination::Staked,
+                    };
+                    Some(Action::SetRewardsDestination(next))
+                }
+                KeyCode::Enter => {
+                    self.input_mode = InputMode::Normal;
+                    self.staking_input_mode = StakingInputMode::None;
+                    Some(Action::GenerateSetPayeeQR {
+                        destination: self.rewards_destination.clone(),
+                    })
+                }
+                _ => None,
+            },
+        }
+    }
+
+    /// Confirm staking operation and generate QR.
+    fn confirm_staking_operation(&mut self) -> Option<Action> {
+        let (amount_str, is_pool) = match self.staking_input_mode {
+            StakingInputMode::PoolJoin
+            | StakingInputMode::PoolUnbond
+            | StakingInputMode::PoolBondExtra => (&self.pool_input_amount, true),
+            _ => (&self.staking_input_amount, false),
+        };
+
+        let amount = self.parse_amount(amount_str)?;
+
+        // Reset input mode
+        self.input_mode = InputMode::Normal;
+        let mode = self.staking_input_mode;
+        self.staking_input_mode = StakingInputMode::None;
+        if is_pool {
+            self.pool_input_amount.clear();
+        } else {
+            self.staking_input_amount.clear();
+        }
+
+        match mode {
+            StakingInputMode::Bond => Some(Action::GenerateBondQR { value: amount }),
+            StakingInputMode::Unbond => Some(Action::GenerateUnbondQR { value: amount }),
+            StakingInputMode::BondExtra => Some(Action::GenerateBondExtraQR { value: amount }),
+            StakingInputMode::PoolJoin => {
+                if let Some(idx) = self.selected_pool_for_join
+                    && let Some(pool) = self.pools.get(idx) {
+                        return Some(Action::GeneratePoolJoinQR {
+                            pool_id: pool.id,
+                            amount,
+                        });
+                    }
+                None
+            }
+            StakingInputMode::PoolBondExtra => Some(Action::GeneratePoolBondExtraQR { amount }),
+            StakingInputMode::PoolUnbond => Some(Action::GeneratePoolUnbondQR { amount }),
+            _ => None,
+        }
+    }
+
+    /// Parse amount string to u128 (planck) based on network decimals.
+    fn parse_amount(&self, input: &str) -> Option<u128> {
+        let decimals = self.network.token_decimals() as u32;
+        let parts: Vec<&str> = input.split('.').collect();
+        if parts.len() > 2 {
+            return None;
+        }
+
+        let whole = parts[0].parse::<u128>().ok()?;
+        let frac_part = if parts.len() == 2 { parts[1] } else { "" };
+
+        let mut frac = 0u128;
+        if !frac_part.is_empty() {
+            // Pad or truncate to decimals
+            let mut s = frac_part.to_string();
+            if s.len() > decimals as usize {
+                s.truncate(decimals as usize);
+            } else {
+                while s.len() < decimals as usize {
+                    s.push('0');
+                }
+            }
+            frac = s.parse::<u128>().ok()?;
+        }
+
+        let whole_units = whole.checked_mul(10u128.pow(decimals))?;
+        whole_units.checked_add(frac)
     }
 
     /// Handle keyboard input when entering text.
@@ -890,7 +1195,7 @@ impl App {
         let current_idx = self.current_view.index();
         let next_idx = (current_idx + 1) % views.len();
         self.current_view = View::from_index(next_idx);
-        if self.current_view == View::History {
+        if self.current_view == View::AccountHistory {
             return self.maybe_auto_load_history();
         }
         None
@@ -906,7 +1211,7 @@ impl App {
             current_idx - 1
         };
         self.current_view = View::from_index(prev_idx);
-        if self.current_view == View::History {
+        if self.current_view == View::AccountHistory {
             return self.maybe_auto_load_history();
         }
         None
@@ -992,28 +1297,9 @@ impl App {
                     self.pools_table_state.select(Some(0));
                 }
             }
-            Action::SetLoadingProgress(progress, bytes_loaded, estimated_total) => {
+            Action::SetLoadingProgress(progress, _bytes_loaded, _estimated_total) => {
                 self.loading_progress = progress;
-
-                // Update bytes tracking
-                if let Some(bytes) = bytes_loaded {
-                    self.bytes_loaded = bytes;
-                }
-                if let Some(total) = estimated_total {
-                    self.estimated_total_bytes = Some(total);
-                }
-
-                // Compute bandwidth after 10 seconds of loading
-                if self.estimated_bandwidth.is_none()
-                    && let Some(start) = self.load_start_time
-                {
-                    let elapsed = start.elapsed();
-                    if elapsed.as_secs() >= 10 && self.bytes_loaded > 0 {
-                        let bw = self.bytes_loaded as f64 / elapsed.as_secs_f64();
-                        self.estimated_bandwidth = Some(bw);
-                        tracing::info!("Estimated bandwidth: {:.1} KB/s", bw / 1024.0);
-                    }
-                }
+                // Bandwidth is now computed in tick() based on progress rate
             }
             Action::SetWatchedAccount(account) => {
                 self.watched_account = Some(account);
@@ -1164,6 +1450,44 @@ impl App {
             Action::ClearValidationError => {
                 self.validation_error = None;
             }
+            // Staking actions
+            Action::SetStakingInputMode(mode) => {
+                self.staking_input_mode = mode;
+            }
+            Action::UpdateStakingAmount(amount) => {
+                if matches!(
+                    self.staking_input_mode,
+                    crate::action::StakingInputMode::PoolJoin
+                        | crate::action::StakingInputMode::PoolUnbond
+                        | crate::action::StakingInputMode::PoolBondExtra
+                ) {
+                    self.pool_input_amount = amount;
+                } else {
+                    self.staking_input_amount = amount;
+                }
+            }
+            Action::SetRewardsDestination(dest) => {
+                self.rewards_destination = dest;
+            }
+            Action::SetPoolOperation(op) => {
+                self.pool_operation = op;
+            }
+            Action::SelectPoolForJoin(idx) => {
+                self.selected_pool_for_join = Some(idx);
+            }
+            Action::GenerateBondQR { .. }
+            | Action::GenerateUnbondQR { .. }
+            | Action::GenerateBondExtraQR { .. }
+            | Action::GenerateSetPayeeQR { .. }
+            | Action::GenerateWithdrawUnbondedQR
+            | Action::GenerateChillQR
+            | Action::GeneratePoolJoinQR { .. }
+            | Action::GeneratePoolBondExtraQR { .. }
+            | Action::GeneratePoolClaimQR
+            | Action::GeneratePoolUnbondQR { .. }
+            | Action::GeneratePoolWithdrawQR => {
+                // Handled in main.rs
+            }
             Action::Quit => {
                 self.should_quit = true;
             }
@@ -1219,7 +1543,7 @@ impl App {
                 };
                 self.nominate_table_state.select(Some(i));
             }
-            View::Account if self.account_panel_focus == 1 => {
+            View::AccountStatus if self.account_panel_focus == 1 => {
                 let len = self.address_book_len();
                 if len > 0 {
                     let i = match self.address_book_state.selected() {
@@ -1386,7 +1710,7 @@ impl App {
                 };
                 self.nominate_table_state.select(Some(i));
             }
-            View::Account if self.account_panel_focus == 1 => {
+            View::AccountStatus if self.account_panel_focus == 1 => {
                 let len = self.address_book_len();
                 if len > 0 {
                     let i = match self.address_book_state.selected() {
