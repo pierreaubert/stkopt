@@ -1584,7 +1584,7 @@ fn render_qr_modal(frame: &mut Frame, app: &App) {
     .split(inner_area);
 
     // Tabs
-    let titles = vec![Line::from(" QR Code "), Line::from(" Details ")];
+    let titles = vec![Line::from(" QR Code "), Line::from(" Extrinsic ")];
     let tabs = Tabs::new(titles)
         .select(if app.qr_show_details { 1 } else { 0 })
         .style(Style::default().fg(pal.muted))
@@ -1616,36 +1616,19 @@ fn render_qr_content(frame: &mut Frame, app: &App, area: Rect) {
     let max_qr_width = area.width.saturating_sub(4) as usize;
 
     match &app.qr_data {
-        Some(data) => match QrCode::new(data) {
-            Ok(qr) => {
-                let qr_lines = render_qr_halfblock(&qr);
-                let qr_h = qr_lines.len();
-                let qr_w = qr_lines.first().map(|l| l.chars().count()).unwrap_or(0);
-
-                if qr_h <= max_qr_height && qr_w <= max_qr_width {
-                    qr_width = qr_w as u16;
-                    for line in qr_lines {
-                        lines.push(Line::from(line));
-                    }
-                } else {
-                    render_multipart_qr(
-                        &mut lines,
-                        &mut qr_width,
-                        data,
-                        max_qr_height,
-                        max_qr_width,
-                        app.qr_frame,
-                        pal,
-                    );
-                }
-            }
-            Err(e) => {
-                lines.push(Line::from(Span::styled(
-                    format!("Error: {}", e),
-                    Style::default().fg(pal.error),
-                )));
-            }
-        },
+        Some(data) => {
+            // Always use multipart format (UOS headers) to ensure Vault recognizes it as binary
+            // and not text (which causes "invalid utf-8" errors starting with 'S' 0x53).
+            render_multipart_qr(
+                &mut lines,
+                &mut qr_width,
+                data,
+                max_qr_height,
+                max_qr_width,
+                app.qr_frame,
+                pal,
+            );
+        }
         None => lines.push(Line::from("No Data")),
     }
 
@@ -1729,6 +1712,18 @@ fn render_qr_details(frame: &mut Frame, app: &App, area: Rect) {
             "  Call Data: {} bytes",
             tx_info.call_data_size
         )));
+        lines.push(Line::from(format!(
+            "  Metadata Hash: {}",
+            if tx_info.include_metadata_hash { "Enabled" } else { "Disabled" }
+        )));
+
+        if tx_info.include_metadata_hash {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  Note: If scanning fails, update your Vault metadata.",
+                Style::default().fg(pal.warning),
+            )));
+        }
 
         if let Some(data) = &app.qr_data {
             lines.push(Line::from(format!("  QR Payload: {} bytes", data.len())));
@@ -1752,34 +1747,39 @@ fn render_qr_details(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(p, area);
 }
 
-/// Calculate chunk size that produces a QR code fitting in the given dimensions.
+/// Calculate chunk size that produces scannable QR codes.
+/// Balances chunk size vs number of frames for optimal scanning from terminal displays.
 fn calculate_chunk_size(max_qr_height: usize, max_qr_width: usize) -> usize {
-    // QR code size increases with data. Estimate based on typical QR dimensions.
-    // A QR with ~50 bytes of data typically has ~25 modules (+ quiet zone = ~33).
-    // Half-block rendering halves height, so 33 modules = ~17 lines.
-    // Quiet zone adds 8 to width, so 25 + 8 = 33 chars wide.
+    // QR codes displayed on terminals and scanned by phone cameras need to be
+    // not too dense. Target QR version 6-10 for good scannability.
+    //
+    // QR version capacity (binary mode, L error correction):
+    // Version 6 (41 modules): ~136 bytes
+    // Version 8 (49 modules): ~192 bytes
+    // Version 10 (57 modules): ~271 bytes
+    //
+    // Half-block rendering: modules/2 = terminal lines needed
+    // Width: modules + 8 (quiet zone) = chars needed
 
-    // Target a QR that fits comfortably
-    let target_modules = max_qr_height.min(max_qr_width / 2).saturating_sub(8);
+    let target_modules = (max_qr_height * 2).min(max_qr_width.saturating_sub(8));
 
-    // Rough mapping: modules ≈ 21 + 4*version, version ≈ ceil((data_bytes - 7) / 14)
-    // For version 1 (21 modules): ~17 bytes alphanumeric
-    // For version 2 (25 modules): ~32 bytes
-    // For version 3 (29 modules): ~53 bytes
-    // For version 4 (33 modules): ~78 bytes
-
-    if target_modules >= 33 {
-        60 // Comfortable for version 4
-    } else if target_modules >= 29 {
-        40 // Version 3
-    } else if target_modules >= 25 {
-        25 // Version 2
+    // Choose chunk size for scannable QR codes (not too dense)
+    if target_modules >= 65 {
+        250 // Version ~10, good balance
+    } else if target_modules >= 55 {
+        180 // Version ~8
+    } else if target_modules >= 45 {
+        120 // Version ~6
     } else {
-        15 // Version 1, smallest practical
+        80 // Small terminal, version ~4
     }
 }
 
 /// Render animated multipart QR codes for data that doesn't fit in a single QR.
+///
+/// Uses UOS multipart format for Polkadot Vault:
+/// - Each frame: `[0x00][total_frames:2 BE][frame_index:2 BE][frame_data]`
+/// - Data is raw binary (not hex-encoded)
 fn render_multipart_qr(
     lines: &mut Vec<Line<'static>>,
     qr_width: &mut u16,
@@ -1789,30 +1789,36 @@ fn render_multipart_qr(
     current_frame: usize,
     pal: &Palette,
 ) {
-    use base64::{Engine, engine::general_purpose::STANDARD};
+    // Input is raw binary UOS data
+    let raw_bytes = data;
 
     // Calculate appropriate chunk size
-    let chunk_size = calculate_chunk_size(max_qr_height, max_qr_width);
-
-    // Encode data as base64 for QR (QR handles alphanumeric better)
-    let b64_data = STANDARD.encode(data);
+    // QR code byte capacity depends on version and error correction
+    // Version 10 with L correction can hold ~271 bytes
+    // Each frame adds 5 bytes header: [0x00][total:2][index:2]
+    let target_qr_bytes = calculate_chunk_size(max_qr_height, max_qr_width);
+    let raw_chunk_size = target_qr_bytes.saturating_sub(5);
+    let raw_chunk_size = raw_chunk_size.max(50); // Minimum 50 bytes per chunk
 
     // Calculate number of parts needed
-    // Each part needs: "p<n>of<total>:" prefix (~10 chars) + data
-    let usable_chunk = chunk_size.saturating_sub(12);
-    let total_parts = (b64_data.len() + usable_chunk - 1) / usable_chunk.max(1);
-    let total_parts = total_parts.max(1);
+    let total_parts = raw_bytes.len().div_ceil(raw_chunk_size);
+    let total_parts = total_parts.clamp(1, 65535) as u16; // Max 2 bytes
 
     // Get current frame (cycle through parts)
-    let frame = current_frame % total_parts;
+    let frame_idx = (current_frame % (total_parts as usize)) as u16;
 
     // Extract chunk for this frame
-    let start = frame * usable_chunk;
-    let end = (start + usable_chunk).min(b64_data.len());
-    let chunk = &b64_data[start..end];
+    let start = (frame_idx as usize) * raw_chunk_size;
+    let end = (start + raw_chunk_size).min(raw_bytes.len());
+    let chunk = &raw_bytes[start..end];
 
-    // Format: "p<part>of<total>:<data>"
-    let part_data = format!("p{}of{}:{}", frame + 1, total_parts, chunk);
+    // Build frame with UOS multipart header:
+    // [0x00][total_frames:2 BE][frame_index:2 BE][frame_data]
+    let mut frame_bytes = Vec::with_capacity(5 + chunk.len());
+    frame_bytes.push(0x00); // Multipart marker
+    frame_bytes.extend_from_slice(&total_parts.to_be_bytes());
+    frame_bytes.extend_from_slice(&frame_idx.to_be_bytes());
+    frame_bytes.extend_from_slice(chunk);
 
     // Copy colors to avoid borrow issues with closures
     let primary = pal.primary;
@@ -1820,7 +1826,8 @@ fn render_multipart_qr(
     let success = pal.success;
     let error = pal.error;
 
-    match QrCode::new(&part_data) {
+    // Use raw binary data for QR (UOS format expects binary)
+    match QrCode::new(&frame_bytes) {
         Ok(qr) => {
             let qr_lines = render_qr_halfblock(&qr);
             *qr_width = qr_lines
@@ -1829,12 +1836,16 @@ fn render_multipart_qr(
                 .unwrap_or(0);
 
             lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::raw("Ensure Vault network is "),
+                Span::styled("Polkadot Asset Hub", Style::default().fg(pal.accent).bold()),
+            ]));
             lines.push(Line::from(Span::styled(
                 "Scan with Polkadot Vault",
                 Style::default().fg(primary).bold(),
             )));
             lines.push(Line::from(Span::styled(
-                format!("(Animated: part {}/{})", frame + 1, total_parts),
+                format!("(Animated: part {}/{})", frame_idx + 1, total_parts),
                 Style::default().fg(warning),
             )));
             lines.push(Line::from(""));
@@ -1846,13 +1857,13 @@ fn render_multipart_qr(
             lines.push(Line::from(""));
             lines.push(Line::from(format!(
                 "Total: {} bytes ({} parts)",
-                data.len(),
+                raw_bytes.len(),
                 total_parts
             )));
 
             // Progress bar for animation
             let progress_width = 20usize;
-            let filled = ((frame + 1) * progress_width) / total_parts;
+            let filled = ((frame_idx as usize + 1) * progress_width) / (total_parts as usize);
             let bar: String = "█".repeat(filled) + &"░".repeat(progress_width - filled);
             lines.push(Line::from(Span::styled(
                 format!("[{}]", bar),

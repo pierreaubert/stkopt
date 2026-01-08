@@ -73,10 +73,11 @@ pub struct TransactionInfo {
     pub call_data_size: usize,
     /// Spec version.
     pub spec_version: u32,
-    /// Transaction version.
     pub tx_version: u32,
-    /// Nonce.
+    /// Account nonce.
     pub nonce: u64,
+    /// Whether CheckMetadataHash extension is included.
+    pub include_metadata_hash: bool,
 }
 
 /// Actions that can update application state.

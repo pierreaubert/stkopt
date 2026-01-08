@@ -6,7 +6,7 @@ pub mod queries;
 pub mod transactions;
 
 pub use client::{
-    ChainClient, ChainInfo, ConnectionConfig, ConnectionMode, RpcEndpoints, connect_people_chain,
+    ChainClient, ChainInfo, ConnectionConfig, ConnectionMode, RpcEndpoints,
 };
 pub use config::*;
 pub use error::*;

@@ -195,7 +195,7 @@ async fn main() -> Result<()> {
     tui.enter()?;
 
     // Create event handler
-    let mut events = EventHandler::new(250);
+    let mut events = EventHandler::new(50);
 
     // Spawn chain connection task
     let chain_action_tx = action_tx.clone();
@@ -500,22 +500,20 @@ async fn chain_task(
     let _ = action_tx.send(Action::SetChainInfo(chain_info)).await;
 
     // Connect to People chain for identity queries
-    let people_client =
-        match stkopt_chain::connect_people_chain(network, config.rpc_endpoints.people.as_deref())
-            .await
-        {
-            Ok(subxt_client) => {
-                tracing::info!("Connected to {} People chain", network);
-                Some(stkopt_chain::PeopleChainClient::new(subxt_client))
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to connect to People chain (identities unavailable): {}",
-                    e
-                );
-                None
-            }
-        };
+    // Uses light client if main connection is via light client, otherwise RPC
+    let people_client = match client.connect_people_chain().await {
+        Ok(subxt_client) => {
+            tracing::info!("Connected to {} People chain", network);
+            Some(stkopt_chain::PeopleChainClient::new(subxt_client))
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Failed to connect to People chain (identities unavailable): {}",
+                e
+            );
+            None
+        }
+    };
 
     // Longer delay to let light client connection stabilize
     // Light clients need time to sync state after initial connection
@@ -1087,6 +1085,7 @@ async fn chain_task(
                             spec_version: payload.spec_version,
                             tx_version: payload.tx_version,
                             nonce: payload.nonce,
+                            include_metadata_hash: payload.include_metadata_hash,
                         };
 
                         let _ = qr_action_tx.send(Action::SetQRData(Some(qr_data), Some(tx_info))).await;

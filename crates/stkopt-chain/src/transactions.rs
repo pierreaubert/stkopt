@@ -26,6 +26,10 @@ pub struct UnsignedPayload {
     pub nonce: u64,
     /// Era for mortality (mortal or immortal).
     pub era: Era,
+    /// Whether to include CheckMetadataHash extension.
+    pub include_metadata_hash: bool,
+    /// Whether to use ChargeAssetTxPayment (Asset Hub) instead of ChargeTransactionPayment.
+    pub use_asset_payment: bool,
 }
 
 /// Transaction era (mortality).
@@ -40,8 +44,7 @@ pub enum Era {
 impl ChainClient {
     /// Generate an unsigned nomination extrinsic.
     ///
-    /// Since Polkadot 2.0 (Nov 2025), the Staking pallet lives on Asset Hub,
-    /// so staking transactions go to Asset Hub, not the relay chain.
+    /// Staking transactions go to Asset Hub where the Staking pallet lives (Polkadot 2.0).
     pub async fn create_nominate_payload(
         &self,
         signer: &AccountId32,
@@ -62,19 +65,34 @@ impl ChainClient {
             vec![Value::unnamed_composite(target_values)],
         );
 
-        // Use Asset Hub client for transaction data (Staking pallet is on Asset Hub since Polkadot 2.0)
-        let asset_hub = self.client();
+        // Use Asset Hub client
+        let client = self.client();
 
-        // Get the call data (using Asset Hub's metadata for call encoding)
-        let call_data = asset_hub.tx().call_data(&call)?;
+        // Get the call data (using Asset Hub's metadata)
+        let call_data = client.tx().call_data(&call)?;
 
-        // Get Asset Hub info (transactions go to Asset Hub where Staking pallet lives)
+        // Check extensions in metadata
+        let metadata = client.metadata();
+        // Try to find extensions for common versions (usually 4, but subxt might index at 0)
+        let extensions: Vec<_> = (0..=5)
+            .find_map(|v| metadata.extrinsic().transaction_extensions_by_version(v))
+            .map(|iter| iter.collect())
+            .unwrap_or_default();
+            
+        let include_metadata_hash = extensions
+            .iter()
+            .any(|e| e.identifier() == "CheckMetadataHash");
+        let use_asset_payment = extensions
+            .iter()
+            .any(|e| e.identifier() == "ChargeAssetTxPayment");
+
+        // Use Asset Hub genesis hash
         let genesis_hash: [u8; 32] = self.genesis_hash();
 
-        let block = asset_hub.blocks().at_latest().await?;
-        let block_hash: [u8; 32] = block.hash().0;
+        // For Immortal transactions, the mortality checkpoint is the genesis hash
+        let block_hash = genesis_hash;
 
-        let runtime = asset_hub.runtime_version();
+        let runtime = client.runtime_version();
         let spec_version = runtime.spec_version;
         let tx_version = runtime.transaction_version;
 
@@ -84,18 +102,16 @@ impl ChainClient {
         // Create description
         let description = format!("Nominate {} validators", targets.len());
 
-        // Calculate metadata hash (simplified - real implementation would hash the metadata)
-        // NOTE: This is a placeholder. For full security, the metadata hash should be computed
-        // from the chain's metadata to enable runtime version verification.
-        // Polkadot Vault will still validate genesis hash, spec version, and transaction version.
         let metadata_hash = [0u8; 32];
-
+        let genesis_hex: String = genesis_hash.iter().map(|b| format!("{:02x}", b)).collect();
         tracing::info!(
-            "Created nominate payload for Asset Hub: genesis={:?}, spec_version={}, tx_version={}, nonce={}",
-            &genesis_hash[..8], // First 8 bytes for logging
+            "Created nominate payload for Asset Hub: genesis=0x{}, spec_version={}, tx_version={}, nonce={}, meta_hash_ext={}, asset_payment={}, era=Immortal",
+            genesis_hex,
             spec_version,
             tx_version,
-            nonce
+            nonce,
+            include_metadata_hash,
+            use_asset_payment
         );
 
         Ok(UnsignedPayload {
@@ -107,16 +123,15 @@ impl ChainClient {
             spec_version,
             tx_version,
             nonce,
-            era: Era::Mortal {
-                period: 64, // ~6.4 minutes on Polkadot
-                phase: 0,
-            },
+            era: Era::Immortal,
+            include_metadata_hash,
+            use_asset_payment,
         })
     }
 
     /// Generate an unsigned bond extrinsic.
     ///
-    /// Since Polkadot 2.0 (Nov 2025), staking transactions go to Asset Hub.
+    /// Staking transactions go to Asset Hub where the Staking pallet lives.
     pub async fn create_bond_payload(
         &self,
         signer: &AccountId32,
@@ -126,14 +141,30 @@ impl ChainClient {
         let payee = Value::unnamed_variant("Staked", std::iter::empty::<Value<()>>());
         let call = subxt::dynamic::tx("Staking", "bond", vec![Value::u128(value), payee]);
 
-        // Use Asset Hub client for transaction data
-        let asset_hub = self.client();
+        // Use Asset Hub client
+        let client = self.client();
 
-        let call_data = asset_hub.tx().call_data(&call)?;
+        let call_data = client.tx().call_data(&call)?;
+        
+        // Check extensions in metadata
+        let metadata = client.metadata();
+        let extensions: Vec<_> = (0..=5)
+            .find_map(|v| metadata.extrinsic().transaction_extensions_by_version(v))
+            .map(|iter| iter.collect())
+            .unwrap_or_default();
+
+        let include_metadata_hash = extensions
+            .iter()
+            .any(|e| e.identifier() == "CheckMetadataHash");
+        let use_asset_payment = extensions
+            .iter()
+            .any(|e| e.identifier() == "ChargeAssetTxPayment");
+
         let genesis_hash: [u8; 32] = self.genesis_hash();
-        let block = asset_hub.blocks().at_latest().await?;
-        let block_hash: [u8; 32] = block.hash().0;
-        let runtime = asset_hub.runtime_version();
+        // For Immortal transactions, the mortality checkpoint is the genesis hash
+        let block_hash = genesis_hash;
+        
+        let runtime = client.runtime_version();
         let nonce = self.get_account_nonce(signer).await?;
 
         Ok(UnsignedPayload {
@@ -146,22 +177,15 @@ impl ChainClient {
             spec_version: runtime.spec_version,
             tx_version: runtime.transaction_version,
             nonce,
-            era: Era::Mortal {
-                period: 64,
-                phase: 0,
-            },
+            era: Era::Immortal,
+            include_metadata_hash,
+            use_asset_payment,
         })
     }
 
     /// Get account nonce from Asset Hub (for transactions).
     async fn get_account_nonce(&self, account: &AccountId32) -> Result<u64, ChainError> {
         Self::fetch_nonce(self.client(), account).await
-    }
-
-    /// Get account nonce from relay chain.
-    #[allow(dead_code)]
-    async fn get_relay_account_nonce(&self, account: &AccountId32) -> Result<u64, ChainError> {
-        Self::fetch_nonce(self.relay_client(), account).await
     }
 
     /// Fetch nonce from a client.
@@ -197,14 +221,19 @@ impl ChainClient {
 
 /// Encode payload for Polkadot Vault QR code.
 ///
-/// UOS (Universal Offline Signature) format:
-/// - `0x53` (ASCII 'S') - Substrate prefix
-/// - Crypto type: `0x00` = Ed25519, `0x01` = Sr25519
-/// - Action type: `0x00` = Standard, `0x01` = Hash, `0x02` = Immortal, `0x03` = Message
+/// Polkadot Vault expects **raw binary data** in the QR code (UOS format).
+/// Format:
+/// - `0x53` - Substrate prefix (ASCII 'S')
+/// - `0x01` - Crypto type: Sr25519
+/// - `0x00`/`0x02` - Command: sign mortal tx / sign immortal tx
 /// - 32 bytes - Public key of signer
-/// - Signing payload bytes
+/// - Signing payload (full payload, signer handles hashing if > 256 bytes)
+/// - 32 bytes - Genesis hash (appended at end for chain verification)
 ///
-/// Format: `[S][crypto][action][pubkey(32)][payload]`
+/// Note: When payload > 256 bytes, the Substrate runtime automatically hashes
+/// it before signing. We always include the full payload in the QR.
+///
+/// Reference: https://github.com/maciejhirsz/uos
 pub fn encode_for_qr(payload: &UnsignedPayload, signer: &AccountId32) -> Vec<u8> {
     let mut qr_payload = Vec::new();
 
@@ -214,29 +243,72 @@ pub fn encode_for_qr(payload: &UnsignedPayload, signer: &AccountId32) -> Vec<u8>
     // Crypto type: 0x01 = Sr25519 (default for Polkadot)
     qr_payload.push(0x01);
 
-    // Action type: 0x00 = Standard mortal transaction
-    // (0x02 is for immortal, not mortal as previously thought)
-    qr_payload.push(0x00);
+    // Build the signing payload
+    let signing_payload = build_signing_payload(payload);
+
+    // Command byte: UOS V2 (includes genesis hash)
+    // 0x02 = Mortal V2
+    // 0x03 = Immortal V2
+    let is_immortal = matches!(payload.era, Era::Immortal);
+
+    if is_immortal {
+        qr_payload.push(0x03); // Immortal V2
+    } else {
+        qr_payload.push(0x02); // Mortal V2
+    }
 
     // Signer's public key (32 bytes)
     qr_payload.extend_from_slice(signer.as_ref());
 
-    // Build the signing payload
-    let signing_payload = build_signing_payload(payload);
+    // Full signing payload (signer will hash if > 256 bytes)
     qr_payload.extend_from_slice(&signing_payload);
 
+    // Append genesis hash at the end (for chain verification)
+    qr_payload.extend_from_slice(&payload.genesis_hash);
+
+    tracing::info!(
+        "QR payload: {} bytes total (signing payload: {} bytes, {})",
+        qr_payload.len(),
+        signing_payload.len(),
+        if is_immortal { "immortal" } else { "mortal" }
+    );
+
+    // Return raw binary data - Polkadot Vault expects UOS binary format
     qr_payload
 }
 
 /// Build the signing payload (the data that gets signed).
+///
+/// Polkadot relay chain uses these signed extensions in order:
+/// 1. CheckNonZeroSender - Encode: (), AdditionalSigned: ()
+/// 2. CheckSpecVersion - Encode: (), AdditionalSigned: spec_version
+/// 3. CheckTxVersion - Encode: (), AdditionalSigned: tx_version
+/// 4. CheckGenesis - Encode: (), AdditionalSigned: genesis_hash
+/// 5. CheckMortality - Encode: Era, AdditionalSigned: block_hash
+/// 6. CheckNonce - Encode: nonce (compact), AdditionalSigned: ()
+/// 7. CheckWeight - Encode: (), AdditionalSigned: ()
+/// 8. ChargeTransactionPayment - Encode: tip (compact), AdditionalSigned: ()
+/// 9. PrevalidateAttests - Encode: (), AdditionalSigned: ()
+/// 10. CheckMetadataHash - Encode: mode (u8), AdditionalSigned: Option<hash>
+///
+/// Signing payload = call ++ extras ++ additional_signed
 fn build_signing_payload(payload: &UnsignedPayload) -> Vec<u8> {
     let mut data = Vec::new();
+
+    // Wrap in <Bytes> tags - required by some signers for raw data
+    data.extend_from_slice(b"<Bytes>");
 
     // Call data
     data.extend_from_slice(&payload.call_data);
 
-    // Extensions (era, nonce, tip, spec_version, tx_version, genesis_hash, block_hash)
-    // Era
+    // === Encoded Extras (in extension order) ===
+
+    // 1. CheckNonZeroSender: nothing
+    // 2. CheckSpecVersion: nothing
+    // 3. CheckTxVersion: nothing
+    // 4. CheckGenesis: nothing
+
+    // 5. CheckMortality: Era encoding
     match payload.era {
         Era::Immortal => data.push(0x00),
         Era::Mortal { period, phase } => {
@@ -245,23 +317,55 @@ fn build_signing_payload(payload: &UnsignedPayload) -> Vec<u8> {
         }
     }
 
-    // Nonce (compact encoded)
+    // 6. CheckNonce: nonce (compact encoded)
     data.extend_from_slice(&compact_encode(payload.nonce));
 
-    // Tip (0, compact encoded)
-    data.push(0x00);
+    // 7. CheckWeight: nothing
 
-    // Spec version
+    // 8. ChargeTransactionPayment / ChargeAssetTxPayment
+    data.push(0x00); // tip = 0, compact encoded
+    if payload.use_asset_payment {
+        // ChargeAssetTxPayment expects Option<AssetId>
+        // None = 0x00 (pay in native asset)
+        data.push(0x00);
+    }
+
+    // 9. PrevalidateAttests: nothing (PhantomData)
+
+    // 10. CheckMetadataHash: mode (u8)
+    if payload.include_metadata_hash {
+        // mode = 0 means disabled (no metadata hash verification)
+        data.push(0x00);
+    }
+
+    // === Additional Signed Data (in extension order) ===
+
+    // 1. CheckNonZeroSender: nothing
+    // 2. CheckSpecVersion: spec_version (u32 le)
     data.extend_from_slice(&payload.spec_version.to_le_bytes());
 
-    // Transaction version
+    // 3. CheckTxVersion: tx_version (u32 le)
     data.extend_from_slice(&payload.tx_version.to_le_bytes());
 
-    // Genesis hash
+    // 4. CheckGenesis: genesis_hash (32 bytes)
     data.extend_from_slice(&payload.genesis_hash);
 
-    // Block hash (for mortality check)
+    // 5. CheckMortality: block_hash (32 bytes) - mortality checkpoint
     data.extend_from_slice(&payload.block_hash);
+
+    // 6. CheckNonce: nothing
+    // 7. CheckWeight: nothing
+    // 8. ChargeTransactionPayment: nothing
+    // 9. PrevalidateAttests: nothing
+
+    // 10. CheckMetadataHash: Option<[u8;32]>
+    if payload.include_metadata_hash {
+        // When mode = 0, this is None
+        data.push(0x00); // None encoding
+    }
+
+    // Close <Bytes> tag
+    data.extend_from_slice(b"</Bytes>");
 
     data
 }

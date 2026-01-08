@@ -34,11 +34,13 @@ impl ChainClient {
     /// Get all registered validators with their preferences.
     /// Note: This uses storage iteration which may be limited with light clients.
     /// Returns partial results if iteration is interrupted (e.g., connection drop).
+    /// Deduplicates by address (light clients may return duplicates during iteration).
     /// For light client mode, prefer `get_validator_preferences_batch` with known addresses.
     pub async fn get_validators(&self) -> Result<Vec<ValidatorInfo>, ChainError> {
         let storage_query = subxt::dynamic::storage("Staking", "Validators", ());
 
-        let mut validators = Vec::new();
+        // Use HashMap to deduplicate by address (light clients may return duplicates)
+        let mut validators_map: HashMap<[u8; 32], ValidatorInfo> = HashMap::new();
         let iter_result = self
             .client()
             .storage()
@@ -69,6 +71,12 @@ impl ChainClient {
                         .try_into() else {
                         continue;
                     };
+
+                    // Skip if we already have this validator
+                    if validators_map.contains_key(&account_bytes) {
+                        continue;
+                    }
+
                     let address = AccountId32::from(account_bytes);
 
                     let Ok(decoded) = value.to_value() else {
@@ -88,7 +96,7 @@ impl ChainClient {
                         .and_then(|v: &Value<u32>| v.as_bool())
                         .unwrap_or(false);
 
-                    validators.push(ValidatorInfo {
+                    validators_map.insert(account_bytes, ValidatorInfo {
                         address,
                         preferences: ValidatorPreferences {
                             commission,
@@ -100,7 +108,7 @@ impl ChainClient {
                     // Connection error during iteration - return what we have so far
                     tracing::warn!(
                         "Validator iteration interrupted after {} entries: {}",
-                        validators.len(),
+                        validators_map.len(),
                         e
                     );
                     break;
@@ -111,6 +119,8 @@ impl ChainClient {
                 }
             }
         }
+
+        let validators: Vec<ValidatorInfo> = validators_map.into_values().collect();
 
         if validators.is_empty() {
             Err(ChainError::InvalidData("No validators found".into()))
@@ -272,16 +282,18 @@ impl ChainClient {
         // Collect the union of all results for better coverage
         let max_attempts = 3;
         for attempt in 1..=max_attempts {
+            let map_size_before = all_addresses.len();
             match self.get_validators().await {
                 Ok(vals) => {
                     let new_count = vals.iter().filter(|v| !all_addresses.contains_key(&v.address.0)).count();
-                    tracing::info!(
-                        "Iteration attempt {}/{}: Got {} validators ({} new, {} total so far)",
-                        attempt, max_attempts, vals.len(), new_count, all_addresses.len() + new_count
-                    );
-                    for v in vals {
-                        all_addresses.insert(v.address.0, v.address);
+                    for v in vals.iter() {
+                        all_addresses.insert(v.address.0, v.address.clone());
                     }
+                    let map_size_after = all_addresses.len();
+                    tracing::info!(
+                        "Iteration attempt {}/{}: Got {} validators, {} were new. Map: {} -> {} entries",
+                        attempt, max_attempts, vals.len(), new_count, map_size_before, map_size_after
+                    );
 
                     // If we didn't get any new validators, probably have reached the limit
                     if new_count == 0 && !all_addresses.is_empty() {
@@ -438,6 +450,7 @@ impl ChainClient {
 
     /// Get staking exposure for validators in an era (using ErasStakersOverview).
     /// Returns partial results if iteration is interrupted (e.g., connection drop).
+    /// Deduplicates by address (light clients may return duplicates during iteration).
     pub async fn get_era_stakers_overview(
         &self,
         era: EraIndex,
@@ -449,7 +462,8 @@ impl ChainClient {
             vec![Value::u128(era as u128)],
         );
 
-        let mut exposures = Vec::new();
+        // Use HashMap to deduplicate by address (light clients may return duplicates)
+        let mut exposures_map: HashMap<[u8; 32], ValidatorExposure> = HashMap::new();
         let iter_result = self
             .client()
             .storage()
@@ -480,6 +494,12 @@ impl ChainClient {
                         .try_into() else {
                         continue;
                     };
+
+                    // Skip if we already have this validator
+                    if exposures_map.contains_key(&account_bytes) {
+                        continue;
+                    }
+
                     let address = AccountId32::from(account_bytes);
 
                     let Ok(decoded) = value.to_value() else {
@@ -500,7 +520,7 @@ impl ChainClient {
                         .and_then(|v: &Value<u32>| v.as_u128())
                         .unwrap_or(0) as u32;
 
-                    exposures.push(ValidatorExposure {
+                    exposures_map.insert(account_bytes, ValidatorExposure {
                         address,
                         own,
                         total,
@@ -511,7 +531,7 @@ impl ChainClient {
                     // Connection error during iteration - return what we have so far
                     tracing::warn!(
                         "Era stakers iteration interrupted after {} entries: {}",
-                        exposures.len(),
+                        exposures_map.len(),
                         e
                     );
                     break;
@@ -523,6 +543,7 @@ impl ChainClient {
             }
         }
 
+        let exposures: Vec<ValidatorExposure> = exposures_map.into_values().collect();
         Ok(exposures)
     }
 

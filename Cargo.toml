@@ -64,6 +64,7 @@ rusqlite = { version = "0.33", features = ["bundled"] }
 async-trait = "0.1"
 base64 = "0.22"
 directories = "5.0"
+hex = "0.4"
 terminal-light = "1.0"
 
 [profile.release]

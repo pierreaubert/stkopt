@@ -85,10 +85,14 @@ pub enum PoolAccountType {
 impl ChainClient {
     /// Get all bonded nomination pools.
     /// Returns partial results if iteration is interrupted (e.g., connection drop).
+    /// Deduplicates by pool ID (light clients may return duplicates during iteration).
     pub async fn get_nomination_pools(&self) -> Result<Vec<PoolInfo>, ChainError> {
+        use std::collections::HashMap;
+
         let storage_query = subxt::dynamic::storage("NominationPools", "BondedPools", ());
 
-        let mut pools = Vec::new();
+        // Use HashMap to deduplicate by pool ID (light clients may return duplicates)
+        let mut pools_map: HashMap<u32, PoolInfo> = HashMap::new();
         let iter_result = self
             .client()
             .storage()
@@ -120,6 +124,11 @@ impl ChainClient {
                         continue;
                     };
                     let id = u32::from_le_bytes(id_bytes);
+
+                    // Skip if we already have this pool
+                    if pools_map.contains_key(&id) {
+                        continue;
+                    }
 
                     let Ok(decoded) = value.to_value() else {
                         continue;
@@ -161,7 +170,7 @@ impl ChainClient {
                         }
                     };
 
-                    pools.push(PoolInfo {
+                    pools_map.insert(id, PoolInfo {
                         id,
                         state,
                         points,
@@ -173,7 +182,7 @@ impl ChainClient {
                     // Connection error during iteration - return what we have so far
                     tracing::warn!(
                         "Pool iteration interrupted after {} entries: {}",
-                        pools.len(),
+                        pools_map.len(),
                         e
                     );
                     break;
@@ -185,7 +194,8 @@ impl ChainClient {
             }
         }
 
-        // Sort by pool ID
+        // Convert to Vec and sort by pool ID
+        let mut pools: Vec<PoolInfo> = pools_map.into_values().collect();
         pools.sort_by_key(|p| p.id);
 
         Ok(pools)
@@ -193,10 +203,14 @@ impl ChainClient {
 
     /// Get metadata (names) for all pools.
     /// Returns partial results if iteration is interrupted (e.g., connection drop).
+    /// Deduplicates by pool ID (light clients may return duplicates during iteration).
     pub async fn get_pool_metadata(&self) -> Result<Vec<PoolMetadata>, ChainError> {
+        use std::collections::HashMap;
+
         let storage_query = subxt::dynamic::storage("NominationPools", "Metadata", ());
 
-        let mut metadata = Vec::new();
+        // Use HashMap to deduplicate by pool ID
+        let mut metadata_map: HashMap<u32, String> = HashMap::new();
         let iter_result = self
             .client()
             .storage()
@@ -232,6 +246,11 @@ impl ChainClient {
                     };
                     let id = u32::from_le_bytes(id_bytes);
 
+                    // Skip if we already have this pool's metadata
+                    if metadata_map.contains_key(&id) {
+                        continue;
+                    }
+
                     let Ok(decoded) = value.to_value() else {
                         continue;
                     };
@@ -242,7 +261,7 @@ impl ChainClient {
                     tracing::debug!("Pool {} extracted name: '{}'", id, name);
 
                     if !name.is_empty() {
-                        metadata.push(PoolMetadata { id, name });
+                        metadata_map.insert(id, name);
                     }
                 }
                 Some(Err(e)) => {
@@ -261,8 +280,14 @@ impl ChainClient {
             }
         }
 
+        // Convert to Vec
+        let metadata: Vec<PoolMetadata> = metadata_map
+            .into_iter()
+            .map(|(id, name)| PoolMetadata { id, name })
+            .collect();
+
         tracing::info!(
-            "Fetched pool metadata: {} entries iterated, {} with names",
+            "Fetched pool metadata: {} entries iterated, {} unique with names",
             count,
             metadata.len()
         );

@@ -99,6 +99,8 @@ pub struct ChainClient {
     client: OnlineClient<PolkadotConfig>,
     /// Relay chain client (for block/session data, kept for potential future use).
     relay_client: Option<OnlineClient<PolkadotConfig>>,
+    /// Light client connections (stored for connecting to People chain later).
+    light_client_conns: Option<std::sync::Arc<LightClientConnections>>,
     /// Status channel for connection updates.
     status_tx: mpsc::Sender<ConnectionStatus>,
 }
@@ -154,7 +156,7 @@ impl ChainClient {
 
         // Connect using light client - this fetches chain specs and establishes
         // P2P connections to relay chain and Asset Hub
-        let light_client_conns = LightClientConnections::connect(network).await?;
+        let light_client_conns = std::sync::Arc::new(LightClientConnections::connect(network).await?);
 
         let _ = status_tx.send(ConnectionStatus::Connected).await;
 
@@ -167,8 +169,9 @@ impl ChainClient {
             network,
             connection_mode: ConnectionMode::LightClient,
             rpc_endpoints: RpcEndpoints::default(),
-            client: light_client_conns.asset_hub,
-            relay_client: Some(light_client_conns.relay),
+            client: light_client_conns.asset_hub.clone(),
+            relay_client: Some(light_client_conns.relay.clone()),
+            light_client_conns: Some(light_client_conns),
             status_tx,
         })
     }
@@ -246,6 +249,7 @@ impl ChainClient {
             rpc_endpoints: rpc_endpoints.clone(),
             client,
             relay_client,
+            light_client_conns: None,
             status_tx,
         })
     }
@@ -321,12 +325,12 @@ impl ChainClient {
     }
 
     /// Get the relay chain genesis hash (for transactions).
-    /// Falls back to Asset Hub genesis if relay chain is not connected.
-    pub fn relay_genesis_hash(&self) -> [u8; 32] {
+    /// Returns error if relay chain is not connected.
+    pub fn relay_genesis_hash(&self) -> Result<[u8; 32], ChainError> {
         self.relay_client
             .as_ref()
             .map(|c| c.genesis_hash().0)
-            .unwrap_or_else(|| self.client.genesis_hash().0)
+            .ok_or_else(|| ChainError::Connection("Relay chain not connected".to_string()))
     }
 
     /// Get the latest block number and hash to verify connection.
@@ -414,11 +418,30 @@ impl ChainClient {
     pub async fn is_connected(&self) -> bool {
         self.get_latest_block().await.is_ok()
     }
+
+    /// Connect to People chain for identity queries.
+    ///
+    /// Uses light client if available (when main connection is via light client),
+    /// otherwise falls back to RPC.
+    pub async fn connect_people_chain(&self) -> Result<OnlineClient<PolkadotConfig>, ChainError> {
+        // If we have light client connections, use them for People chain too
+        if let Some(ref lc_conns) = self.light_client_conns {
+            tracing::info!("Connecting to {} People chain via light client...", self.network);
+            return lc_conns.connect_people_chain().await;
+        }
+
+        // Fall back to RPC
+        tracing::info!("Connecting to {} People chain via RPC...", self.network);
+        connect_people_chain_rpc(self.network, self.rpc_endpoints.people.as_deref()).await
+    }
 }
 
 /// Connect to a network's People chain using WebSocket RPC.
 /// Returns a subxt client that can be used with PeopleChainClient.
-pub async fn connect_people_chain(
+///
+/// Prefer using `ChainClient::connect_people_chain()` which automatically
+/// uses light client when available.
+pub async fn connect_people_chain_rpc(
     network: Network,
     custom_endpoint: Option<&str>,
 ) -> Result<OnlineClient<PolkadotConfig>, ChainError> {
@@ -439,21 +462,21 @@ pub async fn connect_people_chain(
 
     let mut last_error = None;
     for endpoint in endpoints {
-        tracing::info!("Trying {} People chain via {}", network, endpoint);
+        tracing::info!("Trying {} People chain RPC via {}", network, endpoint);
 
         match OnlineClient::<PolkadotConfig>::from_url(endpoint).await {
             Ok(client) => {
-                tracing::info!("Connected to {} People chain via {}", network, endpoint);
+                tracing::info!("Connected to {} People chain via RPC {}", network, endpoint);
                 return Ok(client);
             }
             Err(e) => {
-                tracing::warn!("Failed to connect to People chain {}: {}", endpoint, e);
+                tracing::warn!("Failed to connect to People chain RPC {}: {}", endpoint, e);
                 last_error = Some(e.to_string());
             }
         }
     }
 
     Err(ChainError::Connection(last_error.unwrap_or_else(|| {
-        "All People chain endpoints failed".to_string()
+        "All People chain RPC endpoints failed".to_string()
     })))
 }
