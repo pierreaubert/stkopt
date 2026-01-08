@@ -2,6 +2,10 @@
 
 A terminal user interface (TUI) application for optimizing Polkadot staking. Browse validators, analyze APY history, manage nominations, and sign transactions with Polkadot Vault using QR codes.
 
+## WARNING
+
+The code is new and there has been no security review. Use at your own risk.
+
 ## Features
 
 - **Multi-network support**: Polkadot, Kusama, Westend, Paseo

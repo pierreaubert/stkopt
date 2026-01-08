@@ -345,12 +345,8 @@ pub struct App {
     pub estimated_total_bytes: Option<u64>,
     /// Load start time (for bandwidth calculation).
     pub load_start_time: Option<std::time::Instant>,
-    /// Estimated bandwidth in bytes per second (computed after initial period).
+    /// Estimated bandwidth in bytes per second (computed from actual bytes transferred).
     pub estimated_bandwidth: Option<f64>,
-    /// Last time we measured progress rate.
-    pub last_rate_check: Option<std::time::Instant>,
-    /// Progress value at last rate check.
-    pub last_rate_progress: f32,
     /// Validation error message for account input (None if valid or not validating).
     pub validation_error: Option<String>,
 
@@ -447,8 +443,6 @@ impl App {
             estimated_total_bytes: None,
             load_start_time: Some(std::time::Instant::now()),
             estimated_bandwidth: None,
-            last_rate_check: None,
-            last_rate_progress: 0.0,
             validation_error: None,
 
             // New fields initialization
@@ -495,35 +489,7 @@ impl App {
             self.spinner_tick = self.spinner_tick.wrapping_add(1);
         }
 
-        // Recompute progress rate every 30 seconds during loading
-        if self.loading_chain && self.loading_progress > 0.0 && self.loading_progress < 1.0 {
-            let now = std::time::Instant::now();
-            let should_compute = match self.last_rate_check {
-                Some(last) => now.duration_since(last).as_secs() >= 30,
-                None => self.load_start_time.is_some_and(|start| now.duration_since(start).as_secs() >= 10),
-            };
-
-            if should_compute {
-                let (elapsed_secs, progress_delta) = if let Some(last) = self.last_rate_check {
-                    (now.duration_since(last).as_secs_f64(), self.loading_progress - self.last_rate_progress)
-                } else if let Some(start) = self.load_start_time {
-                    (now.duration_since(start).as_secs_f64(), self.loading_progress)
-                } else {
-                    (0.0, 0.0)
-                };
-
-                if elapsed_secs > 0.0 && progress_delta > 0.0 {
-                    // Progress rate as fraction per second
-                    let rate = progress_delta as f64 / elapsed_secs;
-                    // Convert to "equivalent bytes per second" for display (using 10MB as total estimate)
-                    // This gives a rough indicator of loading speed
-                    self.estimated_bandwidth = Some(rate * 10_000_000.0);
-                }
-
-                self.last_rate_check = Some(now);
-                self.last_rate_progress = self.loading_progress;
-            }
-        }
+        // Bandwidth is now computed from actual bytes in SetLoadingProgress handler
     }
 
     /// Get the current spinner character for loading animation.
@@ -1297,9 +1263,19 @@ impl App {
                     self.pools_table_state.select(Some(0));
                 }
             }
-            Action::SetLoadingProgress(progress, _bytes_loaded, _estimated_total) => {
+            Action::SetLoadingProgress(progress, bytes_loaded, _estimated_total) => {
                 self.loading_progress = progress;
-                // Bandwidth is now computed in tick() based on progress rate
+                // Track actual bytes transferred
+                if let Some(bytes) = bytes_loaded {
+                    self.bytes_loaded = bytes;
+                    // Compute real bandwidth from actual bytes
+                    if let Some(start) = self.load_start_time {
+                        let elapsed = start.elapsed().as_secs_f64();
+                        if elapsed > 0.5 {
+                            self.estimated_bandwidth = Some(self.bytes_loaded as f64 / elapsed);
+                        }
+                    }
+                }
             }
             Action::SetWatchedAccount(account) => {
                 self.watched_account = Some(account);

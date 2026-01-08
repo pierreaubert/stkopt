@@ -920,8 +920,12 @@ async fn chain_task(
         }
     };
 
+    // Track bytes transferred for bandwidth calculation
+    // Estimates: era info ~1KB, validator ~200B, exposure ~100B, identity ~100B, pool ~150B
+    let mut bytes_transferred: u64 = 1000; // Era info ~1KB
+
     let _ = action_tx
-        .send(Action::SetLoadingProgress(0.1, None, None))
+        .send(Action::SetLoadingProgress(0.1, Some(bytes_transferred), None))
         .await;
 
     // Open database for caching
@@ -1017,8 +1021,9 @@ async fn chain_task(
         }
     };
 
+    bytes_transferred += validators.len() as u64 * 200; // ~200 bytes per validator
     let _ = action_tx
-        .send(Action::SetLoadingProgress(0.3, None, None))
+        .send(Action::SetLoadingProgress(0.3, Some(bytes_transferred), None))
         .await;
 
     // Fetch staker exposures for the previous era (active era - 1)
@@ -1058,8 +1063,9 @@ async fn chain_task(
         result.unwrap_or_default()
     };
 
+    bytes_transferred += exposures.len() as u64 * 100; // ~100 bytes per exposure
     let _ = action_tx
-        .send(Action::SetLoadingProgress(0.6, None, None))
+        .send(Action::SetLoadingProgress(0.6, Some(bytes_transferred), None))
         .await;
 
     // Fetch era reward
@@ -1095,13 +1101,15 @@ async fn chain_task(
     };
 
     // Map points for quick lookup
+    let points_len = validator_points.len();
     let points_map: HashMap<[u8; 32], u32> = validator_points
         .into_iter()
         .map(|vp| (*vp.address.as_ref(), vp.points))
         .collect();
 
+    bytes_transferred += 500 + points_len as u64 * 50; // Era reward ~500B + ~50 bytes per point entry
     let _ = action_tx
-        .send(Action::SetLoadingProgress(0.7, None, None))
+        .send(Action::SetLoadingProgress(0.7, Some(bytes_transferred), None))
         .await;
 
     // Fetch fresh validator identities from People chain and update cache
@@ -1159,8 +1167,9 @@ async fn chain_task(
         );
     }
 
+    bytes_transferred += identity_map.len() as u64 * 100; // ~100 bytes per identity
     let _ = action_tx
-        .send(Action::SetLoadingProgress(0.8, None, None))
+        .send(Action::SetLoadingProgress(0.8, Some(bytes_transferred), None))
         .await;
 
     // Build exposure map for quick lookup
@@ -1237,7 +1246,7 @@ async fn chain_task(
     );
 
     let _ = action_tx
-        .send(Action::SetLoadingProgress(0.9, None, None))
+        .send(Action::SetLoadingProgress(0.9, Some(bytes_transferred), None))
         .await;
 
     // Cache validators to database for faster startup next time
@@ -1407,8 +1416,9 @@ async fn chain_task(
         (None, None) => b.member_count.cmp(&a.member_count),
     });
 
+    bytes_transferred += display_pools.len() as u64 * 150; // ~150 bytes per pool
     let _ = action_tx
-        .send(Action::SetLoadingProgress(1.0, None, None))
+        .send(Action::SetLoadingProgress(1.0, Some(bytes_transferred), None))
         .await;
     let _ = action_tx.send(Action::SetDisplayPools(display_pools)).await;
 
