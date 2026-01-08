@@ -10,6 +10,11 @@
 //! 2. Asset Hub - as a parachain for staking data
 //! 3. People chain - as a parachain for identity data
 //!
+//! # Chain Specs
+//!
+//! Chain specs are bundled with the binary from substrate-connect.
+//! Source: https://github.com/paritytech/substrate-connect/tree/main/packages/connect-known-chains/specs
+//!
 //! # Limitations
 //!
 //! Light clients cannot query historical state beyond what's in the current
@@ -20,89 +25,52 @@ use stkopt_core::Network;
 use subxt::lightclient::LightClient;
 use subxt::{OnlineClient, PolkadotConfig};
 
-/// Get the relay chain spec URL for a network.
-pub fn get_relay_chain_spec_url(network: Network) -> &'static str {
+// Embedded relay chain specs
+const POLKADOT_SPEC: &str = include_str!("../chain_specs/polkadot.json");
+const KUSAMA_SPEC: &str = include_str!("../chain_specs/kusama.json");
+const WESTEND_SPEC: &str = include_str!("../chain_specs/westend.json");
+const PASEO_SPEC: &str = include_str!("../chain_specs/paseo.json");
+
+// Embedded Asset Hub chain specs
+const POLKADOT_ASSET_HUB_SPEC: &str = include_str!("../chain_specs/polkadot_asset_hub.json");
+const KUSAMA_ASSET_HUB_SPEC: &str = include_str!("../chain_specs/kusama_asset_hub.json");
+const WESTEND_ASSET_HUB_SPEC: &str = include_str!("../chain_specs/westend_asset_hub.json");
+
+// Embedded People chain specs
+const POLKADOT_PEOPLE_SPEC: &str = include_str!("../chain_specs/polkadot_people.json");
+const KUSAMA_PEOPLE_SPEC: &str = include_str!("../chain_specs/kusama_people.json");
+const WESTEND_PEOPLE_SPEC: &str = include_str!("../chain_specs/westend_people.json");
+
+/// Get the embedded relay chain spec for a network.
+pub fn get_relay_chain_spec(network: Network) -> &'static str {
     match network {
-        Network::Polkadot => {
-            "https://raw.githubusercontent.com/paritytech/subxt/master/artifacts/demo_chain_specs/polkadot.json"
-        }
-        Network::Kusama => {
-            "https://raw.githubusercontent.com/nickvntaele/chainspecs/main/kusama.json"
-        }
-        Network::Westend => {
-            "https://raw.githubusercontent.com/nickvntaele/chainspecs/main/westend.json"
-        }
-        Network::Paseo => {
-            "https://raw.githubusercontent.com/nickvntaele/chainspecs/main/paseo.json"
-        }
+        Network::Polkadot => POLKADOT_SPEC,
+        Network::Kusama => KUSAMA_SPEC,
+        Network::Westend => WESTEND_SPEC,
+        Network::Paseo => PASEO_SPEC,
     }
 }
 
-/// Get the Asset Hub chain spec URL for a network.
-pub fn get_asset_hub_chain_spec_url(network: Network) -> &'static str {
+/// Get the embedded Asset Hub chain spec for a network.
+/// Returns None for networks without Asset Hub specs (e.g., Paseo).
+pub fn get_asset_hub_chain_spec(network: Network) -> Option<&'static str> {
     match network {
-        Network::Polkadot => {
-            "https://raw.githubusercontent.com/paritytech/subxt/master/artifacts/demo_chain_specs/polkadot_asset_hub.json"
-        }
-        Network::Kusama => {
-            "https://raw.githubusercontent.com/nickvntaele/chainspecs/main/kusama_asset_hub.json"
-        }
-        Network::Westend => {
-            "https://raw.githubusercontent.com/nickvntaele/chainspecs/main/westend_asset_hub.json"
-        }
-        Network::Paseo => {
-            "https://raw.githubusercontent.com/nickvntaele/chainspecs/main/paseo_asset_hub.json"
-        }
+        Network::Polkadot => Some(POLKADOT_ASSET_HUB_SPEC),
+        Network::Kusama => Some(KUSAMA_ASSET_HUB_SPEC),
+        Network::Westend => Some(WESTEND_ASSET_HUB_SPEC),
+        Network::Paseo => None, // Paseo Asset Hub spec not available
     }
 }
 
-/// Get the People chain spec URL for a network.
-pub fn get_people_chain_spec_url(network: Network) -> &'static str {
+/// Get the embedded People chain spec for a network.
+/// Returns None for networks without People chain specs (e.g., Paseo).
+pub fn get_people_chain_spec(network: Network) -> Option<&'static str> {
     match network {
-        Network::Polkadot => {
-            "https://raw.githubusercontent.com/nickvntaele/chainspecs/main/polkadot_people.json"
-        }
-        Network::Kusama => {
-            "https://raw.githubusercontent.com/nickvntaele/chainspecs/main/kusama_people.json"
-        }
-        Network::Westend => {
-            "https://raw.githubusercontent.com/nickvntaele/chainspecs/main/westend_people.json"
-        }
-        Network::Paseo => {
-            "https://raw.githubusercontent.com/nickvntaele/chainspecs/main/paseo_people.json"
-        }
+        Network::Polkadot => Some(POLKADOT_PEOPLE_SPEC),
+        Network::Kusama => Some(KUSAMA_PEOPLE_SPEC),
+        Network::Westend => Some(WESTEND_PEOPLE_SPEC),
+        Network::Paseo => None, // Paseo People spec not available
     }
-}
-
-/// Fetch a chain spec from a URL.
-async fn fetch_chain_spec(url: &str) -> Result<String, ChainError> {
-    tracing::debug!("Fetching chain spec from {}", url);
-
-    let start = std::time::Instant::now();
-    let response = reqwest::get(url)
-        .await
-        .map_err(|e| ChainError::LightClient(format!("Failed to fetch chain spec: {}", e)))?;
-
-    if !response.status().is_success() {
-        return Err(ChainError::LightClient(format!(
-            "Failed to fetch chain spec from {}: HTTP {}",
-            url,
-            response.status()
-        )));
-    }
-
-    let spec = response
-        .text()
-        .await
-        .map_err(|e| ChainError::LightClient(format!("Failed to read chain spec: {}", e)))?;
-
-    tracing::debug!(
-        "Fetched chain spec ({} bytes) in {:?}",
-        spec.len(),
-        start.elapsed()
-    );
-
-    Ok(spec)
 }
 
 /// Light client connections for a network.
@@ -127,23 +95,26 @@ impl LightClientConnections {
     /// - The relay chain (Polkadot, Kusama, etc.)
     /// - Asset Hub parachain (for staking data)
     ///
-    /// Chain specs are fetched from well-known URLs.
+    /// Chain specs are bundled with the binary (no network fetch required).
     pub async fn connect(network: Network) -> Result<Self, ChainError> {
         let total_start = std::time::Instant::now();
         tracing::info!("Connecting to {} via light client (smoldot)...", network);
         tracing::info!("Light client provides trustless P2P connection - no RPC trust required");
 
-        // Fetch chain specs
-        let relay_spec_url = get_relay_chain_spec_url(network);
-        let asset_hub_spec_url = get_asset_hub_chain_spec_url(network);
+        // Get embedded chain specs
+        let relay_spec = get_relay_chain_spec(network);
+        let asset_hub_spec = get_asset_hub_chain_spec(network).ok_or_else(|| {
+            ChainError::LightClient(format!(
+                "Asset Hub chain spec not available for {} - light client mode not supported",
+                network
+            ))
+        })?;
 
-        tracing::info!("Fetching {} relay chain spec from GitHub...", network);
-        let relay_spec = fetch_chain_spec(relay_spec_url).await?;
-        tracing::debug!("Relay chain spec: {} bytes", relay_spec.len());
-
-        tracing::info!("Fetching {} Asset Hub chain spec from GitHub...", network);
-        let asset_hub_spec = fetch_chain_spec(asset_hub_spec_url).await?;
-        tracing::debug!("Asset Hub chain spec: {} bytes", asset_hub_spec.len());
+        tracing::debug!(
+            "Using embedded chain specs: relay={} bytes, asset_hub={} bytes",
+            relay_spec.len(),
+            asset_hub_spec.len()
+        );
 
         // Create the light client for the relay chain
         tracing::info!(
@@ -153,7 +124,7 @@ impl LightClientConnections {
         tracing::info!("Smoldot will discover and connect to P2P network peers...");
         let start = std::time::Instant::now();
         let (light_client, relay_rpc) =
-            LightClient::relay_chain(relay_spec.as_str()).map_err(|e| {
+            LightClient::relay_chain(relay_spec).map_err(|e| {
                 ChainError::LightClient(format!("Failed to start relay chain light client: {}", e))
             })?;
         tracing::debug!("Relay chain light client started in {:?}", start.elapsed());
@@ -165,7 +136,7 @@ impl LightClientConnections {
         );
         let start = std::time::Instant::now();
         let asset_hub_rpc = light_client
-            .parachain(asset_hub_spec.as_str())
+            .parachain(asset_hub_spec)
             .map_err(|e| {
                 ChainError::LightClient(format!("Failed to connect to Asset Hub: {}", e))
             })?;
@@ -214,13 +185,18 @@ impl LightClientConnections {
     /// Connect to the People chain for identity data.
     ///
     /// This is called separately since identity data is optional.
+    /// Returns an error if People chain spec is not available for this network.
     pub async fn connect_people_chain(&self) -> Result<OnlineClient<PolkadotConfig>, ChainError> {
         let total_start = std::time::Instant::now();
-        let people_spec_url = get_people_chain_spec_url(self.network);
 
-        tracing::info!("Fetching {} People chain spec from GitHub...", self.network);
-        let people_spec = fetch_chain_spec(people_spec_url).await?;
-        tracing::debug!("People chain spec: {} bytes", people_spec.len());
+        let people_spec = get_people_chain_spec(self.network).ok_or_else(|| {
+            ChainError::LightClient(format!(
+                "People chain spec not available for {} - identity lookup not supported in light client mode",
+                self.network
+            ))
+        })?;
+
+        tracing::debug!("Using embedded People chain spec: {} bytes", people_spec.len());
 
         tracing::info!(
             "Adding {} People chain as parachain to light client...",
@@ -229,7 +205,7 @@ impl LightClientConnections {
         let start = std::time::Instant::now();
         let people_rpc = self
             .light_client
-            .parachain(people_spec.as_str())
+            .parachain(people_spec)
             .map_err(|e| {
                 ChainError::LightClient(format!("Failed to connect to People chain: {}", e))
             })?;

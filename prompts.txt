@@ -48,7 +48,7 @@ Add a README and a LICENSE (ISC).
 6. in history: make the graph nicer. Add a space between day on the X axis. On the Y axis, only put a small number of ticks. for ex: if max reward is 84.24, add 10 ticks from 0 to 100. Ratio of the graph should be 1:2 aka height is half the width adapted to the screen. Display a trend line on the graph (computed with a smoothing window of 7 days)
 7. the QR code is now valid but it is not signed for the correct parachain (in this case that would be assethub/statemint); vault is complaining that the QR code requires metadata upload (which usually means it is not for the correct one).
 
-first manual help: claude cannot figure out
+*first* manual help: claude cannot figure out
 - should the tr be submitted to polkadot or AH?
 - what is exactly the format for the extrensic?
 - need some help also with the QR code
@@ -72,6 +72,11 @@ we need more caching to hide the latency when we start the app with the light cl
 ## wave 4 camera
 1. use the camera to read the QR code back from Vault and get the signed transaction to submit to the chain
 2. on macos the app will be signed externally with an Entitlement file to get access to the camera. add a script to build a dmg.
+3. on macos Terminal need access, not only the app running in the terminal.
+4. size of the QR code should be dependant of the terminal (on unix system use termios, on windows assume 2:1 ratio)
+5. when reading back the QR code from Vault, need to find a way
+
+*second* manual help: i had to help to get the scanning working using rqrr + some tricks
 
 
 ## wave 5 cosmetics
@@ -79,7 +84,8 @@ we need more caching to hide the latency when we start the app with the light cl
 1. deal with slow connection: if you have 1mb/s the timeouts for the light client are not ok. After 10s, compute the available bw and set the timeout automatically.
 2. when you know the bw you can estimate how log it will take before the app is loaded and user can do something. Use the estimation to display a progress bar.
 3. when displaing an animated QR code, the last one is not the same size as the other one and visually that looks chaotics. Keep the size of the frame constant.
-4.
+4. since we have the network bandwidth display it on the log title line
+5. in the account view replace "Points" by the native token name (DOT, KSM etc), same in other tabs
 
 ## wave qa
 
@@ -89,7 +95,12 @@ we need more caching to hide the latency when we start the app with the light cl
 5. update the documentation esp. how to use the app
 
 
+## wave 7
+
+1. Emmbed the chain specs in the binary such that the light client does not need to download them at start
 
 
+## wave 8 : missing features
 
-
+1. I want to be able to change who get's paid for staking rewards (3 options: conpounding, move to another account, etc). In the main g
+2. I want to be able to stake more or less token

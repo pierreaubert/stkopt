@@ -8,6 +8,7 @@ use crate::log_buffer::LogBuffer;
 use crate::theme::{Palette, Theme};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::TableState;
+use ratatui_image::picker::Picker;
 use std::collections::HashSet;
 use stkopt_chain::ChainInfo;
 use stkopt_core::{ConnectionStatus, Network, OptimizationResult};
@@ -214,9 +215,12 @@ impl View {
 /// Application state.
 pub struct App {
     /// Current theme.
+    #[allow(dead_code)]
     pub theme: Theme,
     /// Color palette for rendering.
     pub palette: Palette,
+    /// Image picker for terminal graphics protocol detection.
+    pub image_picker: Picker,
     /// Current network.
     pub network: Network,
     /// Connection status.
@@ -311,6 +315,14 @@ pub struct App {
     pub scanning_signature: bool,
     /// Camera scan status for visual feedback (None=not scanning, Some=latest status).
     pub camera_scan_status: Option<CameraScanStatus>,
+    /// Number of frames captured since scanning started (for activity feedback).
+    pub camera_frames_captured: u32,
+    /// Camera preview pixels for braille rendering (grayscale, downsampled).
+    pub camera_preview: Option<Vec<u8>>,
+    /// Camera preview dimensions (width, height).
+    pub camera_preview_size: (usize, usize),
+    /// QR code bounding box in normalized coordinates (0.0-1.0), if detected.
+    pub qr_bounds: Option<[(f32, f32); 4]>,
     /// Whether the chain is still connecting/syncing.
     pub loading_chain: bool,
     /// Whether to show the account input prompt popup.
@@ -335,9 +347,16 @@ impl App {
     /// Create a new application instance.
     pub fn new(network: Network, log_buffer: LogBuffer, theme: Theme) -> Self {
         let palette = theme.palette();
+        // Try to detect terminal graphics protocol, fall back to halfblocks
+        let image_picker = Picker::from_query_stdio().unwrap_or_else(|e| {
+            tracing::debug!("Could not query terminal graphics: {}, using halfblocks", e);
+            Picker::from_fontsize((8, 16)) // Standard font size for halfblocks
+        });
+        tracing::info!("Image picker protocol: {:?}", image_picker.protocol_type());
         Self {
             theme,
             palette,
+            image_picker,
             network,
             connection_status: ConnectionStatus::Disconnected,
             chain_info: None,
@@ -385,6 +404,10 @@ impl App {
             pending_tx: None,
             scanning_signature: false,
             camera_scan_status: None,
+            camera_frames_captured: 0,
+            camera_preview: None,
+            camera_preview_size: (0, 0),
+            qr_bounds: None,
             loading_chain: true, // Start in loading state
             show_account_prompt: false,
             spinner_tick: 0,
@@ -497,11 +520,14 @@ impl App {
                         && !self.scanning_signature
                     {
                         self.camera_scan_status = Some(CameraScanStatus::Initializing);
+                        self.camera_frames_captured = 0;
                         return Some(Action::StartSignatureScan);
                     }
                     // Stop scanning when leaving Scan tab
                     if self.qr_modal_tab != 2 && self.scanning_signature {
                         self.camera_scan_status = None;
+                        self.camera_preview = None;
+                        self.qr_bounds = None;
                         return Some(Action::StopSignatureScan);
                     }
                 }
@@ -518,11 +544,14 @@ impl App {
                         && !self.scanning_signature
                     {
                         self.camera_scan_status = Some(CameraScanStatus::Initializing);
+                        self.camera_frames_captured = 0;
                         return Some(Action::StartSignatureScan);
                     }
                     // Stop scanning when leaving Scan tab
                     if self.qr_modal_tab != 2 && self.scanning_signature {
                         self.camera_scan_status = None;
+                        self.camera_preview = None;
+                        self.qr_bounds = None;
                         return Some(Action::StopSignatureScan);
                     }
                 }
@@ -530,6 +559,7 @@ impl App {
                 KeyCode::Char('s') if self.pending_unsigned_tx.is_some() => {
                     self.qr_modal_tab = 2;
                     self.camera_scan_status = Some(CameraScanStatus::Initializing);
+                    self.camera_frames_captured = 0;
                     return Some(Action::StartSignatureScan);
                 }
                 _ => {}
@@ -819,7 +849,7 @@ impl App {
 
         // SS58 addresses typically start with a prefix number (network identifier)
         // Valid prefixes: 0-99 followed by the base58-encoded address
-        if !input.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+        if !input.chars().next().is_some_and(|c| c.is_ascii_digit()) {
             return Err("Address should start with a network prefix (0-9)".to_string());
         }
 
@@ -849,6 +879,7 @@ impl App {
     }
 
     /// Parse the account input as SS58 address (legacy method for backward compatibility).
+    #[allow(dead_code)]
     fn parse_account_input(&self) -> Option<AccountId32> {
         self.validate_account_input().ok()
     }
@@ -1056,11 +1087,20 @@ impl App {
                 self.camera_scan_status = Some(CameraScanStatus::Error);
             }
             Action::UpdateScanStatus(status) => {
+                // Increment frame counter on each scan update (activity indicator)
+                if matches!(status, QrScanStatus::Scanning | QrScanStatus::Detected) {
+                    self.camera_frames_captured = self.camera_frames_captured.saturating_add(1);
+                }
                 self.camera_scan_status = Some(match status {
                     QrScanStatus::Scanning => CameraScanStatus::Scanning,
                     QrScanStatus::Detected => CameraScanStatus::Detected,
                     QrScanStatus::Success => CameraScanStatus::Success,
                 });
+            }
+            Action::UpdateCameraPreview(pixels, width, height, bounds) => {
+                self.camera_preview = Some(pixels);
+                self.camera_preview_size = (width, height);
+                self.qr_bounds = bounds;
             }
             Action::SubmitTransaction => {
                 // Handled in main.rs - submits the pending_tx

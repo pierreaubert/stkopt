@@ -82,6 +82,7 @@ pub struct TransactionInfo {
 
 /// Status of transaction submission.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum TxSubmissionStatus {
     /// Waiting to scan signature QR code.
     WaitingForSignature,
@@ -119,6 +120,7 @@ pub struct PendingUnsignedTx {
 
 /// Signed transaction ready for submission.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct PendingTransaction {
     /// The unsigned payload (for reference).
     pub description: String,
@@ -132,6 +134,7 @@ pub struct PendingTransaction {
 
 /// Actions that can update application state.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum Action {
     /// Update connection status.
     UpdateConnectionStatus(ConnectionStatus),
@@ -188,6 +191,9 @@ pub enum Action {
     QrScanFailed(String),
     /// Update QR scan status for visual feedback.
     UpdateScanStatus(QrScanStatus),
+    /// Update camera preview for braille display.
+    /// Contains: (pixels, width, height, qr_bounds).
+    UpdateCameraPreview(Vec<u8>, usize, usize, Option<[(f32, f32); 4]>),
     /// Submit the signed transaction to the network.
     SubmitTransaction,
     /// Update transaction submission status.

@@ -11,15 +11,34 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+/// Preview dimensions for braille rendering (2 cols per char, 4 rows per char).
+/// 80x48 gives us 40 chars wide × 12 chars tall of braille.
+pub const PREVIEW_WIDTH: usize = 80;
+pub const PREVIEW_HEIGHT: usize = 48;
+
+/// Camera preview frame for TUI display.
+#[derive(Debug, Clone)]
+pub struct CameraPreview {
+    /// Downsampled grayscale pixels (PREVIEW_WIDTH × PREVIEW_HEIGHT).
+    pub pixels: Vec<u8>,
+    /// Width of preview in pixels.
+    pub width: usize,
+    /// Height of preview in pixels.
+    pub height: usize,
+    /// QR code bounding box corners (normalized 0.0-1.0), if detected.
+    /// Order: top-left, top-right, bottom-right, bottom-left.
+    pub qr_bounds: Option<[(f32, f32); 4]>,
+}
+
 /// Result of a QR scan attempt.
 #[derive(Debug, Clone)]
 pub enum QrScanResult {
-    /// Successfully decoded QR code data (raw bytes).
-    Success(Vec<u8>),
-    /// No QR code found in frame (scanning in progress).
-    Scanning,
-    /// QR code detected but couldn't decode (partial detection).
-    Detected,
+    /// Successfully decoded QR code data (raw bytes), with preview.
+    Success(Vec<u8>, CameraPreview),
+    /// No QR code found in frame (scanning in progress), with preview.
+    Scanning(CameraPreview),
+    /// QR code detected but couldn't decode (partial detection), with preview.
+    Detected(CameraPreview),
     /// Error during capture or decode.
     Error(String),
 }
@@ -66,6 +85,7 @@ impl QrReader {
     }
 
     /// Check if the reader is still active.
+    #[allow(dead_code)]
     pub fn is_active(&self) -> bool {
         self.active
     }
@@ -92,13 +112,55 @@ fn camera_capture_loop(
 ) -> Result<(), String> {
     tracing::info!("Starting camera capture for QR scanning...");
 
-    // Request 640x480 resolution - sufficient for QR codes and fast to process
-    let format = CameraFormat::new(Resolution::new(640, 480), FrameFormat::MJPEG, 30);
-    let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(format));
+    // Try different format requests in order of preference
+    // Higher resolution helps with QR code detection
+    let formats_to_try = [
+        // First try: 1280x720 MJPEG (HD for better QR detection)
+        RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(CameraFormat::new(
+            Resolution::new(1280, 720),
+            FrameFormat::MJPEG,
+            30,
+        ))),
+        // Second try: 1280x720 YUYV
+        RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(CameraFormat::new(
+            Resolution::new(1280, 720),
+            FrameFormat::YUYV,
+            30,
+        ))),
+        // Third try: 640x480 MJPEG (fallback)
+        RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(CameraFormat::new(
+            Resolution::new(640, 480),
+            FrameFormat::MJPEG,
+            30,
+        ))),
+        // Fourth try: let camera choose its default format
+        RequestedFormat::new::<RgbFormat>(RequestedFormatType::None),
+    ];
 
-    // Open default camera (index 0)
-    let mut camera = Camera::new(CameraIndex::Index(0), requested)
-        .map_err(|e| format!("Failed to open camera: {}", e))?;
+    let mut camera = None;
+    let mut last_error = String::new();
+
+    for (i, requested) in formats_to_try.iter().enumerate() {
+        tracing::info!("Trying camera format {}/{}...", i + 1, formats_to_try.len());
+        match Camera::new(CameraIndex::Index(0), *requested) {
+            Ok(cam) => {
+                camera = Some(cam);
+                break;
+            }
+            Err(e) => {
+                last_error = format!("{}", e);
+                tracing::warn!("Format {} failed: {}", i + 1, e);
+            }
+        }
+    }
+
+    let mut camera = camera.ok_or_else(|| {
+        format!(
+            "Failed to open camera with any format. Last error: {}. \
+             Make sure Terminal has camera permission in System Settings → Privacy & Security → Camera",
+            last_error
+        )
+    })?;
 
     camera
         .open_stream()
@@ -154,6 +216,9 @@ fn camera_capture_loop(
             }
         }
 
+        // Create downsampled preview for TUI display
+        let preview_pixels = downsample_grayscale(&gray_data, width, height, PREVIEW_WIDTH, PREVIEW_HEIGHT);
+
         // Try to decode QR code
         let mut decoder = rqrr::PreparedImage::prepare_from_greyscale(width, height, |x, y| {
             gray_data.get(y * width + x).copied().unwrap_or(0)
@@ -161,29 +226,69 @@ fn camera_capture_loop(
 
         let grids = decoder.detect_grids();
 
+        if !grids.is_empty() {
+            tracing::info!("Detected {} QR grid(s) in {}x{} frame", grids.len(), width, height);
+        }
+
         if grids.is_empty() {
-            // No QR code detected - report scanning status
-            let _ = result_tx.send(QrScanResult::Scanning);
+            // No QR code detected - report scanning status with preview
+            let preview = CameraPreview {
+                pixels: preview_pixels,
+                width: PREVIEW_WIDTH,
+                height: PREVIEW_HEIGHT,
+                qr_bounds: None,
+            };
+            let _ = result_tx.send(QrScanResult::Scanning(preview));
         } else {
             let mut decoded_any = false;
-            for grid in grids {
+            let mut qr_bounds = None;
+
+            for grid in &grids {
+                // Extract bounding box from first detected grid
+                if qr_bounds.is_none() {
+                    qr_bounds = Some(extract_qr_bounds(grid, width, height));
+                }
+
                 match grid.decode() {
-                    Ok((_, content)) => {
+                    Ok((meta, content)) => {
                         // Convert String content to bytes
                         let bytes = content.into_bytes();
-                        tracing::info!("QR code detected: {} bytes", bytes.len());
-                        let _ = result_tx.send(QrScanResult::Success(bytes));
+                        tracing::info!(
+                            "QR decoded: {} bytes, ECC={:?}, version={:?}",
+                            bytes.len(),
+                            meta.ecc_level,
+                            meta.version
+                        );
+                        if !bytes.is_empty() {
+                            tracing::info!(
+                                "First bytes: {:02x?}",
+                                &bytes[..bytes.len().min(10)]
+                            );
+                        }
+                        let preview = CameraPreview {
+                            pixels: preview_pixels.clone(),
+                            width: PREVIEW_WIDTH,
+                            height: PREVIEW_HEIGHT,
+                            qr_bounds,
+                        };
+                        let _ = result_tx.send(QrScanResult::Success(bytes, preview));
                         decoded_any = true;
                         // Continue scanning - the caller decides when to stop
                     }
                     Err(e) => {
-                        tracing::debug!("QR decode error: {:?}", e);
+                        tracing::warn!("QR decode error: {:?}", e);
                     }
                 }
             }
             // QR grid detected but couldn't decode
             if !decoded_any {
-                let _ = result_tx.send(QrScanResult::Detected);
+                let preview = CameraPreview {
+                    pixels: preview_pixels,
+                    width: PREVIEW_WIDTH,
+                    height: PREVIEW_HEIGHT,
+                    qr_bounds,
+                };
+                let _ = result_tx.send(QrScanResult::Detected(preview));
             }
         }
 
@@ -195,7 +300,62 @@ fn camera_capture_loop(
     Ok(())
 }
 
+/// Downsample a grayscale image using area averaging.
+fn downsample_grayscale(
+    src: &[u8],
+    src_width: usize,
+    src_height: usize,
+    dst_width: usize,
+    dst_height: usize,
+) -> Vec<u8> {
+    let mut dst = Vec::with_capacity(dst_width * dst_height);
+
+    let x_ratio = src_width as f32 / dst_width as f32;
+    let y_ratio = src_height as f32 / dst_height as f32;
+
+    for dst_y in 0..dst_height {
+        for dst_x in 0..dst_width {
+            // Map destination pixel to source region
+            let src_x = (dst_x as f32 * x_ratio) as usize;
+            let src_y = (dst_y as f32 * y_ratio) as usize;
+
+            // Simple nearest-neighbor sampling (fast)
+            let idx = src_y * src_width + src_x;
+            let pixel = src.get(idx).copied().unwrap_or(128);
+            dst.push(pixel);
+        }
+    }
+
+    dst
+}
+
+/// Extract QR code bounding box as normalized coordinates (0.0-1.0).
+fn extract_qr_bounds<G>(
+    grid: &rqrr::Grid<G>,
+    img_width: usize,
+    img_height: usize,
+) -> [(f32, f32); 4] {
+    // rqrr::Grid has bounds field that contains the 4 corners
+    let bounds = &grid.bounds;
+
+    // Bounds are in pixel coordinates, normalize to 0.0-1.0
+    let normalize = |p: rqrr::Point| {
+        (
+            p.x as f32 / img_width as f32,
+            p.y as f32 / img_height as f32,
+        )
+    };
+
+    [
+        normalize(bounds[0]), // top-left
+        normalize(bounds[1]), // top-right
+        normalize(bounds[2]), // bottom-right
+        normalize(bounds[3]), // bottom-left
+    ]
+}
+
 /// Decode a QR code from raw image bytes (for testing or file-based input).
+#[allow(dead_code)]
 pub fn decode_qr_from_image(image_data: &[u8]) -> Result<Vec<u8>, String> {
     let img =
         image::load_from_memory(image_data).map_err(|e| format!("Failed to load image: {}", e))?;

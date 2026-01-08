@@ -39,8 +39,8 @@ if [ -z "$VERSION" ]; then
     echo "ERROR: Could not extract version from Cargo.toml"
     exit 1
 fi
-BUILD_DIR="$PROJECT_ROOT/target-static/release"
-DMG_DIR="$PROJECT_ROOT/target-static/dmg"
+BUILD_DIR="$PROJECT_ROOT/target/release"
+DMG_DIR="$PROJECT_ROOT/target/dmg"
 APP_BUNDLE="$DMG_DIR/$APP_NAME.app"
 
 # Command line options (defaults: unsigned build for local testing)
@@ -124,27 +124,21 @@ check_prerequisites() {
         exit 1
     fi
 
+    # DEVELOPER_ID is optional - if not set, we use ad-hoc signing
     if $SIGN && [ -z "${DEVELOPER_ID:-}" ]; then
-        log_error "DEVELOPER_ID environment variable not set"
-        log_info "Set it to your Developer ID certificate name, e.g.:"
-        log_info "  export DEVELOPER_ID='Developer ID Application: Your Name (TEAMID)'"
-        exit 1
+        log_warning "DEVELOPER_ID not set, will use ad-hoc signing (local use only)"
+        log_info "For distribution, set DEVELOPER_ID='Developer ID Application: Your Name (TEAMID)'"
     fi
 
     if $NOTARIZE; then
+        if [ -z "${DEVELOPER_ID:-}" ]; then
+            log_error "DEVELOPER_ID required for notarization"
+            exit 1
+        fi
         if [ -z "${APPLE_ID:-}" ]; then
             log_error "APPLE_ID environment variable not set"
             exit 1
         fi
-#        if [ -z "${APPLE_APP_PASSWORD:-}" ]; then
-#            log_error "APPLE_APP_PASSWORD environment variable not set"
-#            log_info "Create an app-specific password at https://appleid.apple.com"
-#            exit 1
-#        fi
-#        if [ -z "${APPLE_TEAM_ID:-}" ]; then
-#            log_error "APPLE_TEAM_ID environment variable not set"
-#            exit 1
-#        fi
     fi
 
     log_success "Prerequisites check passed"
@@ -172,19 +166,20 @@ build_binary() {
         rustup target add x86_64-apple-darwin aarch64-apple-darwin
 
         # Build for both architectures
-        cargo build --release --package stkopt-tui --target x86_64-apple-darwin --target-dir ./target-static
-        cargo build --release --package stkopt-tui --target aarch64-apple-darwin --target-dir ./target-static
+        cargo build --release --package stkopt-tui --target x86_64-apple-darwin
+        cargo build --release --package stkopt-tui --target aarch64-apple-darwin
 
         # Create universal binary
         mkdir -p "$BUILD_DIR"
         lipo -create \
-            "$PROJECT_ROOT/target-static/x86_64-apple-darwin/release/$BINARY_NAME" \
-            "$PROJECT_ROOT/target-static/aarch64-apple-darwin/release/$BINARY_NAME" \
+            "$PROJECT_ROOT/target/x86_64-apple-darwin/release/$BINARY_NAME" \
+            "$PROJECT_ROOT/target/aarch64-apple-darwin/release/$BINARY_NAME" \
             -output "$BUILD_DIR/$BINARY_NAME"
 
         log_success "Universal binary created"
     else
-        cargo build --release --package stkopt-tui --target-dir ./target-static
+        # Standard build - Info.plist is embedded via build.rs
+        cargo build --release --package stkopt-tui
     fi
 
     if [ ! -f "$BUILD_DIR/$BINARY_NAME" ]; then
@@ -192,7 +187,12 @@ build_binary() {
         exit 1
     fi
 
-    log_success "Binary built successfully"
+    # Verify Info.plist is embedded
+    if otool -s __TEXT __info_plist "$BUILD_DIR/$BINARY_NAME" | grep -q "Contents"; then
+        log_success "Binary built with embedded Info.plist"
+    else
+        log_warning "Info.plist may not be embedded - camera access might not work"
+    fi
 }
 
 # Create app bundle structure
@@ -204,8 +204,27 @@ create_app_bundle() {
     mkdir -p "$APP_BUNDLE/Contents/MacOS"
     mkdir -p "$APP_BUNDLE/Contents/Resources"
 
-    # Copy binary
-    cp "$BUILD_DIR/$BINARY_NAME" "$APP_BUNDLE/Contents/MacOS/"
+    # Copy binary to Resources (the launcher will run it)
+    cp "$BUILD_DIR/$BINARY_NAME" "$APP_BUNDLE/Contents/Resources/$BINARY_NAME-bin"
+
+    # Create launcher script that opens Terminal with the TUI app
+    cat > "$APP_BUNDLE/Contents/MacOS/$BINARY_NAME" << 'LAUNCHER_EOF'
+#!/bin/bash
+# Launcher script for stkopt TUI application
+# Opens Terminal.app and runs the actual binary
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BINARY="$SCRIPT_DIR/../Resources/stkopt-bin"
+
+# Use osascript to open Terminal and run the app
+osascript << EOF
+tell application "Terminal"
+    activate
+    do script "clear && '$BINARY'; exit"
+end tell
+EOF
+LAUNCHER_EOF
+    chmod +x "$APP_BUNDLE/Contents/MacOS/$BINARY_NAME"
 
     # Copy Info.plist and update version
     sed -e "s/STKOPT_VERSION/$VERSION/" \
@@ -234,7 +253,8 @@ bundle_dylibs() {
     local frameworks_dir="$APP_BUNDLE/Contents/Frameworks"
     mkdir -p "$frameworks_dir"
 
-    local binary="$APP_BUNDLE/Contents/MacOS/$BINARY_NAME"
+    # The actual binary is in Resources (MacOS contains the launcher script)
+    local binary="$APP_BUNDLE/Contents/Resources/$BINARY_NAME-bin"
 
     # Get list of non-system dylibs
     local dylibs
@@ -376,41 +396,101 @@ create_icns() {
     log_success "App icon created"
 }
 
-# Sign the application
-sign_app() {
-    if ! $SIGN; then
-        log_warning "Skipping code signing (use --sign to enable)"
-        return
+# Sign the standalone binary (for direct use without .app bundle)
+sign_binary() {
+    log_info "Signing standalone binary..."
+
+    local binary="$BUILD_DIR/$BINARY_NAME"
+
+    if [ -n "${DEVELOPER_ID:-}" ]; then
+        codesign --force --options runtime \
+            --entitlements "$PROJECT_ROOT/scripts/entitlements.plist" \
+            --sign "$DEVELOPER_ID" \
+            --timestamp \
+            "$binary"
+    else
+        # Ad-hoc signing for local use
+        codesign --force --deep \
+            --entitlements "$PROJECT_ROOT/scripts/entitlements.plist" \
+            -fs - \
+            "$binary"
     fi
 
+    log_success "Standalone binary signed: $binary"
+}
+
+# Sign the application
+sign_app() {
     log_info "Signing application..."
+
+    # Determine signing identity
+    local sign_identity
+    if [ -n "${DEVELOPER_ID:-}" ]; then
+        sign_identity="$DEVELOPER_ID"
+        log_info "Using Developer ID: $sign_identity"
+    else
+        sign_identity="-"  # Ad-hoc signing
+        log_info "Using ad-hoc signing (local use only)"
+    fi
 
     # Sign all frameworks first (must sign inside-out)
     if [ -d "$APP_BUNDLE/Contents/Frameworks" ]; then
         for lib in "$APP_BUNDLE/Contents/Frameworks"/*.dylib; do
             if [ -f "$lib" ]; then
                 log_info "Signing framework: $(basename "$lib")"
-                codesign --force --options runtime \
-                    --sign "$DEVELOPER_ID" \
-                    --timestamp \
-                    "$lib"
+                if [ "$sign_identity" = "-" ]; then
+                    codesign --force --deep -fs "$sign_identity" "$lib"
+                else
+                    codesign --force --options runtime \
+                        --sign "$sign_identity" \
+                        --timestamp \
+                        "$lib"
+                fi
             fi
         done
     fi
 
-    # Sign the binary with hardened runtime
-    codesign --force --options runtime \
-        --entitlements "$PROJECT_ROOT/scripts/entitlements.plist" \
-        --sign "$DEVELOPER_ID" \
-        --timestamp \
-        "$APP_BUNDLE/Contents/MacOS/$BINARY_NAME"
+    # Sign the actual binary (in Resources) with entitlements
+    local actual_binary="$APP_BUNDLE/Contents/Resources/$BINARY_NAME-bin"
 
-    # Sign the entire bundle
-    codesign --force --options runtime \
-        --entitlements "$PROJECT_ROOT/scripts/entitlements.plist" \
-        --sign "$DEVELOPER_ID" \
-        --timestamp \
-        "$APP_BUNDLE"
+    if [ "$sign_identity" = "-" ]; then
+        # Ad-hoc signing
+        codesign --force --deep \
+            --entitlements "$PROJECT_ROOT/scripts/entitlements.plist" \
+            -fs "$sign_identity" \
+            "$actual_binary"
+
+        # Sign the launcher script
+        codesign --force --deep \
+            -fs "$sign_identity" \
+            "$APP_BUNDLE/Contents/MacOS/$BINARY_NAME"
+
+        # Sign the entire bundle
+        codesign --force --deep \
+            --entitlements "$PROJECT_ROOT/scripts/entitlements.plist" \
+            -fs "$sign_identity" \
+            "$APP_BUNDLE"
+    else
+        # Developer ID signing with hardened runtime
+        codesign --force --options runtime \
+            --entitlements "$PROJECT_ROOT/scripts/entitlements.plist" \
+            --sign "$sign_identity" \
+            --timestamp \
+            "$actual_binary"
+
+        # Sign the launcher script
+        codesign --force --options runtime \
+            --sign "$sign_identity" \
+            --timestamp \
+            "$APP_BUNDLE/Contents/MacOS/$BINARY_NAME"
+
+        # Sign the entire bundle
+        codesign --force --options runtime \
+            --entitlements "$PROJECT_ROOT/scripts/entitlements.plist" \
+            --sign "$sign_identity" \
+            --timestamp \
+            "$APP_BUNDLE"
+    fi
 
     # Verify signature
     codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
@@ -462,7 +542,7 @@ create_dmg() {
         create_dmg_hdiutil "$dmg_path"
     fi
 
-    if $SIGN && [ -f "$dmg_path" ]; then
+    if [ -f "$dmg_path" ] && [ -n "${DEVELOPER_ID:-}" ]; then
         log_info "Signing DMG..."
         codesign --force --sign "$DEVELOPER_ID" --timestamp "$dmg_path"
         log_success "DMG signed"
@@ -556,9 +636,10 @@ main() {
     check_prerequisites
     clean_build
     build_binary
+    sign_binary          # Sign standalone binary for direct use
     create_app_bundle
     bundle_dylibs
-    sign_app
+    sign_app             # Sign .app bundle
     create_dmg
     notarize_dmg
 
@@ -566,21 +647,24 @@ main() {
     log_success "Build complete!"
     log_info "=========================================="
 
+    log_info ""
+    log_info "Standalone binary: $BUILD_DIR/$BINARY_NAME"
+
     local dmg_path="$DMG_DIR/$APP_NAME-$VERSION.dmg"
     if [ -f "$dmg_path" ]; then
         log_info "DMG: $dmg_path"
         log_info "Size: $(du -h "$dmg_path" | cut -f1)"
 
-        if $SIGN; then
-            log_info "Signed: Yes"
+        if [ -n "${DEVELOPER_ID:-}" ]; then
+            log_info "Signed: Yes (Developer ID)"
         else
-            log_warning "Signed: No (use --sign for distribution)"
+            log_info "Signed: Ad-hoc (local use only)"
         fi
 
         if $NOTARIZE; then
             log_info "Notarized: Yes"
         else
-            log_warning "Notarized: No (use --notarize for App Store/Gatekeeper)"
+            log_warning "Notarized: No (use --notarize for Gatekeeper)"
         fi
     fi
 }

@@ -269,9 +269,15 @@ async fn main() -> Result<()> {
                             && let Some(result) = reader.try_recv()
                         {
                             match result {
-                                qr_reader::QrScanResult::Success(data) => {
+                                qr_reader::QrScanResult::Success(data, preview) => {
                                     tracing::info!("QR code scanned: {} bytes", data.len());
                                     let _ = action_tx.send(Action::UpdateScanStatus(action::QrScanStatus::Success)).await;
+                                    let _ = action_tx.send(Action::UpdateCameraPreview(
+                                        preview.pixels,
+                                        preview.width,
+                                        preview.height,
+                                        preview.qr_bounds,
+                                    )).await;
                                     let _ = action_tx.send(Action::SignatureScanned(data)).await;
                                     // Stop scanning after successful scan
                                     if let Some(ref mut r) = qr_reader {
@@ -279,13 +285,25 @@ async fn main() -> Result<()> {
                                     }
                                     qr_reader = None;
                                 }
-                                qr_reader::QrScanResult::Scanning => {
-                                    // No QR detected, update status for visual feedback
+                                qr_reader::QrScanResult::Scanning(preview) => {
+                                    // No QR detected, update status and preview for visual feedback
                                     let _ = action_tx.send(Action::UpdateScanStatus(action::QrScanStatus::Scanning)).await;
+                                    let _ = action_tx.send(Action::UpdateCameraPreview(
+                                        preview.pixels,
+                                        preview.width,
+                                        preview.height,
+                                        preview.qr_bounds,
+                                    )).await;
                                 }
-                                qr_reader::QrScanResult::Detected => {
+                                qr_reader::QrScanResult::Detected(preview) => {
                                     // QR detected but not decoded yet
                                     let _ = action_tx.send(Action::UpdateScanStatus(action::QrScanStatus::Detected)).await;
+                                    let _ = action_tx.send(Action::UpdateCameraPreview(
+                                        preview.pixels,
+                                        preview.width,
+                                        preview.height,
+                                        preview.qr_bounds,
+                                    )).await;
                                 }
                                 qr_reader::QrScanResult::Error(e) => {
                                     let _ = action_tx.send(Action::QrScanFailed(e)).await;
@@ -398,8 +416,14 @@ async fn main() -> Result<()> {
                         }
                     }
                     Action::SignatureScanned(signature_data) => {
+                        // Log what we received for debugging
+                        tracing::info!(
+                            "Received QR data: {} bytes, first 20: {:02x?}",
+                            signature_data.len(),
+                            &signature_data[..signature_data.len().min(20)]
+                        );
                         // Decode the signature from Vault's QR code
-                        match stkopt_chain::decode_vault_signature(signature_data) {
+                        match stkopt_chain::decode_vault_signature(&signature_data) {
                             Ok(signature) => {
                                 if let Some(ref pending) = app.pending_unsigned_tx {
                                     // Build the signed extrinsic
@@ -417,7 +441,8 @@ async fn main() -> Result<()> {
                                         status: TxSubmissionStatus::ReadyToSubmit,
                                     });
                                     app.scanning_signature = false;
-                                    app.showing_qr = false;
+                                    // Switch to Submit tab (tab 3)
+                                    app.qr_modal_tab = 3;
 
                                     tracing::info!(
                                         "Signature decoded and extrinsic built: 0x{}",

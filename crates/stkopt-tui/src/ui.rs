@@ -978,12 +978,23 @@ fn render_account(frame: &mut Frame, app: &mut App, area: Rect) {
                 Style::default().fg(pal.primary).bold(),
             )));
             if let Some(membership) = &status.pool_membership {
+                // Look up pool name from pools list
+                let pool_name = app
+                    .pools
+                    .iter()
+                    .find(|p| p.id == membership.pool_id)
+                    .map(|p| p.name.as_str());
+                let pool_display = match pool_name {
+                    Some(name) if !name.is_empty() => format!(
+                        "    Member of Pool {} ({})",
+                        membership.pool_id, name
+                    ),
+                    _ => format!("    Member of Pool {}", membership.pool_id),
+                };
+                lines.push(Line::from(pool_display));
                 lines.push(Line::from(format!(
-                    "    Member of Pool {}",
-                    membership.pool_id
-                )));
-                lines.push(Line::from(format!(
-                    "    Points: {}",
+                    "    {}: {}",
+                    app.network.token_symbol(),
                     format_balance(membership.points, decimals)
                 )));
             } else {
@@ -1681,11 +1692,12 @@ fn render_qr_modal(frame: &mut Frame, app: &App) {
     let pal = &app.palette;
     let area = frame.area();
 
-    // Use up to 90% of screen for modal, with max dimensions for very large screens
-    let max_modal_width = 120.min(area.width * 9 / 10);
-    let max_modal_height = 60.min(area.height * 9 / 10);
-    let modal_width = max_modal_width.max(50); // Minimum 50 chars
-    let modal_height = max_modal_height.max(25); // Minimum 25 lines
+    // Use up to 90% of screen for modal
+    // QR version 10 = 57 + 8 quiet = 65 chars wide, 33 rows (half-blocks)
+    let max_modal_width = 90.min(area.width * 9 / 10);
+    let max_modal_height = 45.min(area.height * 9 / 10);
+    let modal_width = max_modal_width.max(55); // Minimum 55 chars
+    let modal_height = max_modal_height.max(30); // Minimum 30 lines
     let modal_x = (area.width.saturating_sub(modal_width)) / 2;
     let modal_y = (area.height.saturating_sub(modal_height)) / 2;
     let modal_area = Rect::new(modal_x, modal_y, modal_width, modal_height);
@@ -1708,8 +1720,15 @@ fn render_qr_modal(frame: &mut Frame, app: &App) {
     ])
     .split(inner_area);
 
-    // Tabs - show Scan tab only if we have pending unsigned tx
-    let titles = if app.pending_unsigned_tx.is_some() {
+    // Tabs - show Scan tab if we have pending unsigned tx, Submit tab if we have signed tx
+    let titles = if app.pending_tx.is_some() {
+        vec![
+            Line::from(" QR Code "),
+            Line::from(" Extrinsic "),
+            Line::from(" Scan "),
+            Line::from(" Submit "),
+        ]
+    } else if app.pending_unsigned_tx.is_some() {
         vec![
             Line::from(" QR Code "),
             Line::from(" Extrinsic "),
@@ -1728,11 +1747,14 @@ fn render_qr_modal(frame: &mut Frame, app: &App) {
         0 => render_qr_content(frame, app, chunks[1]),
         1 => render_qr_details(frame, app, chunks[1]),
         2 => render_scan_camera(frame, app, chunks[1]),
+        3 => render_submit_tab(frame, app, chunks[1]),
         _ => render_qr_content(frame, app, chunks[1]),
     }
 
-    // Footer - show scan shortcut if we have pending tx
-    let footer = if app.pending_unsigned_tx.is_some() {
+    // Footer
+    let footer = if app.pending_tx.is_some() {
+        "Tab:View  Enter:Submit  Esc:Close"
+    } else if app.pending_unsigned_tx.is_some() {
         "Tab:View  s:Scan  Esc:Close"
     } else {
         "Tab:View  Esc:Close"
@@ -1748,24 +1770,55 @@ fn render_qr_content(frame: &mut Frame, app: &App, area: Rect) {
     let mut lines = Vec::new();
     let mut qr_width: u16 = 0;
 
-    let max_qr_height = area.height.saturating_sub(2) as usize;
+    let max_qr_height = area.height.saturating_sub(8) as usize; // Leave room for text
     let max_qr_width = area.width.saturating_sub(4) as usize;
 
-    match &app.qr_data {
-        Some(data) => {
-            // Always use multipart format (UOS headers) to ensure Vault recognizes it as binary
-            // and not text (which causes "invalid utf-8" errors starting with 'S' 0x53).
-            render_multipart_qr(
-                &mut lines,
-                &mut qr_width,
-                data,
-                max_qr_height,
-                max_qr_width,
-                app.qr_frame,
-                pal,
-            );
+    // Minimum size check for smallest usable QR (version 4)
+    // Version 4 = 33 modules + 8 quiet zone = 41 chars wide
+    // Height = 41/2 = ~21 rows (half-blocks)
+    let min_width_needed = 50; // 41 + margin
+    let min_height_needed = 25; // ~21 rows for QR + text
+
+    if max_qr_width < min_width_needed || max_qr_height < min_height_needed {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "⚠ Terminal too small for QR code",
+            Style::default().fg(pal.warning).bold(),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(format!(
+            "Current: {}x{} chars",
+            area.width, area.height
+        )));
+        lines.push(Line::from(format!(
+            "Minimum: {}x{} chars",
+            min_width_needed + 4,
+            min_height_needed + 8
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Please resize your terminal window",
+            Style::default().fg(pal.muted),
+        )));
+    } else {
+        match &app.qr_data {
+            Some(data) => {
+                // Always use multipart format (UOS headers) to ensure Vault recognizes it as binary
+                // and not text (which causes "invalid utf-8" errors starting with 'S' 0x53).
+                let dark_theme = app.theme == crate::theme::Theme::Dark;
+                render_multipart_qr(
+                    &mut lines,
+                    &mut qr_width,
+                    data,
+                    max_qr_height,
+                    max_qr_width,
+                    app.qr_frame,
+                    pal,
+                    dark_theme,
+                );
+            }
+            None => lines.push(Line::from("No Data")),
         }
-        None => lines.push(Line::from("No Data")),
     }
 
     let p = Paragraph::new(lines).alignment(Alignment::Center);
@@ -1887,6 +1940,98 @@ fn render_qr_details(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(p, area);
 }
 
+/// Convert grayscale pixels to braille characters.
+///
+/// Each braille character represents a 2x4 pixel block.
+/// Braille dot positions:
+/// ```
+/// 1  4
+/// 2  5
+/// 3  6
+/// 7  8
+/// ```
+fn grayscale_to_braille(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    threshold: u8,
+) -> Vec<String> {
+    // Braille patterns: U+2800 to U+28FF
+    // Bit mapping: dot 1 = bit 0, dot 2 = bit 1, dot 3 = bit 2, dot 4 = bit 3,
+    //              dot 5 = bit 4, dot 6 = bit 5, dot 7 = bit 6, dot 8 = bit 7
+
+    let mut lines = Vec::new();
+
+    // Process 4 rows at a time (each braille char is 4 rows tall)
+    for row in (0..height).step_by(4) {
+        let mut line = String::new();
+
+        // Process 2 columns at a time (each braille char is 2 cols wide)
+        for col in (0..width).step_by(2) {
+            let mut braille: u32 = 0x2800; // Base braille character
+
+            // Sample 8 pixels and map to braille dots
+            // Left column (dots 1, 2, 3, 7)
+            if row < height && col < width {
+                let idx = row * width + col;
+                if pixels.get(idx).copied().unwrap_or(255) < threshold {
+                    braille |= 0x01; // dot 1
+                }
+            }
+            if row + 1 < height && col < width {
+                let idx = (row + 1) * width + col;
+                if pixels.get(idx).copied().unwrap_or(255) < threshold {
+                    braille |= 0x02; // dot 2
+                }
+            }
+            if row + 2 < height && col < width {
+                let idx = (row + 2) * width + col;
+                if pixels.get(idx).copied().unwrap_or(255) < threshold {
+                    braille |= 0x04; // dot 3
+                }
+            }
+            if row + 3 < height && col < width {
+                let idx = (row + 3) * width + col;
+                if pixels.get(idx).copied().unwrap_or(255) < threshold {
+                    braille |= 0x40; // dot 7
+                }
+            }
+
+            // Right column (dots 4, 5, 6, 8)
+            if row < height && col + 1 < width {
+                let idx = row * width + col + 1;
+                if pixels.get(idx).copied().unwrap_or(255) < threshold {
+                    braille |= 0x08; // dot 4
+                }
+            }
+            if row + 1 < height && col + 1 < width {
+                let idx = (row + 1) * width + col + 1;
+                if pixels.get(idx).copied().unwrap_or(255) < threshold {
+                    braille |= 0x10; // dot 5
+                }
+            }
+            if row + 2 < height && col + 1 < width {
+                let idx = (row + 2) * width + col + 1;
+                if pixels.get(idx).copied().unwrap_or(255) < threshold {
+                    braille |= 0x20; // dot 6
+                }
+            }
+            if row + 3 < height && col + 1 < width {
+                let idx = (row + 3) * width + col + 1;
+                if pixels.get(idx).copied().unwrap_or(255) < threshold {
+                    braille |= 0x80; // dot 8
+                }
+            }
+
+            line.push(char::from_u32(braille).unwrap_or(' '));
+        }
+
+        lines.push(line);
+    }
+
+    lines
+}
+
 /// Render the camera scan tab with visual feedback.
 fn render_scan_camera(frame: &mut Frame, app: &App, area: Rect) {
     use crate::app::CameraScanStatus;
@@ -1902,112 +2047,247 @@ fn render_scan_camera(frame: &mut Frame, app: &App, area: Rect) {
     )));
     lines.push(Line::from(""));
 
-    // Instructions
-    lines.push(Line::from(Span::styled(
-        "1. On Vault: Review and approve the transaction",
-        Style::default().fg(pal.fg),
-    )));
-    lines.push(Line::from(Span::styled(
-        "2. Vault will show a QR code with the signed transaction",
-        Style::default().fg(pal.fg),
-    )));
-    lines.push(Line::from(Span::styled(
-        "3. Hold your phone in front of the camera",
-        Style::default().fg(pal.fg),
-    )));
-    lines.push(Line::from(""));
-
-    // Camera status with visual target frame
-    let frame_width = 34;
-    let frame_height = 10;
-    let top_border = format!("┌{}┐", "─".repeat(frame_width));
-    let bottom_border = format!("└{}┘", "─".repeat(frame_width));
-    let empty_line = format!("│{}│", " ".repeat(frame_width));
-
-    // Determine status indicator based on camera_scan_status
-    let (status_text, status_style, indicator) = match app.camera_scan_status {
+    // Determine status and colors based on camera_scan_status
+    let frames = app.camera_frames_captured;
+    let (status_text, status_style) = match app.camera_scan_status {
         None | Some(CameraScanStatus::Initializing) => (
-            "Initializing camera...",
+            "Initializing camera...".to_string(),
             Style::default().fg(pal.muted),
-            app.spinner_char(),
         ),
         Some(CameraScanStatus::Scanning) => (
-            "Scanning... Position QR code in frame",
+            format!("Scanning... [{} frames]", frames),
             Style::default().fg(pal.warning),
-            '◯',
         ),
         Some(CameraScanStatus::Detected) => (
-            "QR code detected! Hold steady...",
-            Style::default().fg(pal.accent),
-            '◉',
+            format!("QR DETECTED! [{} frames] Hold steady...", frames),
+            Style::default().fg(pal.success).bold(),
         ),
         Some(CameraScanStatus::Success) => (
-            "Successfully scanned!",
+            "Successfully scanned!".to_string(),
             Style::default().fg(pal.success),
-            '✓',
         ),
         Some(CameraScanStatus::Error) => (
-            "Camera error - check permissions",
+            "Camera error - check permissions".to_string(),
             Style::default().fg(pal.error),
-            '✗',
         ),
     };
 
-    // Determine border color based on status
-    let border_style = match app.camera_scan_status {
-        None | Some(CameraScanStatus::Initializing) | Some(CameraScanStatus::Scanning) => {
-            Style::default().fg(pal.border)
-        }
-        Some(CameraScanStatus::Detected) => Style::default().fg(pal.accent),
-        Some(CameraScanStatus::Success) => Style::default().fg(pal.success),
-        Some(CameraScanStatus::Error) => Style::default().fg(pal.error),
+    let border_color = match app.camera_scan_status {
+        None | Some(CameraScanStatus::Initializing) | Some(CameraScanStatus::Scanning) => pal.border,
+        Some(CameraScanStatus::Detected) => pal.success,
+        Some(CameraScanStatus::Success) => pal.success,
+        Some(CameraScanStatus::Error) => pal.error,
     };
 
-    // Draw target frame
-    lines.push(Line::from(Span::styled(top_border.clone(), border_style)));
+    // Render camera preview or placeholder
+    if let Some(ref pixels) = app.camera_preview {
+        let (width, height) = app.camera_preview_size;
+        if width > 0 && height > 0 {
+            // Convert grayscale to braille
+            let braille_lines = grayscale_to_braille(pixels, width, height, 128);
+            let preview_width = width / 2; // braille chars are 2 pixels wide
 
-    for i in 0..frame_height {
-        if i == frame_height / 2 {
-            // Center line with indicator
-            let center_content = format!(
-                "{}  {}  {}",
-                " ".repeat(frame_width / 2 - 3),
-                indicator,
-                " ".repeat(frame_width / 2 - 3)
-            );
-            let center_content = &center_content[..frame_width.min(center_content.len())];
-            lines.push(Line::from(vec![
-                Span::styled("│", border_style),
-                Span::styled(
-                    format!("{:^width$}", center_content, width = frame_width),
-                    status_style,
-                ),
-                Span::styled("│", border_style),
-            ]));
-        } else {
-            lines.push(Line::from(Span::styled(empty_line.clone(), border_style)));
+            // Draw top border
+            let top_border = format!("┌{}┐", "─".repeat(preview_width));
+            lines.push(Line::from(Span::styled(
+                top_border,
+                Style::default().fg(border_color),
+            )));
+
+            // Draw braille preview with side borders
+            for braille_line in &braille_lines {
+                lines.push(Line::from(vec![
+                    Span::styled("│", Style::default().fg(border_color)),
+                    Span::styled(braille_line.clone(), Style::default().fg(pal.fg)),
+                    Span::styled("│", Style::default().fg(border_color)),
+                ]));
+            }
+
+            // Draw bottom border
+            let bottom_border = format!("└{}┘", "─".repeat(preview_width));
+            lines.push(Line::from(Span::styled(
+                bottom_border,
+                Style::default().fg(border_color),
+            )));
+
+            // Show QR bounds indicator if detected
+            if app.qr_bounds.is_some() {
+                lines.push(Line::from(Span::styled(
+                    "▶ QR code in view ◀",
+                    Style::default().fg(pal.success).bold(),
+                )));
+            }
         }
+    } else {
+        // Fallback: simple placeholder when no preview
+        let frame_width = 40;
+        let frame_height = 12;
+        let top_border = format!("┌{}┐", "─".repeat(frame_width));
+        let bottom_border = format!("└{}┘", "─".repeat(frame_width));
+        let empty_line = format!("│{}│", " ".repeat(frame_width));
+
+        lines.push(Line::from(Span::styled(
+            top_border,
+            Style::default().fg(border_color),
+        )));
+
+        for i in 0..frame_height {
+            if i == frame_height / 2 {
+                let indicator = match app.camera_scan_status {
+                    Some(CameraScanStatus::Initializing) | None => app.spinner_char(),
+                    Some(CameraScanStatus::Scanning) => '◯',
+                    Some(CameraScanStatus::Detected) => '◉',
+                    Some(CameraScanStatus::Success) => '✓',
+                    Some(CameraScanStatus::Error) => '✗',
+                };
+                let center = format!("{:^width$}", indicator, width = frame_width);
+                lines.push(Line::from(vec![
+                    Span::styled("│", Style::default().fg(border_color)),
+                    Span::styled(center, status_style),
+                    Span::styled("│", Style::default().fg(border_color)),
+                ]));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    empty_line.clone(),
+                    Style::default().fg(border_color),
+                )));
+            }
+        }
+
+        lines.push(Line::from(Span::styled(
+            bottom_border,
+            Style::default().fg(border_color),
+        )));
     }
 
-    lines.push(Line::from(Span::styled(bottom_border, border_style)));
     lines.push(Line::from(""));
 
     // Status text
     lines.push(Line::from(Span::styled(status_text, status_style)));
     lines.push(Line::from(""));
 
-    // Additional help
+    // Help text
     if matches!(
         app.camera_scan_status,
         Some(CameraScanStatus::Scanning) | Some(CameraScanStatus::Detected)
     ) {
         lines.push(Line::from(Span::styled(
-            "Tip: Ensure good lighting and hold the phone steady",
+            "Hold Vault QR code in front of camera",
             Style::default().fg(pal.muted),
         )));
     } else if matches!(app.camera_scan_status, Some(CameraScanStatus::Error)) {
         lines.push(Line::from(Span::styled(
-            "On macOS, grant camera access in System Preferences > Privacy",
+            "Grant camera access in System Preferences > Privacy",
+            Style::default().fg(pal.muted),
+        )));
+    }
+
+    let p = Paragraph::new(lines)
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::NONE));
+    frame.render_widget(p, area);
+}
+
+/// Render the Submit tab for broadcasting signed transaction.
+fn render_submit_tab(frame: &mut Frame, app: &App, area: Rect) {
+    use crate::action::TxSubmissionStatus;
+
+    let pal = &app.palette;
+    let mut lines = Vec::new();
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Submit Signed Transaction",
+        Style::default().fg(pal.primary).bold(),
+    )));
+    lines.push(Line::from(""));
+
+    if let Some(ref tx) = app.pending_tx {
+        // Show transaction hash
+        lines.push(Line::from(vec![
+            Span::styled("Tx Hash: ", Style::default().fg(pal.muted)),
+            Span::styled(
+                format!("0x{}", hex::encode(&tx.tx_hash[..8])),
+                Style::default().fg(pal.accent),
+            ),
+            Span::styled("...", Style::default().fg(pal.muted)),
+        ]));
+
+        // Show extrinsic size
+        lines.push(Line::from(vec![
+            Span::styled("Size: ", Style::default().fg(pal.muted)),
+            Span::styled(
+                format!("{} bytes", tx.signed_extrinsic.len()),
+                Style::default().fg(pal.fg),
+            ),
+        ]));
+
+        lines.push(Line::from(""));
+
+        // Show status with appropriate styling
+        let (status_text, status_style) = match &tx.status {
+            TxSubmissionStatus::WaitingForSignature => (
+                "⏳ Waiting for signature...".to_string(),
+                Style::default().fg(pal.warning),
+            ),
+            TxSubmissionStatus::ReadyToSubmit => (
+                "✓ Ready to submit".to_string(),
+                Style::default().fg(pal.success).bold(),
+            ),
+            TxSubmissionStatus::Submitting => (
+                format!("⏳ Submitting{}", ".".repeat((app.tick_count() % 4) as usize)),
+                Style::default().fg(pal.warning),
+            ),
+            TxSubmissionStatus::InBlock { block_hash } => (
+                format!("📦 In block 0x{}...", hex::encode(&block_hash[..4])),
+                Style::default().fg(pal.success),
+            ),
+            TxSubmissionStatus::Finalized { block_hash } => (
+                format!("✓ Finalized in 0x{}...", hex::encode(&block_hash[..4])),
+                Style::default().fg(pal.success).bold(),
+            ),
+            TxSubmissionStatus::Failed(err) => (
+                format!("✗ Failed: {}", truncate_str(err, 40)),
+                Style::default().fg(pal.error),
+            ),
+        };
+
+        lines.push(Line::from(Span::styled(status_text, status_style)));
+        lines.push(Line::from(""));
+
+        // Show action hint based on status
+        match &tx.status {
+            TxSubmissionStatus::ReadyToSubmit => {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "Press Enter or 's' to broadcast to network",
+                    Style::default().fg(pal.highlight).bold(),
+                )));
+            }
+            TxSubmissionStatus::Finalized { .. } => {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "Transaction confirmed! Press Esc to close.",
+                    Style::default().fg(pal.success),
+                )));
+            }
+            TxSubmissionStatus::Failed(_) => {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "Press Esc to close and try again.",
+                    Style::default().fg(pal.muted),
+                )));
+            }
+            _ => {}
+        }
+    } else {
+        lines.push(Line::from(Span::styled(
+            "No signed transaction pending",
+            Style::default().fg(pal.muted),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Scan a signature QR from Vault first",
             Style::default().fg(pal.muted),
         )));
     }
@@ -2030,9 +2310,11 @@ fn calculate_chunk_size(max_qr_height: usize, max_qr_width: usize) -> usize {
     // Version 10 (57 modules): ~271 bytes
     //
     // Half-block rendering: modules/2 = terminal lines needed
-    // Width: modules + 8 (quiet zone) = chars needed
+    // Single-width: modules + 8 (quiet zone) = chars needed
 
-    let target_modules = (max_qr_height * 2).min(max_qr_width.saturating_sub(8));
+    let max_modules_from_height = max_qr_height * 2;
+    let max_modules_from_width = max_qr_width.saturating_sub(8);
+    let target_modules = max_modules_from_height.min(max_modules_from_width);
 
     // Choose chunk size for scannable QR codes (not too dense)
     if target_modules >= 65 {
@@ -2059,6 +2341,7 @@ fn render_multipart_qr(
     max_qr_width: usize,
     current_frame: usize,
     pal: &Palette,
+    dark_theme: bool,
 ) {
     // Input is raw binary UOS data
     let raw_bytes = data;
@@ -2121,10 +2404,11 @@ fn render_multipart_qr(
     // EcLevel::L provides maximum data capacity
     match QrCode::with_version(&frame_bytes, Version::Normal(qr_version), EcLevel::L) {
         Ok(qr) => {
-            let qr_lines = render_qr_halfblock(&qr);
+            let qr_lines = render_qr_halfblock(&qr, dark_theme);
+            // Width in chars (each module is 2 chars wide now)
             *qr_width = qr_lines
                 .first()
-                .map(|l| l.chars().count() as u16)
+                .map(|l| l.width() as u16)
                 .unwrap_or(0);
 
             lines.push(Line::from(""));
@@ -2143,7 +2427,7 @@ fn render_multipart_qr(
             lines.push(Line::from(""));
 
             for line in qr_lines {
-                lines.push(Line::from(line));
+                lines.push(line);
             }
 
             lines.push(Line::from(""));
@@ -2172,31 +2456,44 @@ fn render_multipart_qr(
     }
 }
 
-/// Render QR code using half-block characters for compact display.
-/// Uses ▀ (top), ▄ (bottom), █ (both), ' ' (neither) to fit 2 rows per line.
-fn render_qr_halfblock(qr: &QrCode) -> Vec<String> {
-    let colors = qr.to_colors();
+/// Render QR code using half-block characters for compact, square display.
+/// Terminal chars are ~2:1 aspect ratio (taller than wide), so half-blocks
+/// (2 modules per char height) + single-width (1 char per module) ≈ square.
+///
+/// `dark_theme`: if true, inverts colors for dark terminal backgrounds
+fn render_qr_halfblock(qr: &QrCode, dark_theme: bool) -> Vec<Line<'static>> {
+    use ratatui::style::Color;
+
+    let qr_colors = qr.to_colors();
     let width = qr.width();
 
     // Add quiet zone (4 modules on each side per QR spec)
     let quiet = 4;
     let total_width = width + 2 * quiet;
 
+    // For dark themes: QR dark modules = white, light modules = black (inverted)
+    // For light themes: QR dark modules = black, light modules = white (standard)
+    let (dark_fg, light_bg) = if dark_theme {
+        (Color::White, Color::Black)
+    } else {
+        (Color::Black, Color::White)
+    };
+
     let mut result = Vec::new();
 
-    // Process 2 rows at a time
+    // Process 2 rows at a time (half-block compression)
     let total_height = width + 2 * quiet;
     let mut y = 0;
 
     while y < total_height {
-        let mut line = String::new();
+        let mut spans = Vec::new();
 
         for x in 0..total_width {
             let top_dark = if y < quiet || y >= quiet + width || x < quiet || x >= quiet + width {
                 false // quiet zone is light
             } else {
                 let idx = (y - quiet) * width + (x - quiet);
-                colors
+                qr_colors
                     .get(idx)
                     .map(|c| *c == qrcode::Color::Dark)
                     .unwrap_or(false)
@@ -2207,7 +2504,7 @@ fn render_qr_halfblock(qr: &QrCode) -> Vec<String> {
                     false
                 } else if y + 1 < total_height {
                     let idx = (y + 1 - quiet) * width + (x - quiet);
-                    colors
+                    qr_colors
                         .get(idx)
                         .map(|c| *c == qrcode::Color::Dark)
                         .unwrap_or(false)
@@ -2215,16 +2512,18 @@ fn render_qr_halfblock(qr: &QrCode) -> Vec<String> {
                     false
                 };
 
-            let ch = match (top_dark, bottom_dark) {
-                (true, true) => '█',
-                (true, false) => '▀',
-                (false, true) => '▄',
-                (false, false) => ' ',
+            // Half-block chars: ▀ = top half, ▄ = bottom half, █ = full, ' ' = empty
+            // Use explicit fg/bg colors for cross-terminal compatibility
+            let (ch, fg, bg) = match (top_dark, bottom_dark) {
+                (true, true) => ("█", dark_fg, dark_fg),
+                (true, false) => ("▀", dark_fg, light_bg),
+                (false, true) => ("▄", dark_fg, light_bg),
+                (false, false) => (" ", light_bg, light_bg),
             };
-            line.push(ch);
+            spans.push(Span::styled(ch.to_string(), Style::default().fg(fg).bg(bg)));
         }
 
-        result.push(line);
+        result.push(Line::from(spans));
         y += 2;
     }
 
@@ -2420,13 +2719,25 @@ fn render_logs(frame: &mut Frame, app: &App, area: Rect) {
         display_lines.insert(0, Line::from(""));
     }
 
+    // Format bandwidth if available
+    let bandwidth_text = if let Some(bw) = app.estimated_bandwidth {
+        if bw >= 1_000_000.0 {
+            format!(" │ ↓ {:.1} MB/s", bw / 1_000_000.0)
+        } else {
+            format!(" │ ↓ {:.0} KB/s", bw / 1024.0)
+        }
+    } else {
+        String::new()
+    };
+
     let title = Line::from(vec![
         Span::raw(" Logs "),
         Span::styled(format!("({}) ", log_count), Style::default().fg(p.muted)),
         Span::raw("│ "),
         Span::styled(status_text, status_style),
+        Span::styled(bandwidth_text, Style::default().fg(p.primary)),
         Span::styled(scroll_info, Style::default().fg(p.muted)),
-        Span::raw(" │ PgUp/PgDn:Scroll  ?:Help  q:Quit "),
+        Span::raw(" │ PgUp/PgDn  ?:Help  q:Quit "),
     ]);
 
     let paragraph = Paragraph::new(display_lines).block(

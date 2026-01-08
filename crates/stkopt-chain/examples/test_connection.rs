@@ -403,10 +403,10 @@ async fn main() {
     }
 }
 
-async fn test_people_chain(client: &stkopt_chain::ChainClient, network: Network) {
-    println!("Connecting to {} People chain...", network);
+async fn test_people_chain(client: &stkopt_chain::ChainClient, _network: Network) {
+    println!("Connecting to People chain...");
 
-    match stkopt_chain::connect_people_chain(network, None).await {
+    match client.connect_people_chain().await {
         Ok(subxt_client) => {
             println!("✓ Connected to People chain");
 

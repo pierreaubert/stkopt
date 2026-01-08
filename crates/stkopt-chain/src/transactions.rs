@@ -469,52 +469,94 @@ pub enum TxStatus {
 
 /// Decode a signed transaction response from Polkadot Vault QR code.
 ///
-/// Vault's signature response format (UOS):
-/// - `0x53` - Substrate prefix
-/// - crypto_type (0x01 = Sr25519)
-/// - `0x00` - Signature response type
-/// - 64 bytes - Sr25519 signature
+/// Vault can return signatures in two formats:
+///
+/// 1. Binary format (UOS):
+///    - `0x53` - Substrate prefix
+///    - crypto_type (0x01 = Sr25519)
+///    - `0x00` - Signature response type
+///    - 64 bytes - Sr25519 signature
+///
+/// 2. Hex-encoded format:
+///    - 130 characters hex string (65 bytes when decoded)
+///    - First byte: signature type (0x01 = Sr25519)
+///    - Following 64 bytes: signature
 ///
 /// Returns the 64-byte signature if valid.
 pub fn decode_vault_signature(qr_data: &[u8]) -> Result<[u8; 64], String> {
-    if qr_data.len() < 67 {
-        return Err(format!(
-            "QR data too short: {} bytes, expected at least 67",
-            qr_data.len()
-        ));
+    // Try to detect if this is hex-encoded (ASCII hex characters)
+    let is_hex = qr_data.iter().all(|&b| {
+        (b >= b'0' && b <= b'9') || (b >= b'a' && b <= b'f') || (b >= b'A' && b <= b'F')
+    });
+
+    let binary_data = if is_hex && qr_data.len() >= 128 {
+        // Hex-encoded format: decode from hex
+        let hex_str = std::str::from_utf8(qr_data)
+            .map_err(|e| format!("Invalid UTF-8 in hex string: {}", e))?;
+        hex::decode(hex_str).map_err(|e| format!("Failed to decode hex: {}", e))?
+    } else {
+        // Already binary
+        qr_data.to_vec()
+    };
+
+    tracing::info!(
+        "Signature data: {} bytes, first 10: {:02x?}",
+        binary_data.len(),
+        &binary_data[..binary_data.len().min(10)]
+    );
+
+    // Check for UOS format (starts with 0x53 'S')
+    if binary_data.len() >= 67 && binary_data[0] == 0x53 {
+        // UOS format: 0x53 + crypto_type + response_type + signature
+        if binary_data[1] != 0x01 {
+            return Err(format!(
+                "Unsupported crypto type: 0x{:02x}, expected 0x01 (Sr25519)",
+                binary_data[1]
+            ));
+        }
+        if binary_data[2] != 0x00 {
+            return Err(format!(
+                "Not a signature response: 0x{:02x}, expected 0x00",
+                binary_data[2]
+            ));
+        }
+        let mut signature = [0u8; 64];
+        signature.copy_from_slice(&binary_data[3..67]);
+        tracing::info!("Decoded UOS signature: {} bytes", signature.len());
+        return Ok(signature);
     }
 
-    // Check Substrate prefix
-    if qr_data[0] != 0x53 {
-        return Err(format!(
-            "Invalid prefix: 0x{:02x}, expected 0x53",
-            qr_data[0]
-        ));
+    // Check for simple format: crypto_type (1 byte) + signature (64 bytes)
+    if binary_data.len() >= 65 {
+        let crypto_type = binary_data[0];
+        if crypto_type == 0x01 {
+            // Sr25519
+            let mut signature = [0u8; 64];
+            signature.copy_from_slice(&binary_data[1..65]);
+            tracing::info!("Decoded Sr25519 signature: {} bytes", signature.len());
+            return Ok(signature);
+        } else if crypto_type == 0x00 {
+            // Ed25519
+            let mut signature = [0u8; 64];
+            signature.copy_from_slice(&binary_data[1..65]);
+            tracing::info!("Decoded Ed25519 signature: {} bytes", signature.len());
+            return Ok(signature);
+        }
     }
 
-    // Check crypto type (Sr25519)
-    if qr_data[1] != 0x01 {
-        return Err(format!(
-            "Unsupported crypto type: 0x{:02x}, expected 0x01 (Sr25519)",
-            qr_data[1]
-        ));
+    // Check for raw 64-byte signature (no prefix)
+    if binary_data.len() == 64 {
+        let mut signature = [0u8; 64];
+        signature.copy_from_slice(&binary_data);
+        tracing::info!("Decoded raw signature: {} bytes", signature.len());
+        return Ok(signature);
     }
 
-    // Check response type (signature)
-    if qr_data[2] != 0x00 {
-        return Err(format!(
-            "Not a signature response: 0x{:02x}, expected 0x00",
-            qr_data[2]
-        ));
-    }
-
-    // Extract signature (64 bytes)
-    let mut signature = [0u8; 64];
-    signature.copy_from_slice(&qr_data[3..67]);
-
-    tracing::info!("Decoded Vault signature: {} bytes", signature.len());
-
-    Ok(signature)
+    Err(format!(
+        "Unknown signature format: {} bytes, first byte: 0x{:02x}",
+        binary_data.len(),
+        binary_data.first().copied().unwrap_or(0)
+    ))
 }
 
 /// Construct a signed extrinsic from the unsigned payload and signature.
@@ -786,22 +828,55 @@ mod tests {
         let result = decode_vault_signature(&qr_data);
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("too short"));
+        assert!(result.unwrap_err().contains("Unknown signature format"));
     }
 
     #[test]
-    fn test_decode_vault_signature_invalid_prefix() {
-        let mut qr_data = vec![0x00, 0x01, 0x00]; // Wrong prefix
+    fn test_decode_vault_signature_simple_format_sr25519() {
+        // Simple format: 0x01 (Sr25519) + 64 bytes signature
+        let mut qr_data = vec![0x01];
         qr_data.extend_from_slice(&[0xAB; 64]);
 
         let result = decode_vault_signature(&qr_data);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Invalid prefix"));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), [0xAB; 64]);
+    }
+
+    #[test]
+    fn test_decode_vault_signature_simple_format_ed25519() {
+        // Simple format: 0x00 (Ed25519) + 64 bytes signature
+        let mut qr_data = vec![0x00];
+        qr_data.extend_from_slice(&[0xAB; 64]);
+
+        let result = decode_vault_signature(&qr_data);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), [0xAB; 64]);
+    }
+
+    #[test]
+    fn test_decode_vault_signature_raw_64_bytes() {
+        // Raw 64-byte signature with no prefix
+        let qr_data = vec![0xCD; 64];
+
+        let result = decode_vault_signature(&qr_data);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), [0xCD; 64]);
+    }
+
+    #[test]
+    fn test_decode_vault_signature_hex_encoded() {
+        // Hex-encoded format: "01" prefix + 64 bytes as hex
+        let signature = [0xAB; 64];
+        let hex_str = format!("01{}", hex::encode(signature));
+
+        let result = decode_vault_signature(hex_str.as_bytes());
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), signature);
     }
 
     #[test]
     fn test_decode_vault_signature_invalid_crypto_type() {
-        let mut qr_data = vec![0x53, 0x02, 0x00]; // Wrong crypto type (not Sr25519)
+        let mut qr_data = vec![0x53, 0x02, 0x00]; // Wrong crypto type in UOS format
         qr_data.extend_from_slice(&[0xAB; 64]);
 
         let result = decode_vault_signature(&qr_data);

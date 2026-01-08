@@ -31,10 +31,13 @@ fmt-check:
 
 ci: fmt-check lint test
 
+# Sign macOS binary with entitlements (ad-hoc signing for local use)
 sign-macos:
-    codesign --entitlements crates/stkopt-tui/entitlements.plist --deep -fs - target/release/stkopt
+    codesign --entitlements scripts/entitlements.plist --deep -fs - target/release/stkopt
 
+# Build and sign for macOS (with camera access)
 build-macos: build sign-macos
+    @echo "Built and signed: target/release/stkopt"
 
 # Build signed DMG for macOS distribution (requires DEVELOPER_ID env var)
 build-dmg:
@@ -44,11 +47,13 @@ build-dmg:
 build-dmg-unsigned:
     ./scripts/build-dmg.sh
 
-run:
-    cargo run --release
+# Run the application (builds and signs first on macOS)
+run: build-macos
+    ./target/release/stkopt
 
-run-rpc:
-    cargo run --release -- --rpc
+# Run with RPC mode
+run-rpc: build-macos
+    ./target/release/stkopt --rpc
 
 watch:
     cargo watch -x check

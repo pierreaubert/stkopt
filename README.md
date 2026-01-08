@@ -21,12 +21,63 @@ A terminal user interface (TUI) application for optimizing Polkadot staking. Bro
 Requires Rust 1.85 or later.
 
 ```bash
-git clone https://github.com/example/stkopt.git
+git clone https://github.com/dotidx/stkopt.git
 cd stkopt
 cargo build --release
 ```
 
 The binary will be at `./target/release/stkopt`.
+
+### macOS (with camera support)
+
+QR code scanning requires camera access. On macOS, the binary must be signed with entitlements:
+
+```bash
+# Install just (command runner)
+cargo install just
+
+# Build and sign for local use
+just build-macos
+
+# Or build a DMG for distribution
+./scripts/build-dmg.sh
+```
+
+**Camera permissions:** When you first use the QR scanner, macOS will prompt for camera access. Grant permission to Terminal.app (or your terminal emulator) in **System Settings → Privacy & Security → Camera**.
+
+### Building a DMG
+
+```bash
+# Ad-hoc signed (local testing)
+./scripts/build-dmg.sh
+
+# Developer ID signed (distribution)
+export DEVELOPER_ID="Developer ID Application: Your Name (TEAMID)"
+./scripts/build-dmg.sh
+
+# With notarization (for Gatekeeper)
+export DEVELOPER_ID="Developer ID Application: Your Name (TEAMID)"
+export APPLE_ID="your@email.com"
+./scripts/build-dmg.sh --notarize
+```
+
+Output:
+- Standalone binary: `target/release/stkopt`
+- App bundle: `target/dmg/stkopt.app`
+- DMG: `target/dmg/stkopt-<version>.dmg`
+
+## Struggling with permissions on MacOS
+
+Open the terminal you want (Terminal, iTerm, Kitty, ...):
+```bash
+swift -e 'import AVFoundation; AVCaptureDevice.requestAccess(for: .video) { _ in }'
+```
+You should see a popup, click yes.
+You can check if it is working by typing
+```bash
+sqlite3 ~/Library/Application\ Support/com.apple.TCC/TCC.db "SELECT client, * FROM access WHERE service='kTCCServiceCamera';"
+```
+You should see Terminal in the list.
 
 ## Usage
 
@@ -135,6 +186,29 @@ stkopt/
 │   ├── stkopt-chain/   # Chain client (subxt)
 │   ├── stkopt-core/    # Domain logic (APY calculations, optimizer)
 │   └── stkopt-tui/     # TUI application
+├── scripts/
+│   ├── build-dmg.sh    # macOS DMG builder
+│   ├── Info.plist      # macOS app bundle metadata
+│   └── entitlements.plist  # macOS entitlements (camera access)
+```
+
+## Development
+
+```bash
+# Install just (command runner)
+cargo install just
+
+# List all commands
+just --list
+
+# Common commands
+just build          # Build release binary
+just build-macos    # Build and sign for macOS (with camera support)
+just run            # Build, sign, and run
+just test           # Run tests
+just check          # Quick compile check
+just lint           # Run clippy
+just fmt            # Format code
 ```
 
 ## Configuration

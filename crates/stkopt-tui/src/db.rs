@@ -8,6 +8,7 @@ use stkopt_core::Network;
 
 /// Cached chain metadata.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct CachedChainMetadata {
     pub genesis_hash: String,
     pub spec_version: u32,
@@ -21,6 +22,7 @@ pub struct CachedChainMetadata {
 
 /// Cached account status.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct CachedAccountStatus {
     pub free_balance: u128,
     pub reserved_balance: u128,
@@ -141,6 +143,7 @@ impl HistoryDb {
     }
 
     /// Store a staking history point.
+    #[allow(dead_code)]
     pub fn insert_history(
         &self,
         network: Network,
@@ -249,6 +252,7 @@ impl HistoryDb {
     }
 
     /// Get the latest era stored for an address.
+    #[allow(dead_code)]
     pub fn get_latest_era(&self, network: Network, address: &str) -> Result<Option<u32>> {
         let mut stmt = self.conn.prepare(
             r#"
@@ -366,6 +370,7 @@ impl HistoryDb {
     }
 
     /// Store or update a validator identity.
+    #[allow(dead_code)]
     pub fn set_validator_identity(
         &self,
         network: Network,
@@ -411,6 +416,7 @@ impl HistoryDb {
     }
 
     /// Get the count of cached identities for a network.
+    #[allow(dead_code)]
     pub fn count_validator_identities(&self, network: Network) -> Result<u32> {
         let mut stmt = self.conn.prepare(
             r#"
@@ -507,6 +513,7 @@ impl HistoryDb {
     }
 
     /// Get count of cached validators.
+    #[allow(dead_code)]
     pub fn count_cached_validators(&self, network: Network) -> Result<u32> {
         let mut stmt = self
             .conn
@@ -518,6 +525,7 @@ impl HistoryDb {
     // ==================== Chain Metadata ====================
 
     /// Get cached chain metadata.
+    #[allow(dead_code)]
     pub fn get_chain_metadata(&self, network: Network) -> Result<Option<CachedChainMetadata>> {
         let mut stmt = self.conn.prepare(
             r#"
@@ -549,6 +557,7 @@ impl HistoryDb {
     }
 
     /// Store chain metadata in cache.
+    #[allow(dead_code)]
     pub fn set_chain_metadata(&self, network: Network, meta: &CachedChainMetadata) -> Result<()> {
         self.conn.execute(
             r#"
@@ -575,6 +584,7 @@ impl HistoryDb {
     // ==================== Cached Account Status ====================
 
     /// Get cached account status.
+    #[allow(dead_code)]
     pub fn get_cached_account_status(
         &self,
         network: Network,
@@ -609,6 +619,7 @@ impl HistoryDb {
     }
 
     /// Store account status in cache.
+    #[allow(dead_code)]
     pub fn set_cached_account_status(
         &self,
         network: Network,
