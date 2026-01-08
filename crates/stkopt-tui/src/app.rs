@@ -1,7 +1,8 @@
 //! Application state and logic.
 
 use crate::action::{
-    AccountStatus, Action, DisplayPool, DisplayValidator, StakingHistoryPoint, TransactionInfo,
+    AccountStatus, Action, DisplayPool, DisplayValidator, PendingTransaction, PendingUnsignedTx,
+    QrScanStatus, StakingHistoryPoint, TransactionInfo, TxSubmissionStatus,
 };
 use crate::log_buffer::LogBuffer;
 use crate::theme::{Palette, Theme};
@@ -11,6 +12,21 @@ use std::collections::HashSet;
 use stkopt_chain::ChainInfo;
 use stkopt_core::{ConnectionStatus, Network, OptimizationResult};
 use subxt::utils::AccountId32;
+
+/// Camera scan status for visual feedback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CameraScanStatus {
+    /// Camera initializing.
+    Initializing,
+    /// Scanning, no QR code detected.
+    Scanning,
+    /// QR code detected but not decoded yet.
+    Detected,
+    /// Successfully decoded QR code.
+    Success,
+    /// Camera error.
+    Error,
+}
 
 /// Input mode for the application.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -145,52 +161,52 @@ impl PoolSortField {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum View {
     #[default]
-    Validators,
-    Pools,
-    Nominate,
     Account,
     History,
+    Nominate,
+    Pools,
+    Validators,
 }
 
 impl View {
     pub fn all() -> &'static [View] {
         &[
-            View::Validators,
-            View::Pools,
-            View::Nominate,
             View::Account,
             View::History,
+            View::Nominate,
+            View::Pools,
+            View::Validators,
         ]
     }
 
     pub fn label(&self) -> &'static str {
         match self {
-            View::Validators => "Validators",
-            View::Pools => "Pools",
-            View::Nominate => "Nominate",
             View::Account => "Account",
             View::History => "History",
+            View::Nominate => "Nominate",
+            View::Pools => "Pools",
+            View::Validators => "Validators",
         }
     }
 
     pub fn index(&self) -> usize {
         match self {
-            View::Validators => 0,
-            View::Pools => 1,
+            View::Account => 0,
+            View::History => 1,
             View::Nominate => 2,
-            View::Account => 3,
-            View::History => 4,
+            View::Pools => 3,
+            View::Validators => 4,
         }
     }
 
     pub fn from_index(index: usize) -> View {
         match index {
-            0 => View::Validators,
-            1 => View::Pools,
+            0 => View::Account,
+            1 => View::History,
             2 => View::Nominate,
-            3 => View::Account,
-            4 => View::History,
-            _ => View::Validators,
+            3 => View::Pools,
+            4 => View::Validators,
+            _ => View::Account,
         }
     }
 }
@@ -249,8 +265,8 @@ pub struct App {
     pub qr_frame: usize,
     /// Whether showing QR code modal.
     pub showing_qr: bool,
-    /// Whether to show transaction details in QR modal.
-    pub qr_show_details: bool,
+    /// Current tab in QR modal (0=QR, 1=Details, 2=Scan).
+    pub qr_modal_tab: usize,
     /// Whether showing help overlay.
     pub showing_help: bool,
     /// Whether the app should quit.
@@ -287,6 +303,32 @@ pub struct App {
     pub address_book_state: TableState,
     /// Optimization strategy selection index.
     pub strategy_index: usize,
+    /// Pending unsigned transaction (waiting for signature from Vault).
+    pub pending_unsigned_tx: Option<PendingUnsignedTx>,
+    /// Pending signed transaction (ready for/in-progress submission).
+    pub pending_tx: Option<PendingTransaction>,
+    /// Whether currently scanning for signature QR code.
+    pub scanning_signature: bool,
+    /// Camera scan status for visual feedback (None=not scanning, Some=latest status).
+    pub camera_scan_status: Option<CameraScanStatus>,
+    /// Whether the chain is still connecting/syncing.
+    pub loading_chain: bool,
+    /// Whether to show the account input prompt popup.
+    pub show_account_prompt: bool,
+    /// Tick counter for loading spinner animation.
+    pub spinner_tick: usize,
+    /// Whether data was loaded from cache (validators, etc).
+    pub using_cached_data: bool,
+    /// Bytes loaded so far (for bandwidth estimation).
+    pub bytes_loaded: u64,
+    /// Estimated total bytes to load.
+    pub estimated_total_bytes: Option<u64>,
+    /// Load start time (for bandwidth calculation).
+    pub load_start_time: Option<std::time::Instant>,
+    /// Estimated bandwidth in bytes per second (computed after initial period).
+    pub estimated_bandwidth: Option<f64>,
+    /// Validation error message for account input (None if valid or not validating).
+    pub validation_error: Option<String>,
 }
 
 impl App {
@@ -320,7 +362,7 @@ impl App {
             qr_tx_info: None,
             qr_frame: 0,
             showing_qr: false,
-            qr_show_details: false,
+            qr_modal_tab: 0,
             showing_help: false,
             should_quit: false,
             tick_count: 0,
@@ -339,6 +381,19 @@ impl App {
             account_panel_focus: 0,
             address_book_state: TableState::default(),
             strategy_index: 0,
+            pending_unsigned_tx: None,
+            pending_tx: None,
+            scanning_signature: false,
+            camera_scan_status: None,
+            loading_chain: true, // Start in loading state
+            show_account_prompt: false,
+            spinner_tick: 0,
+            using_cached_data: false,
+            bytes_loaded: 0,
+            estimated_total_bytes: None,
+            load_start_time: Some(std::time::Instant::now()),
+            estimated_bandwidth: None,
+            validation_error: None,
         }
     }
 
@@ -368,6 +423,41 @@ impl App {
         if self.showing_qr {
             self.qr_frame = self.qr_frame.wrapping_add(1);
         }
+
+        // Advance spinner for loading animation
+        if self.loading_chain || self.loading_validators {
+            self.spinner_tick = self.spinner_tick.wrapping_add(1);
+        }
+    }
+
+    /// Get the current spinner character for loading animation.
+    pub fn spinner_char(&self) -> char {
+        const SPINNER_CHARS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        SPINNER_CHARS[self.spinner_tick % SPINNER_CHARS.len()]
+    }
+
+    /// Estimate remaining time in seconds based on bandwidth and progress.
+    pub fn estimated_remaining_secs(&self) -> Option<f64> {
+        let bw = self.estimated_bandwidth?;
+        if bw <= 0.0 {
+            return None;
+        }
+
+        let total = self.estimated_total_bytes?;
+        let remaining = total.saturating_sub(self.bytes_loaded);
+        Some(remaining as f64 / bw)
+    }
+
+    /// Format estimated time remaining as a human-readable string.
+    pub fn format_eta(&self) -> Option<String> {
+        let secs = self.estimated_remaining_secs()?;
+        if secs < 60.0 {
+            Some(format!("~{:.0}s", secs))
+        } else if secs < 3600.0 {
+            Some(format!("~{:.0}m {:.0}s", secs / 60.0, secs % 60.0))
+        } else {
+            Some(format!("~{:.0}h", secs / 3600.0))
+        }
     }
 
     /// Handle keyboard input.
@@ -391,10 +481,73 @@ impl App {
                     self.qr_data = None;
                     self.qr_tx_info = None;
                     self.qr_frame = 0;
-                    self.qr_show_details = false;
+                    self.qr_modal_tab = 0;
+                    self.camera_scan_status = None;
+                    // Stop scanning if active
+                    if self.scanning_signature {
+                        return Some(Action::StopSignatureScan);
+                    }
                 }
-                KeyCode::Tab | KeyCode::Right | KeyCode::Left => {
-                    self.qr_show_details = !self.qr_show_details;
+                KeyCode::Tab | KeyCode::Right => {
+                    // Cycle through tabs: QR -> Details -> Scan -> QR
+                    self.qr_modal_tab = (self.qr_modal_tab + 1) % 3;
+                    // Start scanning when entering Scan tab
+                    if self.qr_modal_tab == 2
+                        && self.pending_unsigned_tx.is_some()
+                        && !self.scanning_signature
+                    {
+                        self.camera_scan_status = Some(CameraScanStatus::Initializing);
+                        return Some(Action::StartSignatureScan);
+                    }
+                    // Stop scanning when leaving Scan tab
+                    if self.qr_modal_tab != 2 && self.scanning_signature {
+                        self.camera_scan_status = None;
+                        return Some(Action::StopSignatureScan);
+                    }
+                }
+                KeyCode::BackTab | KeyCode::Left => {
+                    // Cycle backwards
+                    self.qr_modal_tab = if self.qr_modal_tab == 0 {
+                        2
+                    } else {
+                        self.qr_modal_tab - 1
+                    };
+                    // Start scanning when entering Scan tab
+                    if self.qr_modal_tab == 2
+                        && self.pending_unsigned_tx.is_some()
+                        && !self.scanning_signature
+                    {
+                        self.camera_scan_status = Some(CameraScanStatus::Initializing);
+                        return Some(Action::StartSignatureScan);
+                    }
+                    // Stop scanning when leaving Scan tab
+                    if self.qr_modal_tab != 2 && self.scanning_signature {
+                        self.camera_scan_status = None;
+                        return Some(Action::StopSignatureScan);
+                    }
+                }
+                // 's' to start scanning for signature (after Vault has signed) - shortcut to scan tab
+                KeyCode::Char('s') if self.pending_unsigned_tx.is_some() => {
+                    self.qr_modal_tab = 2;
+                    self.camera_scan_status = Some(CameraScanStatus::Initializing);
+                    return Some(Action::StartSignatureScan);
+                }
+                _ => {}
+            }
+            return None;
+        }
+
+        // Handle pending transaction state
+        if let Some(ref tx) = self.pending_tx {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    return Some(Action::ClearPendingTx);
+                }
+                // 's' to submit the signed transaction
+                KeyCode::Char('s') | KeyCode::Enter => {
+                    if matches!(tx.status, TxSubmissionStatus::ReadyToSubmit) {
+                        return Some(Action::SubmitTransaction);
+                    }
                 }
                 _ => {}
             }
@@ -427,9 +580,12 @@ impl App {
             KeyCode::Char('n') => self.next_network(),
             KeyCode::Up | KeyCode::Char('k') => self.select_previous(),
             KeyCode::Down | KeyCode::Char('j') => self.select_next(),
-            KeyCode::Char('a') if self.current_view == View::Account => {
+            KeyCode::Char('a')
+                if self.current_view == View::Account || self.show_account_prompt =>
+            {
                 self.input_mode = InputMode::EnteringAccount;
                 self.account_input.clear();
+                self.show_account_prompt = false;
             }
             KeyCode::Char('c') if self.current_view == View::Account => {
                 return Some(Action::ClearAccount);
@@ -608,31 +764,93 @@ impl App {
         match key.code {
             KeyCode::Enter => {
                 self.input_mode = InputMode::Normal;
-                // Try to parse the account address
-                if let Some(account) = self.parse_account_input() {
-                    return Some(Action::SetWatchedAccount(account));
+                match self.validate_account_input() {
+                    Ok(account) => {
+                        self.validation_error = None;
+                        return Some(Action::SetWatchedAccount(account));
+                    }
+                    Err(error_msg) => {
+                        self.validation_error = Some(error_msg);
+                        // Keep input mode to let user correct the address
+                        self.input_mode = InputMode::EnteringAccount;
+                        return None;
+                    }
                 }
             }
             KeyCode::Esc => {
                 self.input_mode = InputMode::Normal;
                 self.account_input.clear();
+                self.validation_error = None;
             }
             KeyCode::Backspace => {
                 self.account_input.pop();
+                // Re-validate on backspace
+                if let Err(msg) = self.validate_account_input() {
+                    self.validation_error = Some(msg);
+                } else {
+                    self.validation_error = None;
+                }
             }
             KeyCode::Char(c) => {
                 self.account_input.push(c);
+                // Validate as user types
+                if let Err(msg) = self.validate_account_input() {
+                    self.validation_error = Some(msg);
+                } else {
+                    self.validation_error = None;
+                }
             }
             _ => {}
         }
         None
     }
 
-    /// Parse the account input as SS58 address.
-    fn parse_account_input(&self) -> Option<AccountId32> {
+    /// Validate the account input and return a helpful error message if invalid.
+    fn validate_account_input(&self) -> Result<AccountId32, String> {
+        let input = self.account_input.trim();
+
+        if input.is_empty() {
+            return Err("Please enter an address".to_string());
+        }
+
+        if input.len() < 3 {
+            return Err("Address is too short (minimum 3 characters)".to_string());
+        }
+
+        // SS58 addresses typically start with a prefix number (network identifier)
+        // Valid prefixes: 0-99 followed by the base58-encoded address
+        if !input.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+            return Err("Address should start with a network prefix (0-9)".to_string());
+        }
+
         // Try to parse as SS58 address
-        use std::str::FromStr;
-        AccountId32::from_str(&self.account_input).ok()
+        match std::str::FromStr::from_str(input) {
+            Ok(account) => Ok(account),
+            Err(_) => {
+                let base58_hint =
+                    if input.contains(|c: char| !c.is_ascii_alphanumeric() && c != '-') {
+                        "Remove special characters from the address".to_string()
+                    } else if input.len() < 47 {
+                        format!(
+                            "SS58 address too short (got {}, expected ~47 characters)",
+                            input.len()
+                        )
+                    } else if input.len() > 49 {
+                        format!(
+                            "SS58 address too long (got {}, expected ~47 characters)",
+                            input.len()
+                        )
+                    } else {
+                        "Invalid SS58 format - check for typos".to_string()
+                    };
+                Err(format!("Invalid address: {}", base58_hint))
+            }
+        }
+    }
+
+    /// Parse the account input as SS58 address (legacy method for backward compatibility).
+    fn parse_account_input(&self) -> Option<AccountId32> {
+        self.validate_account_input().ok()
     }
 
     /// Switch to next view.
@@ -709,6 +927,7 @@ impl App {
             }
             Action::SetChainInfo(info) => {
                 self.chain_info = Some(info);
+                self.loading_chain = false;
             }
             Action::SetActiveEra(era_info) => {
                 self.current_era = Some(era_info.index);
@@ -742,8 +961,28 @@ impl App {
                     self.pools_table_state.select(Some(0));
                 }
             }
-            Action::SetLoadingProgress(progress) => {
+            Action::SetLoadingProgress(progress, bytes_loaded, estimated_total) => {
                 self.loading_progress = progress;
+
+                // Update bytes tracking
+                if let Some(bytes) = bytes_loaded {
+                    self.bytes_loaded = bytes;
+                }
+                if let Some(total) = estimated_total {
+                    self.estimated_total_bytes = Some(total);
+                }
+
+                // Compute bandwidth after 10 seconds of loading
+                if self.estimated_bandwidth.is_none()
+                    && let Some(start) = self.load_start_time
+                {
+                    let elapsed = start.elapsed();
+                    if elapsed.as_secs() >= 10 && self.bytes_loaded > 0 {
+                        let bw = self.bytes_loaded as f64 / elapsed.as_secs_f64();
+                        self.estimated_bandwidth = Some(bw);
+                        tracing::info!("Estimated bandwidth: {:.1} KB/s", bw / 1024.0);
+                    }
+                }
             }
             Action::SetWatchedAccount(account) => {
                 self.watched_account = Some(account);
@@ -796,7 +1035,45 @@ impl App {
                 self.qr_data = data;
                 self.qr_tx_info = tx_info;
                 self.qr_frame = 0; // Reset animation frame for new QR
+                self.qr_modal_tab = 0; // Reset to QR tab
                 self.showing_qr = self.qr_data.is_some();
+            }
+            Action::SetPendingUnsignedTx(pending) => {
+                self.pending_unsigned_tx = pending;
+            }
+            Action::StartSignatureScan => {
+                self.scanning_signature = true;
+            }
+            Action::StopSignatureScan => {
+                self.scanning_signature = false;
+            }
+            Action::SignatureScanned(_) => {
+                // Handled in main.rs - processes the signature and creates pending_tx
+            }
+            Action::QrScanFailed(ref error) => {
+                tracing::error!("QR scan failed: {}", error);
+                self.scanning_signature = false;
+                self.camera_scan_status = Some(CameraScanStatus::Error);
+            }
+            Action::UpdateScanStatus(status) => {
+                self.camera_scan_status = Some(match status {
+                    QrScanStatus::Scanning => CameraScanStatus::Scanning,
+                    QrScanStatus::Detected => CameraScanStatus::Detected,
+                    QrScanStatus::Success => CameraScanStatus::Success,
+                });
+            }
+            Action::SubmitTransaction => {
+                // Handled in main.rs - submits the pending_tx
+            }
+            Action::SetTxStatus(status) => {
+                if let Some(ref mut tx) = self.pending_tx {
+                    tx.status = status;
+                }
+            }
+            Action::ClearPendingTx => {
+                self.pending_tx = None;
+                self.pending_unsigned_tx = None;
+                self.scanning_signature = false;
             }
             Action::SetStakingHistory(history) => {
                 self.staking_history = history;
@@ -840,6 +1117,12 @@ impl App {
             }
             Action::RemoveAccount(_addr) => {
                 // Handled in main.rs where we have access to config and database
+            }
+            Action::ValidateAccount(_addr) => {
+                // Validation is done during input, this action is no longer used
+            }
+            Action::ClearValidationError => {
+                self.validation_error = None;
             }
             Action::Quit => {
                 self.should_quit = true;

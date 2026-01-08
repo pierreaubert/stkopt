@@ -40,7 +40,9 @@ impl ChainClient {
         let era_duration_ms = self.get_era_duration_ms().await?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .map_err(|e| {
+                ChainError::InvalidData(format!("System time is before Unix epoch: {}", e))
+            })?
             .as_millis() as u64;
 
         let elapsed = now.saturating_sub(start_timestamp_ms);

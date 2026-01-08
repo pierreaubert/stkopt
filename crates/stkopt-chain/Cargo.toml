@@ -18,6 +18,7 @@ reqwest.workspace = true
 # Force ed25519-zebra alloc feature for smoldot light client
 ed25519-zebra.workspace = true
 
+hex = "0.4"
+
 [dev-dependencies]
 tracing-subscriber.workspace = true
-hex = "0.4"

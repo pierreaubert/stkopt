@@ -31,3 +31,12 @@ terminal-light.workspace = true
 reqwest.workspace = true
 rusqlite.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+# Camera access for QR code scanning
+nokhwa = { version = "0.10", default-features = false, features = ["input-native"] }
+
+# Image processing for QR decoding
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+# QR code decoding from camera frames
+rqrr = "0.9"

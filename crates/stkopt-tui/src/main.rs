@@ -6,11 +6,12 @@ mod config;
 mod db;
 mod event;
 mod log_buffer;
+mod qr_reader;
 mod theme;
 mod tui;
 mod ui;
 
-use action::{AccountStatus, Action};
+use action::{AccountStatus, Action, PendingTransaction, TxSubmissionStatus};
 use app::App;
 use clap::Parser;
 use color_eyre::Result;
@@ -179,14 +180,40 @@ async fn main() -> Result<()> {
     // Create application state
     let mut app = App::new(network, log_buffer, theme);
 
+    // Load cached data from database before chain connects
+    let db_path = get_db_path();
+    if let Ok(db) = db::HistoryDb::open(&db_path) {
+        // Load cached validators
+        if let Ok(cached_validators) = db.get_cached_validators(network)
+            && !cached_validators.is_empty()
+        {
+            tracing::info!("Loaded {} cached validators", cached_validators.len());
+            app.validators = cached_validators;
+            app.using_cached_data = true;
+        }
+    }
+
     // Load last saved account if available
     let restored_account = if let Some(last_addr) = app_config.last_account()
         && let Ok(account) = last_addr.parse::<subxt::utils::AccountId32>()
     {
         tracing::info!("Restoring last used account: {}", last_addr);
         app.watched_account = Some(account.clone());
+
+        // Load cached staking history for this account
+        if let Ok(db) = db::HistoryDb::open(&db_path)
+            && let Ok(cached_history) = db.get_history(network, last_addr, Some(30))
+            && !cached_history.is_empty()
+        {
+            tracing::info!("Loaded {} cached history points", cached_history.len());
+            app.staking_history = cached_history;
+            app.history_loaded_for = Some(last_addr.to_string());
+        }
+
         Some(account)
     } else {
+        // No saved account - show the account input prompt
+        app.show_account_prompt = true;
         None
     };
 
@@ -196,6 +223,9 @@ async fn main() -> Result<()> {
 
     // Create event handler
     let mut events = EventHandler::new(50);
+
+    // QR reader for scanning signatures from Vault
+    let mut qr_reader: Option<qr_reader::QrReader> = None;
 
     // Spawn chain connection task
     let chain_action_tx = action_tx.clone();
@@ -233,6 +263,36 @@ async fn main() -> Result<()> {
                 match event? {
                     Event::Tick => {
                         app.tick();
+
+                        // Poll QR reader if scanning
+                        if let Some(ref reader) = qr_reader
+                            && let Some(result) = reader.try_recv()
+                        {
+                            match result {
+                                qr_reader::QrScanResult::Success(data) => {
+                                    tracing::info!("QR code scanned: {} bytes", data.len());
+                                    let _ = action_tx.send(Action::UpdateScanStatus(action::QrScanStatus::Success)).await;
+                                    let _ = action_tx.send(Action::SignatureScanned(data)).await;
+                                    // Stop scanning after successful scan
+                                    if let Some(ref mut r) = qr_reader {
+                                        r.stop();
+                                    }
+                                    qr_reader = None;
+                                }
+                                qr_reader::QrScanResult::Scanning => {
+                                    // No QR detected, update status for visual feedback
+                                    let _ = action_tx.send(Action::UpdateScanStatus(action::QrScanStatus::Scanning)).await;
+                                }
+                                qr_reader::QrScanResult::Detected => {
+                                    // QR detected but not decoded yet
+                                    let _ = action_tx.send(Action::UpdateScanStatus(action::QrScanStatus::Detected)).await;
+                                }
+                                qr_reader::QrScanResult::Error(e) => {
+                                    let _ = action_tx.send(Action::QrScanFailed(e)).await;
+                                    qr_reader = None;
+                                }
+                            }
+                        }
                     }
                     Event::Key(key_event) => {
                         if key_event.code == KeyCode::Char('q') && app.input_mode == app::InputMode::Normal {
@@ -331,9 +391,101 @@ async fn main() -> Result<()> {
                                 .collect();
 
                             if !targets.is_empty() {
-                                let _ = qr_tx.send((account.clone(), targets)).await;
+                                // Store signer for later use with signature
+                                let signer = account.clone();
+                                let _ = qr_tx.send((signer, targets)).await;
                             }
                         }
+                    }
+                    Action::SignatureScanned(signature_data) => {
+                        // Decode the signature from Vault's QR code
+                        match stkopt_chain::decode_vault_signature(signature_data) {
+                            Ok(signature) => {
+                                if let Some(ref pending) = app.pending_unsigned_tx {
+                                    // Build the signed extrinsic
+                                    let signed = stkopt_chain::build_signed_extrinsic(
+                                        &pending.payload,
+                                        &pending.signer,
+                                        &signature,
+                                    );
+
+                                    // Store the pending transaction
+                                    app.pending_tx = Some(PendingTransaction {
+                                        description: signed.description.clone(),
+                                        signed_extrinsic: signed.encoded,
+                                        tx_hash: signed.hash,
+                                        status: TxSubmissionStatus::ReadyToSubmit,
+                                    });
+                                    app.scanning_signature = false;
+                                    app.showing_qr = false;
+
+                                    tracing::info!(
+                                        "Signature decoded and extrinsic built: 0x{}",
+                                        hex::encode(signed.hash)
+                                    );
+                                } else {
+                                    tracing::error!("Signature received but no pending unsigned tx");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to decode signature: {}", e);
+                            }
+                        }
+                    }
+                    Action::SubmitTransaction => {
+                        // Submit the signed transaction
+                        if let Some(ref pending_tx) = app.pending_tx {
+                            let extrinsic = pending_tx.signed_extrinsic.clone();
+                            let _ = action_tx.send(Action::SetTxStatus(TxSubmissionStatus::Submitting)).await;
+
+                            // We need to submit via the chain task, but for now let's just log
+                            // In a real implementation, we'd send this through a channel to chain_task
+                            tracing::info!(
+                                "Would submit transaction: 0x{} ({} bytes)",
+                                hex::encode(pending_tx.tx_hash),
+                                extrinsic.len()
+                            );
+
+                            // TODO: Actually submit via chain client
+                            // For now, mark as failed since we haven't wired up the submission channel
+                            let _ = action_tx.send(Action::SetTxStatus(
+                                TxSubmissionStatus::Failed("Transaction submission not yet implemented".to_string())
+                            )).await;
+                        }
+                    }
+                    Action::StartSignatureScan => {
+                        // Start camera capture for QR scanning
+                        match qr_reader::QrReader::new() {
+                            Ok(reader) => {
+                                qr_reader = Some(reader);
+                                app.scanning_signature = true;
+                                tracing::info!("Started camera for signature QR scanning");
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to start camera: {}", e);
+                                let _ = action_tx.send(Action::QrScanFailed(e)).await;
+                            }
+                        }
+                    }
+                    Action::StopSignatureScan => {
+                        // Stop the QR reader
+                        if let Some(ref mut reader) = qr_reader {
+                            reader.stop();
+                        }
+                        qr_reader = None;
+                        // Already handled in app.handle_action
+                    }
+                    Action::ClearPendingTx => {
+                        // Stop the QR reader if active
+                        if let Some(ref mut reader) = qr_reader {
+                            reader.stop();
+                        }
+                        qr_reader = None;
+                        // Already handled in app.handle_action
+                    }
+                    Action::QrScanFailed(_) => {
+                        // Cleanup QR reader
+                        qr_reader = None;
                     }
                     Action::LoadStakingHistory => {
                         if let Some(account) = &app.watched_account {
@@ -565,7 +717,9 @@ async fn chain_task(
         }
     };
 
-    let _ = action_tx.send(Action::SetLoadingProgress(0.1)).await;
+    let _ = action_tx
+        .send(Action::SetLoadingProgress(0.1, None, None))
+        .await;
 
     // Open database for caching
     let db_path = get_db_path();
@@ -626,11 +780,18 @@ async fn chain_task(
             // Try to reconnect
             reconnect_attempts += 1;
             if reconnect_attempts > MAX_RECONNECT_ATTEMPTS {
-                tracing::error!("Could not fetch validators after {} reconnection attempts", MAX_RECONNECT_ATTEMPTS);
+                tracing::error!(
+                    "Could not fetch validators after {} reconnection attempts",
+                    MAX_RECONNECT_ATTEMPTS
+                );
                 break;
             }
 
-            tracing::warn!("Connection appears unstable - attempting reconnection ({}/{})", reconnect_attempts, MAX_RECONNECT_ATTEMPTS);
+            tracing::warn!(
+                "Connection appears unstable - attempting reconnection ({}/{})",
+                reconnect_attempts,
+                MAX_RECONNECT_ATTEMPTS
+            );
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
             if let Some(new_client) = try_reconnect(&client, 3).await {
@@ -653,7 +814,9 @@ async fn chain_task(
         }
     };
 
-    let _ = action_tx.send(Action::SetLoadingProgress(0.3)).await;
+    let _ = action_tx
+        .send(Action::SetLoadingProgress(0.3, None, None))
+        .await;
 
     // Fetch staker exposures for the previous era (active era - 1)
     // Retry with backoff for light client stability
@@ -664,11 +827,7 @@ async fn chain_task(
         for attempt in 1..=max_attempts {
             match client.get_era_stakers_overview(query_era).await {
                 Ok(e) => {
-                    tracing::info!(
-                        "Found {} active validators for era {}",
-                        e.len(),
-                        query_era
-                    );
+                    tracing::info!("Found {} active validators for era {}", e.len(), query_era);
                     result = Some(e);
                     break;
                 }
@@ -677,11 +836,18 @@ async fn chain_task(
                         let delay = (attempt as u64).min(10);
                         tracing::warn!(
                             "Failed to get era stakers (attempt {}/{}): {} - retrying in {}s...",
-                            attempt, max_attempts, e, delay
+                            attempt,
+                            max_attempts,
+                            e,
+                            delay
                         );
                         tokio::time::sleep(tokio::time::Duration::from_secs(delay)).await;
                     } else {
-                        tracing::warn!("Failed to get era stakers after {} attempts: {}", max_attempts, e);
+                        tracing::warn!(
+                            "Failed to get era stakers after {} attempts: {}",
+                            max_attempts,
+                            e
+                        );
                     }
                 }
             }
@@ -689,7 +855,9 @@ async fn chain_task(
         result.unwrap_or_default()
     };
 
-    let _ = action_tx.send(Action::SetLoadingProgress(0.6)).await;
+    let _ = action_tx
+        .send(Action::SetLoadingProgress(0.6, None, None))
+        .await;
 
     // Fetch era reward
     let era_reward = match client.get_era_validator_reward(query_era).await {
@@ -729,7 +897,9 @@ async fn chain_task(
         .map(|vp| (*vp.address.as_ref(), vp.points))
         .collect();
 
-    let _ = action_tx.send(Action::SetLoadingProgress(0.7)).await;
+    let _ = action_tx
+        .send(Action::SetLoadingProgress(0.7, None, None))
+        .await;
 
     // Fetch fresh validator identities from People chain and update cache
     if let Some(ref people) = people_client {
@@ -770,17 +940,25 @@ async fn chain_task(
                 identity_map.extend(fresh_identities);
             }
             Err(e) => {
-                tracing::warn!("Failed to fetch identities from People chain: {} (using cached data)", e);
+                tracing::warn!(
+                    "Failed to fetch identities from People chain: {} (using cached data)",
+                    e
+                );
                 // Keep using cached identities
             }
         }
     } else if identity_map.is_empty() {
         tracing::info!("Skipping identity fetch (People chain not connected, no cache)");
     } else {
-        tracing::info!("Using {} cached identities (People chain not connected)", identity_map.len());
+        tracing::info!(
+            "Using {} cached identities (People chain not connected)",
+            identity_map.len()
+        );
     }
 
-    let _ = action_tx.send(Action::SetLoadingProgress(0.8)).await;
+    let _ = action_tx
+        .send(Action::SetLoadingProgress(0.8, None, None))
+        .await;
 
     // Build exposure map for quick lookup
     let exposure_map: HashMap<[u8; 32], _> = exposures
@@ -855,7 +1033,22 @@ async fn chain_task(
         validator_apy_map.len()
     );
 
-    let _ = action_tx.send(Action::SetLoadingProgress(0.9)).await;
+    let _ = action_tx
+        .send(Action::SetLoadingProgress(0.9, None, None))
+        .await;
+
+    // Cache validators to database for faster startup next time
+    if let Some(ref mut db) = db {
+        match db.set_cached_validators(network, era_info.index, &display_validators) {
+            Ok(count) => {
+                tracing::info!("Cached {} validators for era {}", count, era_info.index);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to cache validators: {}", e);
+            }
+        }
+    }
+
     let _ = action_tx
         .send(Action::SetDisplayValidators(display_validators))
         .await;
@@ -871,7 +1064,10 @@ async fn chain_task(
         }
         Err(e) => {
             if client.is_light_client() {
-                tracing::warn!("Nomination pools unavailable (light client limitation): {}", e);
+                tracing::warn!(
+                    "Nomination pools unavailable (light client limitation): {}",
+                    e
+                );
             } else {
                 tracing::warn!("Failed to get nomination pools: {}", e);
             }
@@ -1008,7 +1204,9 @@ async fn chain_task(
         (None, None) => b.member_count.cmp(&a.member_count),
     });
 
-    let _ = action_tx.send(Action::SetLoadingProgress(1.0)).await;
+    let _ = action_tx
+        .send(Action::SetLoadingProgress(1.0, None, None))
+        .await;
     let _ = action_tx.send(Action::SetDisplayPools(display_pools)).await;
 
     tracing::info!("Nomination pools loaded successfully");
@@ -1071,7 +1269,10 @@ async fn chain_task(
             Some((signer, targets)) = qr_rx.recv() => {
                 tracing::info!("Generating nomination QR for {} validators", targets.len());
 
-                match client.create_nominate_payload(&signer, &targets).await {
+                // Use mortal era by default (true) for replay protection
+                // TODO: Surface this as a user setting in the interface
+                let use_mortal_era = true;
+                match client.create_nominate_payload(&signer, &targets, use_mortal_era).await {
                     Ok(payload) => {
                         let qr_data = stkopt_chain::encode_for_qr(&payload, &signer);
                         let qr_len = qr_data.len();
@@ -1088,11 +1289,19 @@ async fn chain_task(
                             include_metadata_hash: payload.include_metadata_hash,
                         };
 
+                        // Store the pending unsigned tx for later signature
+                        let pending = crate::action::PendingUnsignedTx {
+                            payload: payload.clone(),
+                            signer: signer.clone(),
+                        };
+                        let _ = qr_action_tx.send(Action::SetPendingUnsignedTx(Some(pending))).await;
+
                         let _ = qr_action_tx.send(Action::SetQRData(Some(qr_data), Some(tx_info))).await;
                         tracing::info!("QR data generated ({} bytes for Polkadot Vault)", qr_len);
                     }
                     Err(e) => {
                         tracing::error!("Failed to generate nomination payload: {}", e);
+                        let _ = qr_action_tx.send(Action::SetPendingUnsignedTx(None)).await;
                         let _ = qr_action_tx.send(Action::SetQRData(None, None)).await;
                     }
                 }
@@ -1447,7 +1656,10 @@ fn calculate_era_date(
         // Fallback: use current time minus eras_ago * era_duration
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .map_err(|e| {
+                tracing::warn!("Time regression detected: {}, using 0", e);
+            })
+            .unwrap_or_default()
             .as_millis() as u64;
         now_ms.saturating_sub(eras_ago as u64 * era_duration_ms)
     };

@@ -2,10 +2,10 @@
 
 use crate::ChainClient;
 use crate::error::ChainError;
+use std::collections::HashMap;
 use stkopt_core::{Balance, EraIndex, ValidatorPreferences};
 use subxt::dynamic::{At, DecodedValueThunk, Value};
 use subxt::utils::AccountId32;
-use std::collections::HashMap;
 
 /// Raw validator data from chain.
 #[derive(Debug, Clone)]
@@ -67,8 +67,9 @@ impl ChainClient {
                     if key_bytes.len() < 32 {
                         continue;
                     }
-                    let Ok(account_bytes): Result<[u8; 32], _> = key_bytes[key_bytes.len() - 32..]
-                        .try_into() else {
+                    let Ok(account_bytes): Result<[u8; 32], _> =
+                        key_bytes[key_bytes.len() - 32..].try_into()
+                    else {
                         continue;
                     };
 
@@ -96,13 +97,16 @@ impl ChainClient {
                         .and_then(|v: &Value<u32>| v.as_bool())
                         .unwrap_or(false);
 
-                    validators_map.insert(account_bytes, ValidatorInfo {
-                        address,
-                        preferences: ValidatorPreferences {
-                            commission,
-                            blocked,
+                    validators_map.insert(
+                        account_bytes,
+                        ValidatorInfo {
+                            address,
+                            preferences: ValidatorPreferences {
+                                commission,
+                                blocked,
+                            },
                         },
-                    });
+                    );
                 }
                 Some(Err(e)) => {
                     // Connection error during iteration - return what we have so far
@@ -165,7 +169,10 @@ impl ChainClient {
             .and_then(|v: &Value<u32>| v.as_bool())
             .unwrap_or(false);
 
-        Ok(Some(ValidatorPreferences { commission, blocked }))
+        Ok(Some(ValidatorPreferences {
+            commission,
+            blocked,
+        }))
     }
 
     /// Get validator preferences for a batch of validators.
@@ -228,7 +235,7 @@ impl ChainClient {
         let storage_query = subxt::dynamic::storage("Session", "Validators", ());
 
         let result: Option<DecodedValueThunk> = self
-            .relay_client()  // Use relay chain, not Asset Hub
+            .relay_client() // Use relay chain, not Asset Hub
             .storage()
             .at_latest()
             .await?
@@ -255,7 +262,9 @@ impl ChainClient {
                     }
                 }
                 if bytes.len() == 32 {
-                    let arr: [u8; 32] = bytes.try_into().unwrap();
+                    let arr: [u8; 32] = bytes
+                        .try_into()
+                        .expect("Validator address byte array should always be 32 bytes");
                     validators.push(AccountId32::from(arr));
                 }
             } else {
@@ -263,7 +272,10 @@ impl ChainClient {
             }
         }
 
-        tracing::info!("Session.Validators (relay chain) returned {} active validators", validators.len());
+        tracing::info!(
+            "Session.Validators (relay chain) returned {} active validators",
+            validators.len()
+        );
         Ok(validators)
     }
 
@@ -285,14 +297,22 @@ impl ChainClient {
             let map_size_before = all_addresses.len();
             match self.get_validators().await {
                 Ok(vals) => {
-                    let new_count = vals.iter().filter(|v| !all_addresses.contains_key(&v.address.0)).count();
+                    let new_count = vals
+                        .iter()
+                        .filter(|v| !all_addresses.contains_key(&v.address.0))
+                        .count();
                     for v in vals.iter() {
                         all_addresses.insert(v.address.0, v.address.clone());
                     }
                     let map_size_after = all_addresses.len();
                     tracing::info!(
                         "Iteration attempt {}/{}: Got {} validators, {} were new. Map: {} -> {} entries",
-                        attempt, max_attempts, vals.len(), new_count, map_size_before, map_size_after
+                        attempt,
+                        max_attempts,
+                        vals.len(),
+                        new_count,
+                        map_size_before,
+                        map_size_after
                     );
 
                     // If we didn't get any new validators, probably have reached the limit
@@ -315,17 +335,25 @@ impl ChainClient {
         if let Ok(Some(era_info)) = self.get_active_era().await
             && let Ok(exposures) = self.get_era_stakers_overview(era_info.index).await
         {
-            let new_count = exposures.iter().filter(|e| !all_addresses.contains_key(&e.address.0)).count();
+            let new_count = exposures
+                .iter()
+                .filter(|e| !all_addresses.contains_key(&e.address.0))
+                .count();
             tracing::info!("Era stakers: {} ({} new)", exposures.len(), new_count);
             for exp in exposures {
                 all_addresses.insert(exp.address.0, exp.address);
             }
         }
 
-        tracing::info!("Total unique validators discovered: {}", all_addresses.len());
+        tracing::info!(
+            "Total unique validators discovered: {}",
+            all_addresses.len()
+        );
 
         if all_addresses.is_empty() {
-            return Err(ChainError::InvalidData("No validators found with light client".into()));
+            return Err(ChainError::InvalidData(
+                "No validators found with light client".into(),
+            ));
         }
 
         // Batch fetch preferences for all discovered validators
@@ -490,8 +518,9 @@ impl ChainClient {
                     if key_bytes.len() < 32 {
                         continue;
                     }
-                    let Ok(account_bytes): Result<[u8; 32], _> = key_bytes[key_bytes.len() - 32..]
-                        .try_into() else {
+                    let Ok(account_bytes): Result<[u8; 32], _> =
+                        key_bytes[key_bytes.len() - 32..].try_into()
+                    else {
                         continue;
                     };
 
@@ -520,12 +549,15 @@ impl ChainClient {
                         .and_then(|v: &Value<u32>| v.as_u128())
                         .unwrap_or(0) as u32;
 
-                    exposures_map.insert(account_bytes, ValidatorExposure {
-                        address,
-                        own,
-                        total,
-                        nominator_count,
-                    });
+                    exposures_map.insert(
+                        account_bytes,
+                        ValidatorExposure {
+                            address,
+                            own,
+                            total,
+                            nominator_count,
+                        },
+                    );
                 }
                 Some(Err(e)) => {
                     // Connection error during iteration - return what we have so far

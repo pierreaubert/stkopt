@@ -154,6 +154,20 @@ mod tests {
     }
 
     #[test]
+    fn test_theme_equality() {
+        assert_eq!(Theme::Dark, Theme::Dark);
+        assert_eq!(Theme::Light, Theme::Light);
+        assert_ne!(Theme::Dark, Theme::Light);
+    }
+
+    #[test]
+    fn test_theme_clone() {
+        let theme = Theme::Dark;
+        let theme_clone = theme;
+        assert_eq!(theme, theme_clone);
+    }
+
+    #[test]
     fn test_dark_palette() {
         let palette = Theme::Dark.palette();
         assert_eq!(palette.fg, Color::White);
@@ -171,5 +185,88 @@ mod tests {
         let dark = Palette::dark();
         let light = Palette::light();
         assert_ne!(dark.fg, light.fg);
+    }
+
+    #[test]
+    fn test_dark_palette_all_colors() {
+        let p = Palette::dark();
+        // Verify all colors are set
+        assert_eq!(p.fg, Color::White);
+        assert_eq!(p.fg_dim, Color::Gray);
+        assert_eq!(p.bg, Color::Reset);
+        assert_eq!(p.border, Color::DarkGray);
+        assert_eq!(p.primary, Color::Cyan);
+        assert_eq!(p.secondary, Color::Blue);
+        assert_eq!(p.accent, Color::Magenta);
+        assert_eq!(p.success, Color::Green);
+        assert_eq!(p.warning, Color::Yellow);
+        assert_eq!(p.error, Color::Red);
+        assert_eq!(p.graph_high, Color::Green);
+        assert_eq!(p.graph_mid, Color::Yellow);
+        assert_eq!(p.graph_low, Color::Red);
+        assert_eq!(p.selection, Color::LightBlue);
+        assert_eq!(p.highlight, Color::Yellow);
+        assert_eq!(p.muted, Color::DarkGray);
+        assert_eq!(p.tab_active, Color::Cyan);
+        assert_eq!(p.tab_inactive, Color::DarkGray);
+    }
+
+    #[test]
+    fn test_light_palette_all_colors() {
+        let p = Palette::light();
+        // Verify all colors are set
+        assert_eq!(p.fg, Color::Black);
+        assert_eq!(p.fg_dim, Color::DarkGray);
+        assert_eq!(p.bg, Color::Reset);
+        assert_eq!(p.border, Color::Gray);
+        // RGB colors for light theme
+        assert_eq!(p.primary, Color::Rgb(0, 128, 128));
+        assert_eq!(p.secondary, Color::Rgb(0, 0, 139));
+        assert_eq!(p.accent, Color::Rgb(128, 0, 128));
+        assert_eq!(p.success, Color::Rgb(0, 128, 0));
+        assert_eq!(p.warning, Color::Rgb(184, 134, 11));
+        assert_eq!(p.error, Color::Rgb(178, 34, 34));
+    }
+
+    #[test]
+    fn test_palette_clone() {
+        let p = Palette::dark();
+        let p_clone = p;
+        assert_eq!(p.fg, p_clone.fg);
+        assert_eq!(p.primary, p_clone.primary);
+    }
+
+    #[test]
+    fn test_theme_detect() {
+        // Just verify detect() doesn't panic
+        let _theme = Theme::detect();
+    }
+
+    #[test]
+    fn test_theme_palette_consistency() {
+        // Dark theme should have light foreground
+        let dark_palette = Theme::Dark.palette();
+        assert_eq!(dark_palette.fg, Color::White);
+
+        // Light theme should have dark foreground
+        let light_palette = Theme::Light.palette();
+        assert_eq!(light_palette.fg, Color::Black);
+    }
+
+    #[test]
+    fn test_palette_status_colors_distinct() {
+        let p = Palette::dark();
+        // Success, warning, and error should be different
+        assert_ne!(p.success, p.warning);
+        assert_ne!(p.warning, p.error);
+        assert_ne!(p.success, p.error);
+    }
+
+    #[test]
+    fn test_palette_graph_colors_distinct() {
+        let p = Palette::dark();
+        // Graph colors should represent different severity
+        assert_ne!(p.graph_high, p.graph_mid);
+        assert_ne!(p.graph_mid, p.graph_low);
     }
 }

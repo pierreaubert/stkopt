@@ -6,7 +6,8 @@ pub mod queries;
 pub mod transactions;
 
 pub use client::{
-    ChainClient, ChainInfo, ConnectionConfig, ConnectionMode, RpcEndpoints,
+    ChainClient, ChainInfo, ConnectionConfig, ConnectionMode, RpcEndpoints, TxInBlockResult,
+    TxSubmissionProgress,
 };
 pub use config::*;
 pub use error::*;
@@ -20,4 +21,7 @@ pub use queries::pools::{
     derive_pool_account,
 };
 pub use queries::validators::{ValidatorExposure, ValidatorInfo, ValidatorPoints};
-pub use transactions::{Era, UnsignedPayload, encode_for_qr};
+pub use transactions::{
+    Era, SignedExtrinsic, TxStatus, UnsignedPayload, build_signed_extrinsic,
+    decode_vault_signature, encode_for_qr,
+};

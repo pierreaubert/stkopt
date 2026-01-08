@@ -1,0 +1,95 @@
+# prompts
+
+## initial
+
+### The app
+We want to create a staking app for the Polkadot network. It will support the following features:
+- User can enter a polkadot address
+- App will download data from the chain and display it in 4 tabs (Validators, Pools, Nominate, Account) in a columnar format
+- App will store information in a local database to minimise traffic and to store historical rewards
+- App will have parameters to select relaychain, chains, and nodes, a mode to run in batch to update history
+- App will allow to optimise staking via various parameters (maximize rewards but also distributing the risk on != validators)
+- App will allow to change compundings (reward distribution)
+- App will use a Light CLient (default) or RPC (for history or failover)
+
+### Technically:
+- This is a Rust app that use a minimum amount of crates
+- Use Polkadot Smoldot for the light client
+- Use Polkadot RPC
+- Use Polkadot Metadata (on chain)
+- Use Ratatui for TUI
+- Use sqlite for database
+- Use directory for placing the database and config in standard places
+
+Code coverage will be > 80%.
+Code review will be done and findings corrected.
+
+Add a README and a LICENSE (ISC).
+
+
+## wave 1
+
+1. check that we get the proper metadata per chain
+2. in the validators view, we do not see the names of the validator
+3. in the pools view, we do see the names of the pools, APY is also not written
+4. in the nominate view, QR code scanning fails with a "payload type with code 0x01 is not supported.
+5. in the nominate view, in the QR code modal, add 1 tab that display the extrinsics in a humann readable format
+6. in the account view, I see loading account data... after it has been loaded. When loaded display the status of the account with a split of the balance (bonded, total, staked, free, ....)
+8. in the history account, start to download history in the background. Display the graph/table even if you do not have all the data and update them when the data comes.
+9. if you have the space (window large enough) make 1 big QR code, if not use the animated QR code and display it at least 10x faster
+
+## wave 2
+
+1. in validators view, add / to search by keywords and filter from the view as well. add b (toggle) to show/remove blocked validators.
+2. in validators view, add s to sort the table (create a small menu: n name, a address, etc) and sort the table by field. add S reverse sort
+3. same process in pools view
+4. in nominate view, looks at the typescript code to see if they have multiple strategy for optimising. If that's the case, they propose the use a choice on what they can optimise for
+5. in account view, add a key to switch between the 2 windows. add down arrow/up arrow to select an address
+6. in history: make the graph nicer. Add a space between day on the X axis. On the Y axis, only put a small number of ticks. for ex: if max reward is 84.24, add 10 ticks from 0 to 100. Ratio of the graph should be 1:2 aka height is half the width adapted to the screen. Display a trend line on the graph (computed with a smoothing window of 7 days)
+7. the QR code is now valid but it is not signed for the correct parachain (in this case that would be assethub/statemint); vault is complaining that the QR code requires metadata upload (which usually means it is not for the correct one).
+
+first manual help: claude cannot figure out
+- should the tr be submitted to polkadot or AH?
+- what is exactly the format for the extrensic?
+- need some help also with the QR code
+I had to read the code of Vault and guide claude. Claude reading Vault code did not work. Documentation is terrible. Switched to Gemini3 and then it did work.
+
+## wave 3 debug + caching
+
+bugs we have with the light client:
+1. there is a lot of duplicates in the pool view and in the validator vies
+2. we are clearly missing validators and they are not updated later on (or the UI is not updated)
+
+we need more caching to hide the latency when we start the app with the light client.
+1. cache the spec files in the database.
+2. with the light client, select which validators to query for first (active), cache the results and display them in the table, same for names coming from people chain (cache and update in bg)
+3. used the cache data to populate the UI when it starts
+4. start with account view by default. if there is no stored account, then make a a pop up asking the user for one. if there is one at least, display the information for this one from the database.
+5. update the UI when you get data from the chain
+6. when the app start and you dont have data yet, display an ascii spinner telling people that they have to wait a bit ...
+7. display the tabs in different order with Account fist then History then Nominate then Pools and Validators
+
+## wave 4 camera
+1. use the camera to read the QR code back from Vault and get the signed transaction to submit to the chain
+2. on macos the app will be signed externally with an Entitlement file to get access to the camera. add a script to build a dmg.
+
+
+## wave 5 cosmetics
+
+1. deal with slow connection: if you have 1mb/s the timeouts for the light client are not ok. After 10s, compute the available bw and set the timeout automatically.
+2. when you know the bw you can estimate how log it will take before the app is loaded and user can do something. Use the estimation to display a progress bar.
+3. when displaing an animated QR code, the last one is not the same size as the other one and visually that looks chaotics. Keep the size of the frame constant.
+4.
+
+## wave qa
+
+2. we want to increase code coverage to 90%.
+3. make a plan to define a testing strategy. we want to test the app in 3 modes: normal, failover and history.
+4. do a security code review and write a plan to correct the findings (done 3 times, claude+minimax+gemini)
+5. update the documentation esp. how to use the app
+
+
+
+
+
+

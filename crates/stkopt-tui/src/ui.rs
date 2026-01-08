@@ -3,7 +3,7 @@
 use crate::app::{App, InputMode, PoolSortField, ValidatorSortField, View};
 use crate::log_buffer::LogLevel;
 use crate::theme::Palette;
-use qrcode::QrCode;
+use qrcode::{EcLevel, QrCode, Version};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
@@ -62,6 +62,110 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if app.input_mode == InputMode::StrategyMenu {
         render_strategy_menu(frame, app);
     }
+
+    // Render account prompt popup if showing
+    if app.show_account_prompt {
+        render_account_prompt(frame, app);
+    }
+
+    // Render loading spinner overlay if chain is connecting and no cached data
+    if app.loading_chain && app.validators.is_empty() {
+        render_loading_spinner(frame, app);
+    }
+}
+
+/// Render the loading spinner overlay with progress bar and ETA.
+fn render_loading_spinner(frame: &mut Frame, app: &App) {
+    let p = &app.palette;
+    let area = frame.area();
+
+    // Center a box
+    let spinner_width = 50;
+    let spinner_height = 7;
+    let x = (area.width.saturating_sub(spinner_width)) / 2;
+    let y = (area.height.saturating_sub(spinner_height)) / 2;
+    let spinner_area = Rect::new(x, y, spinner_width, spinner_height);
+
+    // Clear background
+    frame.render_widget(Clear, spinner_area);
+
+    // Spinner message
+    let spinner = app.spinner_char();
+    let message = format!("{} Connecting to {}...", spinner, app.network);
+
+    // Build progress bar
+    let progress_width = 30usize;
+    let filled = (app.loading_progress * progress_width as f32) as usize;
+    let bar: String = "█".repeat(filled) + &"░".repeat(progress_width - filled);
+
+    // ETA or bandwidth info
+    let eta_text = if let Some(eta) = app.format_eta() {
+        format!("ETA: {}", eta)
+    } else if let Some(bw) = app.estimated_bandwidth {
+        format!("Speed: {:.1} KB/s", bw / 1024.0)
+    } else {
+        "Light client syncing, please wait".to_string()
+    };
+
+    let text = vec![
+        Line::from(message).style(Style::default().fg(p.accent).bold()),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("[{}] {:.0}%", bar, app.loading_progress * 100.0),
+            Style::default().fg(p.success),
+        )),
+        Line::from(""),
+        Line::from(eta_text).style(Style::default().fg(p.muted)),
+    ];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(p.border))
+        .style(Style::default().bg(p.bg));
+
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .alignment(ratatui::layout::Alignment::Center);
+
+    frame.render_widget(paragraph, spinner_area);
+}
+
+/// Render the account prompt popup.
+fn render_account_prompt(frame: &mut Frame, app: &App) {
+    let p = &app.palette;
+    let area = frame.area();
+
+    // Center a box
+    let prompt_width = 60.min(area.width.saturating_sub(4));
+    let prompt_height = 9;
+    let x = (area.width.saturating_sub(prompt_width)) / 2;
+    let y = (area.height.saturating_sub(prompt_height)) / 2;
+    let prompt_area = Rect::new(x, y, prompt_width, prompt_height);
+
+    // Clear background
+    frame.render_widget(Clear, prompt_area);
+
+    let text = vec![
+        Line::from("No account configured").style(Style::default().fg(p.accent).bold()),
+        Line::from(""),
+        Line::from("Press 'a' to enter your stash account address"),
+        Line::from("or scan a QR code from Polkadot Vault."),
+        Line::from(""),
+        Line::from("Press 'q' to quit").style(Style::default().fg(p.muted)),
+    ];
+
+    let block = Block::default()
+        .title(" Welcome to Staking Optimizer ")
+        .title_style(Style::default().fg(p.accent).bold())
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(p.border))
+        .style(Style::default().bg(p.bg));
+
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .alignment(ratatui::layout::Alignment::Center);
+
+    frame.render_widget(paragraph, prompt_area);
 }
 
 /// Render the header with network info and era status.
@@ -685,7 +789,10 @@ fn render_account(frame: &mut Frame, app: &mut App, area: Rect) {
     // Main: Split horizontally (Left: Info, Right: Address Book)
 
     let main_area = if app.input_mode == InputMode::EnteringAccount {
-        let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(area);
+        let input_height = if app.validation_error.is_some() { 5 } else { 3 };
+        let chunks =
+            Layout::vertical([Constraint::Length(input_height), Constraint::Min(0)]).split(area);
+
         // Render input box
         let input = Paragraph::new(app.account_input.as_str())
             .style(Style::default().fg(pal.highlight))
@@ -696,7 +803,25 @@ fn render_account(frame: &mut Frame, app: &mut App, area: Rect) {
                     .title(" Enter SS58 Address (Enter to confirm, Esc to cancel) "),
             );
         frame.render_widget(input, chunks[0]);
-        chunks[1]
+
+        // Render validation error if present
+        if let Some(ref error) = app.validation_error {
+            let error_lines = vec![Line::from(vec![
+                Span::styled("✗ ", Style::default().fg(pal.error)),
+                Span::styled(error, Style::default().fg(pal.error)),
+            ])];
+            let error_para = Paragraph::new(error_lines)
+                .style(Style::default().fg(pal.error))
+                .block(
+                    Block::default()
+                        .borders(Borders::NONE)
+                        .style(Style::default().bg(pal.bg)),
+                );
+            frame.render_widget(error_para, chunks[1]);
+            chunks[2]
+        } else {
+            chunks[1]
+        }
     } else {
         area
     };
@@ -1583,24 +1708,35 @@ fn render_qr_modal(frame: &mut Frame, app: &App) {
     ])
     .split(inner_area);
 
-    // Tabs
-    let titles = vec![Line::from(" QR Code "), Line::from(" Extrinsic ")];
+    // Tabs - show Scan tab only if we have pending unsigned tx
+    let titles = if app.pending_unsigned_tx.is_some() {
+        vec![
+            Line::from(" QR Code "),
+            Line::from(" Extrinsic "),
+            Line::from(" Scan "),
+        ]
+    } else {
+        vec![Line::from(" QR Code "), Line::from(" Extrinsic ")]
+    };
     let tabs = Tabs::new(titles)
-        .select(if app.qr_show_details { 1 } else { 0 })
+        .select(app.qr_modal_tab)
         .style(Style::default().fg(pal.muted))
         .highlight_style(Style::default().fg(pal.highlight).bold());
     frame.render_widget(tabs, chunks[0]);
 
-    if !app.qr_show_details {
-        // Render QR
-        render_qr_content(frame, app, chunks[1]);
-    } else {
-        // Render Details
-        render_qr_details(frame, app, chunks[1]);
+    match app.qr_modal_tab {
+        0 => render_qr_content(frame, app, chunks[1]),
+        1 => render_qr_details(frame, app, chunks[1]),
+        2 => render_scan_camera(frame, app, chunks[1]),
+        _ => render_qr_content(frame, app, chunks[1]),
     }
 
-    // Footer
-    let footer = Line::from(vec![Span::raw("Tab:View  Esc:Close")]);
+    // Footer - show scan shortcut if we have pending tx
+    let footer = if app.pending_unsigned_tx.is_some() {
+        "Tab:View  s:Scan  Esc:Close"
+    } else {
+        "Tab:View  Esc:Close"
+    };
     frame.render_widget(
         Paragraph::new(footer).alignment(Alignment::Center),
         chunks[2],
@@ -1714,7 +1850,11 @@ fn render_qr_details(frame: &mut Frame, app: &App, area: Rect) {
         )));
         lines.push(Line::from(format!(
             "  Metadata Hash: {}",
-            if tx_info.include_metadata_hash { "Enabled" } else { "Disabled" }
+            if tx_info.include_metadata_hash {
+                "Enabled"
+            } else {
+                "Disabled"
+            }
         )));
 
         if tx_info.include_metadata_hash {
@@ -1744,6 +1884,137 @@ fn render_qr_details(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     let p = Paragraph::new(lines).block(Block::default().borders(Borders::NONE));
+    frame.render_widget(p, area);
+}
+
+/// Render the camera scan tab with visual feedback.
+fn render_scan_camera(frame: &mut Frame, app: &App, area: Rect) {
+    use crate::app::CameraScanStatus;
+
+    let pal = &app.palette;
+    let mut lines = Vec::new();
+
+    // Header
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Scan Signed Transaction from Vault",
+        Style::default().fg(pal.primary).bold(),
+    )));
+    lines.push(Line::from(""));
+
+    // Instructions
+    lines.push(Line::from(Span::styled(
+        "1. On Vault: Review and approve the transaction",
+        Style::default().fg(pal.fg),
+    )));
+    lines.push(Line::from(Span::styled(
+        "2. Vault will show a QR code with the signed transaction",
+        Style::default().fg(pal.fg),
+    )));
+    lines.push(Line::from(Span::styled(
+        "3. Hold your phone in front of the camera",
+        Style::default().fg(pal.fg),
+    )));
+    lines.push(Line::from(""));
+
+    // Camera status with visual target frame
+    let frame_width = 34;
+    let frame_height = 10;
+    let top_border = format!("┌{}┐", "─".repeat(frame_width));
+    let bottom_border = format!("└{}┘", "─".repeat(frame_width));
+    let empty_line = format!("│{}│", " ".repeat(frame_width));
+
+    // Determine status indicator based on camera_scan_status
+    let (status_text, status_style, indicator) = match app.camera_scan_status {
+        None | Some(CameraScanStatus::Initializing) => (
+            "Initializing camera...",
+            Style::default().fg(pal.muted),
+            app.spinner_char(),
+        ),
+        Some(CameraScanStatus::Scanning) => (
+            "Scanning... Position QR code in frame",
+            Style::default().fg(pal.warning),
+            '◯',
+        ),
+        Some(CameraScanStatus::Detected) => (
+            "QR code detected! Hold steady...",
+            Style::default().fg(pal.accent),
+            '◉',
+        ),
+        Some(CameraScanStatus::Success) => (
+            "Successfully scanned!",
+            Style::default().fg(pal.success),
+            '✓',
+        ),
+        Some(CameraScanStatus::Error) => (
+            "Camera error - check permissions",
+            Style::default().fg(pal.error),
+            '✗',
+        ),
+    };
+
+    // Determine border color based on status
+    let border_style = match app.camera_scan_status {
+        None | Some(CameraScanStatus::Initializing) | Some(CameraScanStatus::Scanning) => {
+            Style::default().fg(pal.border)
+        }
+        Some(CameraScanStatus::Detected) => Style::default().fg(pal.accent),
+        Some(CameraScanStatus::Success) => Style::default().fg(pal.success),
+        Some(CameraScanStatus::Error) => Style::default().fg(pal.error),
+    };
+
+    // Draw target frame
+    lines.push(Line::from(Span::styled(top_border.clone(), border_style)));
+
+    for i in 0..frame_height {
+        if i == frame_height / 2 {
+            // Center line with indicator
+            let center_content = format!(
+                "{}  {}  {}",
+                " ".repeat(frame_width / 2 - 3),
+                indicator,
+                " ".repeat(frame_width / 2 - 3)
+            );
+            let center_content = &center_content[..frame_width.min(center_content.len())];
+            lines.push(Line::from(vec![
+                Span::styled("│", border_style),
+                Span::styled(
+                    format!("{:^width$}", center_content, width = frame_width),
+                    status_style,
+                ),
+                Span::styled("│", border_style),
+            ]));
+        } else {
+            lines.push(Line::from(Span::styled(empty_line.clone(), border_style)));
+        }
+    }
+
+    lines.push(Line::from(Span::styled(bottom_border, border_style)));
+    lines.push(Line::from(""));
+
+    // Status text
+    lines.push(Line::from(Span::styled(status_text, status_style)));
+    lines.push(Line::from(""));
+
+    // Additional help
+    if matches!(
+        app.camera_scan_status,
+        Some(CameraScanStatus::Scanning) | Some(CameraScanStatus::Detected)
+    ) {
+        lines.push(Line::from(Span::styled(
+            "Tip: Ensure good lighting and hold the phone steady",
+            Style::default().fg(pal.muted),
+        )));
+    } else if matches!(app.camera_scan_status, Some(CameraScanStatus::Error)) {
+        lines.push(Line::from(Span::styled(
+            "On macOS, grant camera access in System Preferences > Privacy",
+            Style::default().fg(pal.muted),
+        )));
+    }
+
+    let p = Paragraph::new(lines)
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::NONE));
     frame.render_widget(p, area);
 }
 
@@ -1820,14 +2091,35 @@ fn render_multipart_qr(
     frame_bytes.extend_from_slice(&frame_idx.to_be_bytes());
     frame_bytes.extend_from_slice(chunk);
 
+    // Determine QR version based on target chunk size to ensure consistent dimensions
+    // across all frames, even if the last frame has less data.
+    // Version capacity (EcLevel::L): v6=106, v7=122, v8=152, v9=180, v10=213, v11=251, v12=287
+    let full_frame_size = 5 + raw_chunk_size;
+    let qr_version = if full_frame_size <= 106 {
+        6
+    } else if full_frame_size <= 122 {
+        7
+    } else if full_frame_size <= 152 {
+        8
+    } else if full_frame_size <= 180 {
+        9
+    } else if full_frame_size <= 213 {
+        10
+    } else if full_frame_size <= 251 {
+        11
+    } else {
+        12
+    };
+
     // Copy colors to avoid borrow issues with closures
     let primary = pal.primary;
     let warning = pal.warning;
     let success = pal.success;
     let error = pal.error;
 
-    // Use raw binary data for QR (UOS format expects binary)
-    match QrCode::new(&frame_bytes) {
+    // Use fixed QR version for consistent frame dimensions
+    // EcLevel::L provides maximum data capacity
+    match QrCode::with_version(&frame_bytes, Version::Normal(qr_version), EcLevel::L) {
         Ok(qr) => {
             let qr_lines = render_qr_halfblock(&qr);
             *qr_width = qr_lines

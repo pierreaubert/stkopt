@@ -119,8 +119,9 @@ impl ChainClient {
                     if key_bytes.len() < 4 {
                         continue;
                     }
-                    let Ok(id_bytes): Result<[u8; 4], _> = key_bytes[key_bytes.len() - 4..]
-                        .try_into() else {
+                    let Ok(id_bytes): Result<[u8; 4], _> =
+                        key_bytes[key_bytes.len() - 4..].try_into()
+                    else {
                         continue;
                     };
                     let id = u32::from_le_bytes(id_bytes);
@@ -170,13 +171,16 @@ impl ChainClient {
                         }
                     };
 
-                    pools_map.insert(id, PoolInfo {
+                    pools_map.insert(
                         id,
-                        state,
-                        points,
-                        member_count,
-                        roles,
-                    });
+                        PoolInfo {
+                            id,
+                            state,
+                            points,
+                            member_count,
+                            roles,
+                        },
+                    );
                 }
                 Some(Err(e)) => {
                     // Connection error during iteration - return what we have so far
@@ -240,8 +244,9 @@ impl ChainClient {
                         tracing::debug!("Pool metadata key too short: {} bytes", key_bytes.len());
                         continue;
                     }
-                    let Ok(id_bytes): Result<[u8; 4], _> = key_bytes[key_bytes.len() - 4..]
-                        .try_into() else {
+                    let Ok(id_bytes): Result<[u8; 4], _> =
+                        key_bytes[key_bytes.len() - 4..].try_into()
+                    else {
                         continue;
                     };
                     let id = u32::from_le_bytes(id_bytes);

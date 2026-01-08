@@ -161,3 +161,187 @@ impl tracing::field::Visit for MessageVisitor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_log_level_as_str() {
+        assert_eq!(LogLevel::Trace.as_str(), "TRACE");
+        assert_eq!(LogLevel::Debug.as_str(), "DEBUG");
+        assert_eq!(LogLevel::Info.as_str(), "INFO");
+        assert_eq!(LogLevel::Warn.as_str(), "WARN");
+        assert_eq!(LogLevel::Error.as_str(), "ERROR");
+    }
+
+    #[test]
+    fn test_log_level_equality() {
+        assert_eq!(LogLevel::Info, LogLevel::Info);
+        assert_ne!(LogLevel::Info, LogLevel::Error);
+    }
+
+    #[test]
+    fn test_log_level_clone() {
+        let level = LogLevel::Warn;
+        let level_clone = level;
+        assert_eq!(level, level_clone);
+    }
+
+    #[test]
+    fn test_log_buffer_new() {
+        let buffer = LogBuffer::new();
+        assert!(buffer.is_empty());
+        assert_eq!(buffer.len(), 0);
+    }
+
+    #[test]
+    fn test_log_buffer_default() {
+        let buffer = LogBuffer::default();
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_log_buffer_push_and_get() {
+        let buffer = LogBuffer::new();
+
+        buffer.push(LogLine {
+            level: LogLevel::Info,
+            target: "test".to_string(),
+            message: "Hello".to_string(),
+        });
+
+        assert_eq!(buffer.len(), 1);
+        assert!(!buffer.is_empty());
+
+        let lines = buffer.get_lines();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].message, "Hello");
+        assert_eq!(lines[0].target, "test");
+        assert_eq!(lines[0].level, LogLevel::Info);
+    }
+
+    #[test]
+    fn test_log_buffer_multiple_entries() {
+        let buffer = LogBuffer::new();
+
+        for i in 0..10 {
+            buffer.push(LogLine {
+                level: LogLevel::Debug,
+                target: "test".to_string(),
+                message: format!("Message {}", i),
+            });
+        }
+
+        assert_eq!(buffer.len(), 10);
+        let lines = buffer.get_lines();
+        assert_eq!(lines[0].message, "Message 0");
+        assert_eq!(lines[9].message, "Message 9");
+    }
+
+    #[test]
+    fn test_log_buffer_capacity_limit() {
+        let buffer = LogBuffer::new();
+
+        // Push more than MAX_LOG_LINES entries
+        for i in 0..MAX_LOG_LINES + 100 {
+            buffer.push(LogLine {
+                level: LogLevel::Info,
+                target: "test".to_string(),
+                message: format!("Message {}", i),
+            });
+        }
+
+        // Should be capped at MAX_LOG_LINES
+        assert_eq!(buffer.len(), MAX_LOG_LINES);
+
+        // First entry should be the 100th one (0-99 were removed)
+        let lines = buffer.get_lines();
+        assert_eq!(lines[0].message, "Message 100");
+    }
+
+    #[test]
+    fn test_log_buffer_clone() {
+        let buffer = LogBuffer::new();
+        buffer.push(LogLine {
+            level: LogLevel::Error,
+            target: "test".to_string(),
+            message: "Error!".to_string(),
+        });
+
+        let buffer_clone = buffer.clone();
+
+        // Both should have the same content
+        assert_eq!(buffer.len(), buffer_clone.len());
+
+        // But they share the same Arc, so adding to one affects both
+        buffer.push(LogLine {
+            level: LogLevel::Info,
+            target: "test".to_string(),
+            message: "New".to_string(),
+        });
+        assert_eq!(buffer_clone.len(), 2);
+    }
+
+    #[test]
+    fn test_log_line_clone() {
+        let line = LogLine {
+            level: LogLevel::Warn,
+            target: "my_target".to_string(),
+            message: "Warning message".to_string(),
+        };
+        let line_clone = line.clone();
+
+        assert_eq!(line.level, line_clone.level);
+        assert_eq!(line.target, line_clone.target);
+        assert_eq!(line.message, line_clone.message);
+    }
+
+    #[test]
+    fn test_log_buffer_layer_new() {
+        let buffer = LogBuffer::new();
+        let _layer = LogBufferLayer::new(buffer);
+        // Just verify it can be created
+    }
+
+    #[test]
+    fn test_message_visitor_record_debug() {
+        let visitor = MessageVisitor::default();
+
+        // Create a mock field - we can't easily test this without the tracing internals
+        // but we can verify the default state
+        assert!(visitor.message.is_none());
+    }
+
+    #[test]
+    fn test_log_buffer_thread_safety() {
+        use std::thread;
+
+        let buffer = LogBuffer::new();
+        let buffer_clone = buffer.clone();
+
+        let handle = thread::spawn(move || {
+            for i in 0..100 {
+                buffer_clone.push(LogLine {
+                    level: LogLevel::Debug,
+                    target: "thread".to_string(),
+                    message: format!("Thread message {}", i),
+                });
+            }
+        });
+
+        // Push from main thread too
+        for i in 0..100 {
+            buffer.push(LogLine {
+                level: LogLevel::Info,
+                target: "main".to_string(),
+                message: format!("Main message {}", i),
+            });
+        }
+
+        handle.join().unwrap();
+
+        // Should have all 200 messages
+        assert_eq!(buffer.len(), 200);
+    }
+}

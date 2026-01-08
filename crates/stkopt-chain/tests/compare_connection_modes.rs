@@ -2,9 +2,9 @@
 //!
 //! Run with: cargo test --test compare_connection_modes -- --nocapture
 
+use std::collections::HashSet;
 use stkopt_chain::{ChainClient, ConnectionConfig, ConnectionMode, RpcEndpoints};
 use stkopt_core::{ConnectionStatus, Network};
-use std::collections::HashSet;
 use tokio::sync::mpsc;
 
 const TEST_NETWORK: Network = Network::Polkadot;
@@ -13,9 +13,7 @@ const TEST_NETWORK: Network = Network::Polkadot;
 fn create_status_channel() -> mpsc::Sender<ConnectionStatus> {
     let (tx, mut rx) = mpsc::channel(10);
     // Drain the channel in background
-    tokio::spawn(async move {
-        while rx.recv().await.is_some() {}
-    });
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
     tx
 }
 
@@ -65,7 +63,11 @@ async fn compare_validators_rpc_vs_lightclient() {
         .get_era_stakers_overview(query_era)
         .await
         .expect("Failed to fetch era stakers via RPC");
-    println!("RPC: Found {} era stakers for era {}", rpc_exposures.len(), query_era);
+    println!(
+        "RPC: Found {} era stakers for era {}",
+        rpc_exposures.len(),
+        query_era
+    );
 
     // Now connect via Light Client
     println!("\n--- Connecting via Light Client ---");
@@ -76,14 +78,15 @@ async fn compare_validators_rpc_vs_lightclient() {
         rpc_endpoints: RpcEndpoints::default(),
     };
 
-    let lc_client = match ChainClient::connect(TEST_NETWORK, &lc_config, create_status_channel()).await {
-        Ok(client) => client,
-        Err(e) => {
-            println!("Light client connection failed: {}", e);
-            println!("This test requires light client support.");
-            return;
-        }
-    };
+    let lc_client =
+        match ChainClient::connect(TEST_NETWORK, &lc_config, create_status_channel()).await {
+            Ok(client) => client,
+            Err(e) => {
+                println!("Light client connection failed: {}", e);
+                println!("This test requires light client support.");
+                return;
+            }
+        };
 
     println!("Light client connected to {}", TEST_NETWORK);
 
@@ -121,7 +124,11 @@ async fn compare_validators_rpc_vs_lightclient() {
     println!("\n--- Fetching era stakers via Light Client ---");
     let lc_exposures = match lc_client.get_era_stakers_overview(query_era).await {
         Ok(e) => {
-            println!("Light Client: Found {} era stakers for era {}", e.len(), query_era);
+            println!(
+                "Light Client: Found {} era stakers for era {}",
+                e.len(),
+                query_era
+            );
             e
         }
         Err(e) => {
@@ -136,19 +143,38 @@ async fn compare_validators_rpc_vs_lightclient() {
     println!("========================================\n");
 
     // Validators comparison
-    let rpc_validator_addrs: HashSet<_> = rpc_validators.iter().map(|v| v.address.to_string()).collect();
-    let lc_iter_addrs: HashSet<_> = lc_validators_iter.iter().map(|v| v.address.to_string()).collect();
-    let lc_validator_addrs: HashSet<_> = lc_validators.iter().map(|v| v.address.to_string()).collect();
+    let rpc_validator_addrs: HashSet<_> = rpc_validators
+        .iter()
+        .map(|v| v.address.to_string())
+        .collect();
+    let lc_iter_addrs: HashSet<_> = lc_validators_iter
+        .iter()
+        .map(|v| v.address.to_string())
+        .collect();
+    let lc_validator_addrs: HashSet<_> = lc_validators
+        .iter()
+        .map(|v| v.address.to_string())
+        .collect();
 
     println!("VALIDATORS:");
     println!("  RPC count:             {}", rpc_validators.len());
     println!("  LC iteration count:    {}", lc_validators_iter.len());
     println!("  LC multi-source count: {}", lc_validators.len());
-    println!("  Diff (RPC vs iter):    {}", rpc_validators.len() as i64 - lc_validators_iter.len() as i64);
-    println!("  Diff (RPC vs multi):   {}", rpc_validators.len() as i64 - lc_validators.len() as i64);
+    println!(
+        "  Diff (RPC vs iter):    {}",
+        rpc_validators.len() as i64 - lc_validators_iter.len() as i64
+    );
+    println!(
+        "  Diff (RPC vs multi):   {}",
+        rpc_validators.len() as i64 - lc_validators.len() as i64
+    );
 
-    let missing_in_lc: Vec<_> = rpc_validator_addrs.difference(&lc_validator_addrs).collect();
-    let extra_in_lc: Vec<_> = lc_validator_addrs.difference(&rpc_validator_addrs).collect();
+    let missing_in_lc: Vec<_> = rpc_validator_addrs
+        .difference(&lc_validator_addrs)
+        .collect();
+    let extra_in_lc: Vec<_> = lc_validator_addrs
+        .difference(&rpc_validator_addrs)
+        .collect();
 
     if !missing_in_lc.is_empty() {
         println!("  Missing in LC:      {} validators", missing_in_lc.len());
@@ -163,33 +189,51 @@ async fn compare_validators_rpc_vs_lightclient() {
     }
 
     // Era stakers comparison
-    let rpc_staker_addrs: HashSet<_> = rpc_exposures.iter().map(|e| e.address.to_string()).collect();
+    let rpc_staker_addrs: HashSet<_> = rpc_exposures
+        .iter()
+        .map(|e| e.address.to_string())
+        .collect();
     let lc_staker_addrs: HashSet<_> = lc_exposures.iter().map(|e| e.address.to_string()).collect();
 
     println!("\nERA STAKERS (era {}):", query_era);
     println!("  RPC count:          {}", rpc_exposures.len());
     println!("  Light Client count: {}", lc_exposures.len());
-    println!("  Difference:         {}", rpc_exposures.len() as i64 - lc_exposures.len() as i64);
+    println!(
+        "  Difference:         {}",
+        rpc_exposures.len() as i64 - lc_exposures.len() as i64
+    );
 
     let missing_stakers_in_lc: Vec<_> = rpc_staker_addrs.difference(&lc_staker_addrs).collect();
     let extra_stakers_in_lc: Vec<_> = lc_staker_addrs.difference(&rpc_staker_addrs).collect();
 
     if !missing_stakers_in_lc.is_empty() {
-        println!("  Missing in LC:      {} stakers", missing_stakers_in_lc.len());
+        println!(
+            "  Missing in LC:      {} stakers",
+            missing_stakers_in_lc.len()
+        );
     }
     if !extra_stakers_in_lc.is_empty() {
-        println!("  Extra in LC:        {} stakers", extra_stakers_in_lc.len());
+        println!(
+            "  Extra in LC:        {} stakers",
+            extra_stakers_in_lc.len()
+        );
     }
 
     // Commission comparison for validators present in both
     println!("\nCOMMISSION CHECK (validators in both sets):");
-    let common_validators: HashSet<_> = rpc_validator_addrs.intersection(&lc_validator_addrs).collect();
+    let common_validators: HashSet<_> = rpc_validator_addrs
+        .intersection(&lc_validator_addrs)
+        .collect();
     println!("  Common validators: {}", common_validators.len());
 
     let mut commission_mismatches = 0;
     for addr in common_validators.iter().take(10) {
-        let rpc_v = rpc_validators.iter().find(|v| &v.address.to_string() == *addr);
-        let lc_v = lc_validators.iter().find(|v| &v.address.to_string() == *addr);
+        let rpc_v = rpc_validators
+            .iter()
+            .find(|v| &v.address.to_string() == *addr);
+        let lc_v = lc_validators
+            .iter()
+            .find(|v| &v.address.to_string() == *addr);
 
         if let (Some(rpc_v), Some(lc_v)) = (rpc_v, lc_v) {
             if (rpc_v.preferences.commission - lc_v.preferences.commission).abs() > 0.0001 {
@@ -213,19 +257,28 @@ async fn compare_validators_rpc_vs_lightclient() {
     println!("========================================\n");
 
     let validators_match = rpc_validators.len() == lc_validators.len() && missing_in_lc.is_empty();
-    let stakers_match = rpc_exposures.len() == lc_exposures.len() && missing_stakers_in_lc.is_empty();
+    let stakers_match =
+        rpc_exposures.len() == lc_exposures.len() && missing_stakers_in_lc.is_empty();
 
     if validators_match && stakers_match {
         println!("✓ SUCCESS: RPC and Light Client return identical data");
     } else {
         println!("✗ MISMATCH DETECTED:");
         if !validators_match {
-            println!("  - Validators: RPC has {}, LC has {} ({} missing)",
-                rpc_validators.len(), lc_validators.len(), missing_in_lc.len());
+            println!(
+                "  - Validators: RPC has {}, LC has {} ({} missing)",
+                rpc_validators.len(),
+                lc_validators.len(),
+                missing_in_lc.len()
+            );
         }
         if !stakers_match {
-            println!("  - Era stakers: RPC has {}, LC has {} ({} missing)",
-                rpc_exposures.len(), lc_exposures.len(), missing_stakers_in_lc.len());
+            println!(
+                "  - Era stakers: RPC has {}, LC has {} ({} missing)",
+                rpc_exposures.len(),
+                lc_exposures.len(),
+                missing_stakers_in_lc.len()
+            );
         }
     }
 

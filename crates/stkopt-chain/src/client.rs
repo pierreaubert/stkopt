@@ -156,7 +156,8 @@ impl ChainClient {
 
         // Connect using light client - this fetches chain specs and establishes
         // P2P connections to relay chain and Asset Hub
-        let light_client_conns = std::sync::Arc::new(LightClientConnections::connect(network).await?);
+        let light_client_conns =
+            std::sync::Arc::new(LightClientConnections::connect(network).await?);
 
         let _ = status_tx.send(ConnectionStatus::Connected).await;
 
@@ -401,7 +402,11 @@ impl ChainClient {
     /// Returns a new ChainClient instance with a fresh connection.
     /// Call this when you detect persistent connection errors.
     pub async fn reconnect(&self) -> Result<Self, ChainError> {
-        tracing::info!("Attempting to reconnect to {} ({})...", self.network, self.connection_mode);
+        tracing::info!(
+            "Attempting to reconnect to {} ({})...",
+            self.network,
+            self.connection_mode
+        );
         let _ = self.status_tx.send(ConnectionStatus::Connecting).await;
 
         match self.connection_mode {
@@ -419,6 +424,32 @@ impl ChainClient {
         self.get_latest_block().await.is_ok()
     }
 
+    /// Submit a signed extrinsic to the network.
+    ///
+    /// Returns a stream of transaction status updates.
+    pub async fn submit_signed_extrinsic(
+        &self,
+        encoded: &[u8],
+    ) -> Result<TxSubmissionProgress, ChainError> {
+        tracing::info!(
+            "Submitting signed extrinsic ({} bytes) to {}",
+            encoded.len(),
+            self.network
+        );
+
+        // Submit via backend which returns a stream of transaction status updates
+        let status_stream = self.client.backend().submit_transaction(encoded).await?;
+
+        // Calculate the extrinsic hash for logging
+        let tx_hash = sp_crypto_hashing::blake2_256(encoded);
+        tracing::info!("Transaction submitted, hash: 0x{}", hex::encode(tx_hash));
+
+        Ok(TxSubmissionProgress {
+            tx_hash,
+            status_stream: Box::pin(status_stream),
+        })
+    }
+
     /// Connect to People chain for identity queries.
     ///
     /// Uses light client if available (when main connection is via light client),
@@ -426,7 +457,10 @@ impl ChainClient {
     pub async fn connect_people_chain(&self) -> Result<OnlineClient<PolkadotConfig>, ChainError> {
         // If we have light client connections, use them for People chain too
         if let Some(ref lc_conns) = self.light_client_conns {
-            tracing::info!("Connecting to {} People chain via light client...", self.network);
+            tracing::info!(
+                "Connecting to {} People chain via light client...",
+                self.network
+            );
             return lc_conns.connect_people_chain().await;
         }
 
@@ -434,6 +468,162 @@ impl ChainClient {
         tracing::info!("Connecting to {} People chain via RPC...", self.network);
         connect_people_chain_rpc(self.network, self.rpc_endpoints.people.as_deref()).await
     }
+}
+
+use futures::Stream;
+use std::pin::Pin;
+use subxt::backend::TransactionStatus;
+
+/// Progress of a submitted transaction.
+pub struct TxSubmissionProgress {
+    /// The transaction hash (blake2-256 of encoded extrinsic).
+    pub tx_hash: [u8; 32],
+    /// Stream of status updates.
+    pub status_stream: Pin<
+        Box<
+            dyn Stream<
+                    Item = Result<TransactionStatus<subxt::config::substrate::H256>, subxt::Error>,
+                > + Send,
+        >,
+    >,
+}
+
+impl TxSubmissionProgress {
+    /// Get the transaction hash.
+    pub fn tx_hash(&self) -> [u8; 32] {
+        self.tx_hash
+    }
+
+    /// Wait for the transaction to be included in a block.
+    /// Returns the block hash when included.
+    pub async fn wait_for_in_block(mut self) -> Result<TxInBlockResult, ChainError> {
+        use futures::StreamExt;
+
+        while let Some(status) = self.status_stream.next().await {
+            match status? {
+                TransactionStatus::InBestBlock { hash } => {
+                    let block_hash: [u8; 32] = hash.hash().0;
+                    tracing::info!("Transaction in best block: 0x{}", hex::encode(block_hash));
+                    return Ok(TxInBlockResult {
+                        tx_hash: self.tx_hash,
+                        block_hash,
+                        finalized: false,
+                    });
+                }
+                TransactionStatus::InFinalizedBlock { hash } => {
+                    let block_hash: [u8; 32] = hash.hash().0;
+                    tracing::info!(
+                        "Transaction finalized in block: 0x{}",
+                        hex::encode(block_hash)
+                    );
+                    return Ok(TxInBlockResult {
+                        tx_hash: self.tx_hash,
+                        block_hash,
+                        finalized: true,
+                    });
+                }
+                TransactionStatus::Dropped { message } => {
+                    tracing::warn!("Transaction dropped: {}", message);
+                    return Err(ChainError::InvalidData(format!(
+                        "Transaction dropped: {}",
+                        message
+                    )));
+                }
+                TransactionStatus::Invalid { message } => {
+                    tracing::error!("Transaction invalid: {}", message);
+                    return Err(ChainError::InvalidData(format!(
+                        "Transaction invalid: {}",
+                        message
+                    )));
+                }
+                TransactionStatus::Error { message } => {
+                    tracing::error!("Transaction error: {}", message);
+                    return Err(ChainError::InvalidData(format!(
+                        "Transaction error: {}",
+                        message
+                    )));
+                }
+                TransactionStatus::Validated => {
+                    tracing::debug!("Transaction validated");
+                }
+                TransactionStatus::Broadcasted { .. } => {
+                    tracing::debug!("Transaction broadcasted");
+                }
+                TransactionStatus::NoLongerInBestBlock => {
+                    tracing::debug!("Transaction no longer in best block, waiting...");
+                }
+            }
+        }
+
+        Err(ChainError::InvalidData(
+            "Transaction stream ended unexpectedly".to_string(),
+        ))
+    }
+
+    /// Wait for the transaction to be finalized.
+    /// Returns the block hash when finalized.
+    pub async fn wait_for_finalized(mut self) -> Result<TxInBlockResult, ChainError> {
+        use futures::StreamExt;
+
+        while let Some(status) = self.status_stream.next().await {
+            match status? {
+                TransactionStatus::InFinalizedBlock { hash } => {
+                    let block_hash: [u8; 32] = hash.hash().0;
+                    tracing::info!(
+                        "Transaction finalized in block: 0x{}",
+                        hex::encode(block_hash)
+                    );
+                    return Ok(TxInBlockResult {
+                        tx_hash: self.tx_hash,
+                        block_hash,
+                        finalized: true,
+                    });
+                }
+                TransactionStatus::Dropped { message } => {
+                    tracing::warn!("Transaction dropped: {}", message);
+                    return Err(ChainError::InvalidData(format!(
+                        "Transaction dropped: {}",
+                        message
+                    )));
+                }
+                TransactionStatus::Invalid { message } => {
+                    tracing::error!("Transaction invalid: {}", message);
+                    return Err(ChainError::InvalidData(format!(
+                        "Transaction invalid: {}",
+                        message
+                    )));
+                }
+                TransactionStatus::Error { message } => {
+                    tracing::error!("Transaction error: {}", message);
+                    return Err(ChainError::InvalidData(format!(
+                        "Transaction error: {}",
+                        message
+                    )));
+                }
+                TransactionStatus::Validated
+                | TransactionStatus::Broadcasted { .. }
+                | TransactionStatus::InBestBlock { .. }
+                | TransactionStatus::NoLongerInBestBlock => {
+                    // Continue waiting for finalization
+                }
+            }
+        }
+
+        Err(ChainError::InvalidData(
+            "Transaction stream ended unexpectedly".to_string(),
+        ))
+    }
+}
+
+/// Result when a transaction is included in a block.
+#[derive(Debug, Clone)]
+pub struct TxInBlockResult {
+    /// The transaction hash.
+    pub tx_hash: [u8; 32],
+    /// The block hash where the transaction was included.
+    pub block_hash: [u8; 32],
+    /// Whether the block is finalized.
+    pub finalized: bool,
 }
 
 /// Connect to a network's People chain using WebSocket RPC.

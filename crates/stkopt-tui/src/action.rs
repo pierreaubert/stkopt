@@ -2,7 +2,7 @@
 
 use stkopt_chain::{
     AccountBalance, ChainInfo, NominatorInfo, PoolMembership, PoolState, StakingLedger,
-    ValidatorExposure, ValidatorInfo,
+    UnsignedPayload, ValidatorExposure, ValidatorInfo,
 };
 use stkopt_core::{ConnectionStatus, EraIndex, EraInfo, Network, OptimizationResult};
 use subxt::utils::AccountId32;
@@ -80,6 +80,56 @@ pub struct TransactionInfo {
     pub include_metadata_hash: bool,
 }
 
+/// Status of transaction submission.
+#[derive(Debug, Clone)]
+pub enum TxSubmissionStatus {
+    /// Waiting to scan signature QR code.
+    WaitingForSignature,
+    /// Signature scanned, ready to submit.
+    ReadyToSubmit,
+    /// Submitting to network.
+    Submitting,
+    /// Included in a block (not yet finalized).
+    InBlock { block_hash: [u8; 32] },
+    /// Finalized in a block.
+    Finalized { block_hash: [u8; 32] },
+    /// Submission failed.
+    Failed(String),
+}
+
+/// QR scan status for visual feedback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QrScanStatus {
+    /// Scanning, no QR detected.
+    Scanning,
+    /// QR code detected but not decoded.
+    Detected,
+    /// Successfully decoded.
+    Success,
+}
+
+/// Pending unsigned transaction (waiting for signature from Vault).
+#[derive(Debug, Clone)]
+pub struct PendingUnsignedTx {
+    /// The unsigned payload.
+    pub payload: UnsignedPayload,
+    /// The signer account.
+    pub signer: AccountId32,
+}
+
+/// Signed transaction ready for submission.
+#[derive(Debug, Clone)]
+pub struct PendingTransaction {
+    /// The unsigned payload (for reference).
+    pub description: String,
+    /// The signed extrinsic bytes.
+    pub signed_extrinsic: Vec<u8>,
+    /// The transaction hash.
+    pub tx_hash: [u8; 32],
+    /// Current submission status.
+    pub status: TxSubmissionStatus,
+}
+
 /// Actions that can update application state.
 #[derive(Debug, Clone)]
 pub enum Action {
@@ -104,8 +154,8 @@ pub enum Action {
     SetDisplayValidators(Vec<DisplayValidator>),
     /// Set display pools (aggregated data).
     SetDisplayPools(Vec<DisplayPool>),
-    /// Set loading progress.
-    SetLoadingProgress(f32),
+    /// Set loading progress (progress 0.0-1.0, bytes_loaded, estimated_total_bytes).
+    SetLoadingProgress(f32, Option<u64>, Option<u64>),
     /// Set the watched account address.
     SetWatchedAccount(AccountId32),
     /// Set account status (balance, staking, nominations).
@@ -126,6 +176,24 @@ pub enum Action {
     GenerateNominationQR,
     /// Set QR code data to display (raw bytes + transaction info).
     SetQRData(Option<Vec<u8>>, Option<TransactionInfo>),
+    /// Store the pending unsigned transaction for later signature.
+    SetPendingUnsignedTx(Option<PendingUnsignedTx>),
+    /// Start scanning for signed transaction QR from Vault.
+    StartSignatureScan,
+    /// Stop scanning for signature.
+    StopSignatureScan,
+    /// Signature scanned from Vault QR code (raw bytes).
+    SignatureScanned(Vec<u8>),
+    /// QR scan failed with error message.
+    QrScanFailed(String),
+    /// Update QR scan status for visual feedback.
+    UpdateScanStatus(QrScanStatus),
+    /// Submit the signed transaction to the network.
+    SubmitTransaction,
+    /// Update transaction submission status.
+    SetTxStatus(TxSubmissionStatus),
+    /// Clear the pending transaction.
+    ClearPendingTx,
     /// Set staking history for the watched account (replaces all).
     SetStakingHistory(Vec<StakingHistoryPoint>),
     /// Add a single staking history point (streaming).
@@ -143,6 +211,10 @@ pub enum Action {
     SelectAddressBookEntry(usize),
     /// Remove an account from the address book and purge its history.
     RemoveAccount(String),
+    /// Validate an account address and show error if invalid.
+    ValidateAccount(String),
+    /// Clear the validation error message.
+    ClearValidationError,
     /// Quit the application.
     #[allow(dead_code)]
     Quit,

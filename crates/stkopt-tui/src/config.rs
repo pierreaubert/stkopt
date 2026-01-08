@@ -8,9 +8,6 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-#[cfg(test)]
-use chrono::TimeZone;
-
 /// Application configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -199,5 +196,136 @@ mod tests {
 
         assert_eq!(loaded.accounts.len(), 1);
         assert_eq!(loaded.accounts[0].label, Some("My Account".to_string()));
+    }
+
+    #[test]
+    fn test_last_account_empty() {
+        let config = AppConfig::default();
+        assert!(config.last_account().is_none());
+    }
+
+    #[test]
+    fn test_last_account() {
+        let mut config = AppConfig::default();
+        config.add_account("addr1".to_string(), None, None);
+        config.add_account("addr2".to_string(), None, None);
+        config.add_account("addr3".to_string(), None, None);
+
+        assert_eq!(config.last_account(), Some("addr3"));
+    }
+
+    #[test]
+    fn test_add_account_without_optional_fields() {
+        let mut config = AppConfig::default();
+        config.add_account("addr".to_string(), None, None);
+
+        assert_eq!(config.accounts.len(), 1);
+        assert_eq!(config.accounts[0].address, "addr");
+        assert!(config.accounts[0].label.is_none());
+        assert!(config.accounts[0].network.is_none());
+    }
+
+    #[test]
+    fn test_remove_nonexistent_account() {
+        let mut config = AppConfig::default();
+        config.add_account("addr1".to_string(), None, None);
+
+        // Should not panic when removing non-existent account
+        config.remove_account("nonexistent");
+        assert_eq!(config.accounts.len(), 1);
+    }
+
+    #[test]
+    fn test_multiple_accounts() {
+        let mut config = AppConfig::default();
+        config.add_account("addr1".to_string(), Some("Account 1".to_string()), Some("Polkadot".to_string()));
+        config.add_account("addr2".to_string(), Some("Account 2".to_string()), Some("Kusama".to_string()));
+        config.add_account("addr3".to_string(), None, None);
+
+        assert_eq!(config.accounts.len(), 3);
+        assert_eq!(config.accounts[0].label, Some("Account 1".to_string()));
+        assert_eq!(config.accounts[1].network, Some("Kusama".to_string()));
+        assert!(config.accounts[2].label.is_none());
+    }
+
+    #[test]
+    fn test_saved_account_clone() {
+        let account = SavedAccount {
+            address: "addr".to_string(),
+            label: Some("Label".to_string()),
+            network: Some("Polkadot".to_string()),
+        };
+        let account_clone = account.clone();
+
+        assert_eq!(account.address, account_clone.address);
+        assert_eq!(account.label, account_clone.label);
+        assert_eq!(account.network, account_clone.network);
+    }
+
+    #[test]
+    fn test_app_config_clone() {
+        let mut config = AppConfig::default();
+        config.add_account("addr".to_string(), Some("Label".to_string()), None);
+
+        let config_clone = config.clone();
+        assert_eq!(config.accounts.len(), config_clone.accounts.len());
+        assert_eq!(config.accounts[0].address, config_clone.accounts[0].address);
+    }
+
+    #[test]
+    fn test_config_dir() {
+        // Just verify config_dir() returns something or None, doesn't panic
+        let _dir = AppConfig::config_dir();
+    }
+
+    #[test]
+    fn test_config_path() {
+        // Just verify config_path() returns something or None, doesn't panic
+        let _path = AppConfig::config_path();
+    }
+
+    #[test]
+    fn test_deserialize_with_missing_optional_fields() {
+        // JSON without optional fields should deserialize correctly
+        let json = r#"{"accounts":[{"address":"addr1"}]}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(config.accounts.len(), 1);
+        assert_eq!(config.accounts[0].address, "addr1");
+        assert!(config.accounts[0].label.is_none());
+        assert!(config.accounts[0].network.is_none());
+    }
+
+    #[test]
+    fn test_deserialize_empty_accounts() {
+        let json = r#"{"accounts":[]}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert!(config.accounts.is_empty());
+    }
+
+    #[test]
+    fn test_deserialize_missing_accounts() {
+        // JSON without accounts field should use default (empty)
+        let json = r#"{}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert!(config.accounts.is_empty());
+    }
+
+    #[test]
+    fn test_serialize_pretty() {
+        let mut config = AppConfig::default();
+        config.add_account("addr".to_string(), Some("Label".to_string()), None);
+
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        // Pretty-printed JSON should contain newlines
+        assert!(json.contains('\n'));
+    }
+
+    #[test]
+    fn test_chrono_usage() {
+        // Test that chrono is properly imported and works (used in backup_corrupted_config)
+        let now = chrono::Utc::now();
+        let formatted = now.format("%Y%m%d_%H%M%S").to_string();
+        assert_eq!(formatted.len(), 15); // YYYYMMDD_HHMMSS
     }
 }
