@@ -86,7 +86,9 @@ impl ChainClient {
 
         let (era, block_hash) = if use_mortal_era {
             let (block_number, block_hash) = self.get_latest_block().await?;
-            let period = 128;
+            // Period of 2048 blocks gives ~3.4 hours on 6-second block chains
+            // This gives users plenty of time to sign with Vault and submit
+            let period = 2048;
             let phase = block_number as u64 % period;
             (Era::Mortal { period, phase }, block_hash)
         } else {
@@ -647,8 +649,8 @@ pub enum TxStatus {
 ///    - First byte: signature type (0x01 = Sr25519)
 ///    - Following 64 bytes: signature
 ///
-/// Returns the 64-byte signature if valid.
-pub fn decode_vault_signature(qr_data: &[u8]) -> Result<[u8; 64], String> {
+/// Returns the 64-byte signature and its type if valid.
+pub fn decode_vault_signature(qr_data: &[u8]) -> Result<DecodedSignature, String> {
     // Try to detect if this is hex-encoded (ASCII hex characters)
     let is_hex = qr_data.iter().all(|b| b.is_ascii_hexdigit());
 
@@ -671,12 +673,18 @@ pub fn decode_vault_signature(qr_data: &[u8]) -> Result<[u8; 64], String> {
     // Check for UOS format (starts with 0x53 'S')
     if binary_data.len() >= 67 && binary_data[0] == 0x53 {
         // UOS format: 0x53 + crypto_type + response_type + signature
-        if binary_data[1] != 0x01 {
-            return Err(format!(
-                "Unsupported crypto type: 0x{:02x}, expected 0x01 (Sr25519)",
-                binary_data[1]
-            ));
-        }
+        let crypto_type = binary_data[1];
+        let sig_type = match crypto_type {
+            0x00 => SignatureType::Ed25519,
+            0x01 => SignatureType::Sr25519,
+            0x02 => SignatureType::Ecdsa,
+            _ => {
+                return Err(format!(
+                    "Unsupported crypto type: 0x{:02x}",
+                    crypto_type
+                ));
+            }
+        };
         if binary_data[2] != 0x00 {
             return Err(format!(
                 "Not a signature response: 0x{:02x}, expected 0x00",
@@ -685,34 +693,36 @@ pub fn decode_vault_signature(qr_data: &[u8]) -> Result<[u8; 64], String> {
         }
         let mut signature = [0u8; 64];
         signature.copy_from_slice(&binary_data[3..67]);
-        tracing::info!("Decoded UOS signature: {} bytes", signature.len());
-        return Ok(signature);
+        tracing::info!("Decoded UOS {:?} signature: {} bytes", sig_type, signature.len());
+        return Ok(DecodedSignature { signature, sig_type });
     }
 
     // Check for simple format: crypto_type (1 byte) + signature (64 bytes)
     if binary_data.len() >= 65 {
         let crypto_type = binary_data[0];
-        if crypto_type == 0x01 {
-            // Sr25519
+        let sig_type = match crypto_type {
+            0x00 => Some(SignatureType::Ed25519),
+            0x01 => Some(SignatureType::Sr25519),
+            0x02 => Some(SignatureType::Ecdsa),
+            _ => None,
+        };
+        if let Some(sig_type) = sig_type {
             let mut signature = [0u8; 64];
             signature.copy_from_slice(&binary_data[1..65]);
-            tracing::info!("Decoded Sr25519 signature: {} bytes", signature.len());
-            return Ok(signature);
-        } else if crypto_type == 0x00 {
-            // Ed25519
-            let mut signature = [0u8; 64];
-            signature.copy_from_slice(&binary_data[1..65]);
-            tracing::info!("Decoded Ed25519 signature: {} bytes", signature.len());
-            return Ok(signature);
+            tracing::info!("Decoded {:?} signature: {} bytes", sig_type, signature.len());
+            return Ok(DecodedSignature { signature, sig_type });
         }
     }
 
-    // Check for raw 64-byte signature (no prefix)
+    // Check for raw 64-byte signature (no prefix) - assume Sr25519 as default
     if binary_data.len() == 64 {
         let mut signature = [0u8; 64];
         signature.copy_from_slice(&binary_data);
-        tracing::info!("Decoded raw signature: {} bytes", signature.len());
-        return Ok(signature);
+        tracing::info!("Decoded raw signature (assuming Sr25519): {} bytes", signature.len());
+        return Ok(DecodedSignature {
+            signature,
+            sig_type: SignatureType::Sr25519,
+        });
     }
 
     Err(format!(
@@ -722,19 +732,39 @@ pub fn decode_vault_signature(qr_data: &[u8]) -> Result<[u8; 64], String> {
     ))
 }
 
+/// Decoded signature with its cryptographic type.
+#[derive(Debug, Clone)]
+pub struct DecodedSignature {
+    /// The 64-byte signature.
+    pub signature: [u8; 64],
+    /// The signature type (Ed25519, Sr25519, or Ecdsa).
+    pub sig_type: SignatureType,
+}
+
+/// Signature cryptographic type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignatureType {
+    /// Ed25519 signature (0x00 in MultiSignature)
+    Ed25519,
+    /// Sr25519 signature (0x01 in MultiSignature)
+    Sr25519,
+    /// ECDSA signature (0x02 in MultiSignature)
+    Ecdsa,
+}
+
 /// Construct a signed extrinsic from the unsigned payload and signature.
 ///
 /// Extrinsic format (signed):
 /// - Length prefix (compact encoded)
 /// - Extrinsic version: 0x84 (signed, version 4)
 /// - Signer address (MultiAddress::Id)
-/// - Signature (MultiSignature::Sr25519)
+/// - Signature (MultiSignature)
 /// - Extra (signed extensions data)
 /// - Call data
 pub fn build_signed_extrinsic(
     payload: &UnsignedPayload,
     signer: &AccountId32,
-    signature: &[u8; 64],
+    decoded_sig: &DecodedSignature,
 ) -> SignedExtrinsic {
     let mut extrinsic = Vec::new();
 
@@ -748,9 +778,15 @@ pub fn build_signed_extrinsic(
     body.push(0x00);
     body.extend_from_slice(signer.as_ref());
 
-    // Signature: MultiSignature::Sr25519 (0x01 variant + 64 byte signature)
-    body.push(0x01);
-    body.extend_from_slice(signature);
+    // Signature: MultiSignature (variant + 64 byte signature)
+    // Ed25519 = 0x00, Sr25519 = 0x01, Ecdsa = 0x02
+    let sig_variant = match decoded_sig.sig_type {
+        SignatureType::Ed25519 => 0x00,
+        SignatureType::Sr25519 => 0x01,
+        SignatureType::Ecdsa => 0x02,
+    };
+    body.push(sig_variant);
+    body.extend_from_slice(&decoded_sig.signature);
 
     // Extra: signed extensions (same order as signing payload)
 
@@ -804,6 +840,13 @@ pub fn build_signed_extrinsic(
         "Built signed extrinsic: {} bytes, hash: 0x{}",
         extrinsic.len(),
         hex::encode(hash)
+    );
+    tracing::debug!(
+        "Extrinsic details: signer={}, nonce={}, era={:?}, call_data={} bytes",
+        signer,
+        payload.nonce,
+        payload.era,
+        payload.call_data.len()
     );
 
     SignedExtrinsic {
@@ -987,8 +1030,9 @@ mod tests {
         let result = decode_vault_signature(&qr_data);
         assert!(result.is_ok());
 
-        let sig = result.unwrap();
-        assert_eq!(sig, [0xAB; 64]);
+        let decoded = result.unwrap();
+        assert_eq!(decoded.signature, [0xAB; 64]);
+        assert_eq!(decoded.sig_type, SignatureType::Sr25519);
     }
 
     #[test]
@@ -1008,7 +1052,9 @@ mod tests {
 
         let result = decode_vault_signature(&qr_data);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), [0xAB; 64]);
+        let decoded = result.unwrap();
+        assert_eq!(decoded.signature, [0xAB; 64]);
+        assert_eq!(decoded.sig_type, SignatureType::Sr25519);
     }
 
     #[test]
@@ -1019,7 +1065,9 @@ mod tests {
 
         let result = decode_vault_signature(&qr_data);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), [0xAB; 64]);
+        let decoded = result.unwrap();
+        assert_eq!(decoded.signature, [0xAB; 64]);
+        assert_eq!(decoded.sig_type, SignatureType::Ed25519);
     }
 
     #[test]
@@ -1029,7 +1077,9 @@ mod tests {
 
         let result = decode_vault_signature(&qr_data);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), [0xCD; 64]);
+        let decoded = result.unwrap();
+        assert_eq!(decoded.signature, [0xCD; 64]);
+        assert_eq!(decoded.sig_type, SignatureType::Sr25519); // Default to Sr25519
     }
 
     #[test]
@@ -1040,12 +1090,27 @@ mod tests {
 
         let result = decode_vault_signature(hex_str.as_bytes());
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), signature);
+        let decoded = result.unwrap();
+        assert_eq!(decoded.signature, signature);
+        assert_eq!(decoded.sig_type, SignatureType::Sr25519);
+    }
+
+    #[test]
+    fn test_decode_vault_signature_ecdsa() {
+        // UOS format with ECDSA (0x02)
+        let mut qr_data = vec![0x53, 0x02, 0x00];
+        qr_data.extend_from_slice(&[0xAB; 64]);
+
+        let result = decode_vault_signature(&qr_data);
+        assert!(result.is_ok());
+        let decoded = result.unwrap();
+        assert_eq!(decoded.signature, [0xAB; 64]);
+        assert_eq!(decoded.sig_type, SignatureType::Ecdsa);
     }
 
     #[test]
     fn test_decode_vault_signature_invalid_crypto_type() {
-        let mut qr_data = vec![0x53, 0x02, 0x00]; // Wrong crypto type in UOS format
+        let mut qr_data = vec![0x53, 0x99, 0x00]; // Unknown crypto type in UOS format
         qr_data.extend_from_slice(&[0xAB; 64]);
 
         let result = decode_vault_signature(&qr_data);
@@ -1067,9 +1132,12 @@ mod tests {
     fn test_build_signed_extrinsic_mortal() {
         let payload = make_test_payload();
         let signer = make_test_signer();
-        let signature = [0xCD; 64];
+        let decoded_sig = DecodedSignature {
+            signature: [0xCD; 64],
+            sig_type: SignatureType::Sr25519,
+        };
 
-        let signed = build_signed_extrinsic(&payload, &signer, &signature);
+        let signed = build_signed_extrinsic(&payload, &signer, &decoded_sig);
 
         // Check basic structure
         assert!(!signed.encoded.is_empty());
@@ -1092,9 +1160,12 @@ mod tests {
         let mut payload = make_test_payload();
         payload.era = Era::Immortal;
         let signer = make_test_signer();
-        let signature = [0xCD; 64];
+        let decoded_sig = DecodedSignature {
+            signature: [0xCD; 64],
+            sig_type: SignatureType::Sr25519,
+        };
 
-        let signed = build_signed_extrinsic(&payload, &signer, &signature);
+        let signed = build_signed_extrinsic(&payload, &signer, &decoded_sig);
 
         assert!(!signed.encoded.is_empty());
     }
@@ -1104,9 +1175,12 @@ mod tests {
         let mut payload = make_test_payload();
         payload.include_metadata_hash = true;
         let signer = make_test_signer();
-        let signature = [0xCD; 64];
+        let decoded_sig = DecodedSignature {
+            signature: [0xCD; 64],
+            sig_type: SignatureType::Sr25519,
+        };
 
-        let signed = build_signed_extrinsic(&payload, &signer, &signature);
+        let signed = build_signed_extrinsic(&payload, &signer, &decoded_sig);
 
         assert!(!signed.encoded.is_empty());
     }
@@ -1116,9 +1190,12 @@ mod tests {
         let mut payload = make_test_payload();
         payload.use_asset_payment = true;
         let signer = make_test_signer();
-        let signature = [0xCD; 64];
+        let decoded_sig = DecodedSignature {
+            signature: [0xCD; 64],
+            sig_type: SignatureType::Sr25519,
+        };
 
-        let signed = build_signed_extrinsic(&payload, &signer, &signature);
+        let signed = build_signed_extrinsic(&payload, &signer, &decoded_sig);
 
         assert!(!signed.encoded.is_empty());
     }
@@ -1127,10 +1204,13 @@ mod tests {
     fn test_signed_extrinsic_hash_deterministic() {
         let payload = make_test_payload();
         let signer = make_test_signer();
-        let signature = [0xCD; 64];
+        let decoded_sig = DecodedSignature {
+            signature: [0xCD; 64],
+            sig_type: SignatureType::Sr25519,
+        };
 
-        let signed1 = build_signed_extrinsic(&payload, &signer, &signature);
-        let signed2 = build_signed_extrinsic(&payload, &signer, &signature);
+        let signed1 = build_signed_extrinsic(&payload, &signer, &decoded_sig);
+        let signed2 = build_signed_extrinsic(&payload, &signer, &decoded_sig);
 
         // Same inputs should produce same hash
         assert_eq!(signed1.hash, signed2.hash);
@@ -1141,11 +1221,17 @@ mod tests {
     fn test_signed_extrinsic_different_signature() {
         let payload = make_test_payload();
         let signer = make_test_signer();
-        let signature1 = [0xCD; 64];
-        let signature2 = [0xEF; 64];
+        let decoded_sig1 = DecodedSignature {
+            signature: [0xCD; 64],
+            sig_type: SignatureType::Sr25519,
+        };
+        let decoded_sig2 = DecodedSignature {
+            signature: [0xEF; 64],
+            sig_type: SignatureType::Sr25519,
+        };
 
-        let signed1 = build_signed_extrinsic(&payload, &signer, &signature1);
-        let signed2 = build_signed_extrinsic(&payload, &signer, &signature2);
+        let signed1 = build_signed_extrinsic(&payload, &signer, &decoded_sig1);
+        let signed2 = build_signed_extrinsic(&payload, &signer, &decoded_sig2);
 
         // Different signatures should produce different hashes
         assert_ne!(signed1.hash, signed2.hash);
@@ -1167,9 +1253,12 @@ mod tests {
     fn test_signed_extrinsic_clone() {
         let payload = make_test_payload();
         let signer = make_test_signer();
-        let signature = [0xCD; 64];
+        let decoded_sig = DecodedSignature {
+            signature: [0xCD; 64],
+            sig_type: SignatureType::Sr25519,
+        };
 
-        let signed = build_signed_extrinsic(&payload, &signer, &signature);
+        let signed = build_signed_extrinsic(&payload, &signer, &decoded_sig);
         let signed_clone = signed.clone();
 
         assert_eq!(signed.encoded, signed_clone.encoded);

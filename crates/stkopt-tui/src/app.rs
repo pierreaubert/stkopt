@@ -551,14 +551,19 @@ impl App {
                     self.qr_frame = 0;
                     self.qr_modal_tab = 0;
                     self.camera_scan_status = None;
+                    self.camera_preview = None;
+                    self.qr_bounds = None;
+                    self.pending_unsigned_tx = None;
+                    self.pending_tx = None;
                     // Stop scanning if active
                     if self.scanning_signature {
                         return Some(Action::StopSignatureScan);
                     }
                 }
                 KeyCode::Tab | KeyCode::Right => {
-                    // Cycle through tabs: QR -> Details -> Scan -> QR
-                    self.qr_modal_tab = (self.qr_modal_tab + 1) % 3;
+                    // Cycle through tabs: QR -> Details -> Scan -> (Submit if present) -> QR
+                    let max_tab = if self.pending_tx.is_some() { 4 } else { 3 };
+                    self.qr_modal_tab = (self.qr_modal_tab + 1) % max_tab;
                     // Start scanning when entering Scan tab
                     if self.qr_modal_tab == 2
                         && self.pending_unsigned_tx.is_some()
@@ -577,9 +582,10 @@ impl App {
                     }
                 }
                 KeyCode::BackTab | KeyCode::Left => {
-                    // Cycle backwards
+                    // Cycle backwards: QR <- Details <- Scan <- (Submit if present) <- QR
+                    let max_tab = if self.pending_tx.is_some() { 3 } else { 2 };
                     self.qr_modal_tab = if self.qr_modal_tab == 0 {
-                        2
+                        max_tab
                     } else {
                         self.qr_modal_tab - 1
                     };
@@ -601,27 +607,20 @@ impl App {
                     }
                 }
                 // 's' to start scanning for signature (after Vault has signed) - shortcut to scan tab
-                KeyCode::Char('s') if self.pending_unsigned_tx.is_some() => {
+                KeyCode::Char('s') if self.pending_unsigned_tx.is_some() && self.pending_tx.is_none() => {
                     self.qr_modal_tab = 2;
                     self.camera_scan_status = Some(CameraScanStatus::Initializing);
                     self.camera_frames_captured = 0;
                     return Some(Action::StartSignatureScan);
                 }
-                _ => {}
-            }
-            return None;
-        }
-
-        // Handle pending transaction state
-        if let Some(ref tx) = self.pending_tx {
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => {
-                    return Some(Action::ClearPendingTx);
-                }
-                // 's' to submit the signed transaction
-                KeyCode::Char('s') | KeyCode::Enter => {
-                    if matches!(tx.status, TxSubmissionStatus::ReadyToSubmit) {
-                        return Some(Action::SubmitTransaction);
+                // 's' or Enter to submit the signed transaction (on Submit tab)
+                KeyCode::Char('s') | KeyCode::Enter
+                    if self.pending_tx.is_some() && self.qr_modal_tab == 3 =>
+                {
+                    if let Some(ref tx) = self.pending_tx {
+                        if matches!(tx.status, TxSubmissionStatus::ReadyToSubmit) {
+                            return Some(Action::SubmitTransaction);
+                        }
                     }
                 }
                 _ => {}

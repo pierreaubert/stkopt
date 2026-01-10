@@ -970,9 +970,16 @@ fn render_account_status(frame: &mut Frame, app: &mut App, area: Rect) {
     // Main: Split horizontally (Left: Info, Right: Address Book)
 
     let main_area = if app.input_mode == InputMode::EnteringAccount {
-        let input_height = if app.validation_error.is_some() { 5 } else { 3 };
-        let chunks =
-            Layout::vertical([Constraint::Length(input_height), Constraint::Min(0)]).split(area);
+        let chunks = if app.validation_error.is_some() {
+            Layout::vertical([
+                Constraint::Length(3), // Input box
+                Constraint::Length(2), // Error message
+                Constraint::Min(0),    // Rest of content
+            ])
+            .split(area)
+        } else {
+            Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(area)
+        };
 
         // Render input box
         let input = Paragraph::new(app.account_input.as_str())
@@ -1986,6 +1993,7 @@ fn render_qr_content(frame: &mut Frame, app: &App, area: Rect) {
                 // Always use multipart format (UOS headers) to ensure Vault recognizes it as binary
                 // and not text (which causes "invalid utf-8" errors starting with 'S' 0x53).
                 let dark_theme = app.theme == crate::theme::Theme::Dark;
+                let network_name = app.network.to_string();
                 render_multipart_qr(
                     &mut lines,
                     &mut qr_width,
@@ -1995,6 +2003,7 @@ fn render_qr_content(frame: &mut Frame, app: &App, area: Rect) {
                     app.qr_frame,
                     pal,
                     dark_theme,
+                    &network_name,
                 );
             }
             None => lines.push(Line::from("No Data")),
@@ -2522,6 +2531,7 @@ fn render_multipart_qr(
     current_frame: usize,
     pal: &Palette,
     dark_theme: bool,
+    network_name: &str,
 ) {
     // Input is raw binary UOS data
     let raw_bytes = data;
@@ -2591,7 +2601,7 @@ fn render_multipart_qr(
             lines.push(Line::from(""));
             lines.push(Line::from(vec![
                 Span::raw("Ensure Vault network is "),
-                Span::styled("Polkadot Asset Hub", Style::default().fg(pal.accent).bold()),
+                Span::styled(network_name.to_string(), Style::default().fg(pal.accent).bold()),
             ]));
             lines.push(Line::from(Span::styled(
                 "Scan with Polkadot Vault",
@@ -2621,6 +2631,12 @@ fn render_multipart_qr(
             lines.push(Line::from(Span::styled(
                 format!("[{}]", bar),
                 Style::default().fg(success),
+            )));
+
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Valid for ~3 hours after generation",
+                Style::default().fg(pal.muted),
             )));
         }
         Err(e) => {

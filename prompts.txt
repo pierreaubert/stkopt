@@ -68,6 +68,7 @@ we need more caching to hide the latency when we start the app with the light cl
 5. update the UI when you get data from the chain
 6. when the app start and you dont have data yet, display an ascii spinner telling people that they have to wait a bit ...
 7. display the tabs in different order with Account fist then History then Nominate then Pools and Validators
+8. Emmbed the chain specs in the binary such that the light client does not need to download them at start
 
 ## wave 4 camera
 1. use the camera to read the QR code back from Vault and get the signed transaction to submit to the chain
@@ -87,7 +88,7 @@ we need more caching to hide the latency when we start the app with the light cl
 4. since we have the network bandwidth display it on the log title line
 5. in the account view replace "Points" by the native token name (DOT, KSM etc), same in other tabs
 
-## wave qa
+## wave 6 qa
 
 2. we want to increase code coverage to 90%.
 3. make a plan to define a testing strategy. we want to test the app in 3 modes: normal, failover and history.
@@ -95,12 +96,8 @@ we need more caching to hide the latency when we start the app with the light cl
 5. update the documentation esp. how to use the app
 
 
-## wave 7
-
-1. Emmbed the chain specs in the binary such that the light client does not need to download them at start
-
-
-## wave 8 : missing features
+## wave 7 : missing features
 
 1. I want to be able to change who get's paid for staking rewards (3 options: conpounding, move to another account, etc). In the main g
 2. I want to be able to stake more or less token
+2. I want to be able to join/leave a nomination pool

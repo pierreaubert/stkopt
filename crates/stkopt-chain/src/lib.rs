@@ -22,6 +22,6 @@ pub use queries::pools::{
 };
 pub use queries::validators::{ValidatorExposure, ValidatorInfo, ValidatorPoints};
 pub use transactions::{
-    Era, RewardDestination, SignedExtrinsic, TxStatus, UnsignedPayload, build_signed_extrinsic,
-    decode_vault_signature, encode_for_qr,
+    DecodedSignature, Era, RewardDestination, SignatureType, SignedExtrinsic, TxStatus,
+    UnsignedPayload, build_signed_extrinsic, decode_vault_signature, encode_for_qr,
 };

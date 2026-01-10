@@ -221,6 +221,9 @@ async fn main() -> Result<()> {
     const STAKING_OP_CHANNEL_CAPACITY: usize = 10;
     let (staking_op_tx, staking_op_rx) = mpsc::channel::<StakingOp>(STAKING_OP_CHANNEL_CAPACITY);
 
+    // Create transaction submission channel
+    let (tx_submit_tx, tx_submit_rx) = mpsc::channel::<Vec<u8>>(4);
+
     // Cancellation sender for history loading
     let (history_cancel_tx, history_cancel_rx) = tokio::sync::watch::channel(false);
 
@@ -299,6 +302,7 @@ async fn main() -> Result<()> {
     let qr_action_tx = action_tx.clone();
     let history_action_tx = action_tx.clone();
     let staking_op_action_tx = action_tx.clone();
+    let tx_submit_action_tx = action_tx.clone();
     tokio::spawn(async move {
         chain_task(
             network,
@@ -312,6 +316,8 @@ async fn main() -> Result<()> {
             history_action_tx,
             staking_op_rx,
             staking_op_action_tx,
+            tx_submit_rx,
+            tx_submit_action_tx,
         )
         .await;
     });
@@ -600,13 +606,24 @@ async fn main() -> Result<()> {
                         );
                         // Decode the signature from Vault's QR code
                         match stkopt_chain::decode_vault_signature(signature_data) {
-                            Ok(signature) => {
+                            Ok(decoded_sig) => {
                                 if let Some(ref pending) = app.pending_unsigned_tx {
+                                    tracing::info!(
+                                        "Decoded {:?} signature from Vault",
+                                        decoded_sig.sig_type
+                                    );
+
                                     // Build the signed extrinsic
                                     let signed = stkopt_chain::build_signed_extrinsic(
                                         &pending.payload,
                                         &pending.signer,
-                                        &signature,
+                                        &decoded_sig,
+                                    );
+
+                                    tracing::info!(
+                                        "Extrinsic built: 0x{} ({} bytes)",
+                                        hex::encode(signed.hash),
+                                        signed.encoded.len()
                                     );
 
                                     // Store the pending transaction
@@ -616,14 +633,19 @@ async fn main() -> Result<()> {
                                         tx_hash: signed.hash,
                                         status: TxSubmissionStatus::ReadyToSubmit,
                                     });
+
+                                    // Stop camera and clear scanning state
+                                    if let Some(ref mut reader) = qr_reader {
+                                        reader.stop();
+                                    }
+                                    qr_reader = None;
                                     app.scanning_signature = false;
+                                    app.camera_scan_status = None;
+                                    app.camera_preview = None;
+                                    app.qr_bounds = None;
+
                                     // Switch to Submit tab (tab 3)
                                     app.qr_modal_tab = 3;
-
-                                    tracing::info!(
-                                        "Signature decoded and extrinsic built: 0x{}",
-                                        hex::encode(signed.hash)
-                                    );
                                 } else {
                                     tracing::error!("Signature received but no pending unsigned tx");
                                 }
@@ -634,24 +656,19 @@ async fn main() -> Result<()> {
                         }
                     }
                     Action::SubmitTransaction => {
-                        // Submit the signed transaction
+                        // Submit the signed transaction via chain task
                         if let Some(ref pending_tx) = app.pending_tx {
                             let extrinsic = pending_tx.signed_extrinsic.clone();
                             let _ = action_tx.send(Action::SetTxStatus(TxSubmissionStatus::Submitting)).await;
 
-                            // We need to submit via the chain task, but for now let's just log
-                            // In a real implementation, we'd send this through a channel to chain_task
                             tracing::info!(
-                                "Would submit transaction: 0x{} ({} bytes)",
+                                "Submitting transaction: 0x{} ({} bytes)",
                                 hex::encode(pending_tx.tx_hash),
                                 extrinsic.len()
                             );
 
-                            // TODO: Actually submit via chain client
-                            // For now, mark as failed since we haven't wired up the submission channel
-                            let _ = action_tx.send(Action::SetTxStatus(
-                                TxSubmissionStatus::Failed("Transaction submission not yet implemented".to_string())
-                            )).await;
+                            // Send to chain task for submission
+                            let _ = tx_submit_tx.send(extrinsic).await;
                         }
                     }
                     Action::StartSignatureScan => {
@@ -791,6 +808,8 @@ async fn chain_task(
     history_action_tx: mpsc::Sender<Action>,
     mut staking_op_rx: mpsc::Receiver<StakingOp>,
     staking_op_action_tx: mpsc::Sender<Action>,
+    mut tx_submit_rx: mpsc::Receiver<Vec<u8>>,
+    tx_submit_action_tx: mpsc::Sender<Action>,
 ) {
     use crate::action::{DisplayPool, DisplayValidator};
     use std::collections::HashMap;
@@ -1779,6 +1798,57 @@ async fn chain_task(
                             .await;
                         let _ = staking_op_action_tx
                             .send(Action::SetQRData(None, None))
+                            .await;
+                    }
+                }
+            }
+            Some(extrinsic) = tx_submit_rx.recv() => {
+                tracing::info!("Submitting signed extrinsic ({} bytes)", extrinsic.len());
+
+                match client.submit_signed_extrinsic(&extrinsic).await {
+                    Ok(progress) => {
+                        tracing::info!("Transaction submitted, waiting for inclusion...");
+
+                        // Wait for the transaction to be finalized
+                        match progress.wait_for_finalized().await {
+                            Ok(result) => {
+                                tracing::info!(
+                                    "Transaction finalized in block 0x{}",
+                                    hex::encode(result.block_hash)
+                                );
+                                let _ = tx_submit_action_tx
+                                    .send(Action::SetTxStatus(TxSubmissionStatus::Finalized {
+                                        block_hash: result.block_hash,
+                                    }))
+                                    .await;
+                            }
+                            Err(e) => {
+                                tracing::error!("Transaction failed: {}", e);
+                                let _ = tx_submit_action_tx
+                                    .send(Action::SetTxStatus(TxSubmissionStatus::Failed(
+                                        e.to_string(),
+                                    )))
+                                    .await;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let error_str = e.to_string();
+                        tracing::error!("Failed to submit transaction: {}", error_str);
+
+                        // Provide more helpful error messages for common issues
+                        let user_message = if error_str.contains("1010") || error_str.contains("Invalid Transaction") {
+                            "Transaction rejected - may be expired or already submitted. Please generate a new QR code.".to_string()
+                        } else if error_str.contains("1014") || error_str.contains("Priority") {
+                            "Transaction priority too low. Please try again.".to_string()
+                        } else if error_str.contains("1012") || error_str.contains("Pool") {
+                            "Transaction pool is full. Please try again later.".to_string()
+                        } else {
+                            error_str
+                        };
+
+                        let _ = tx_submit_action_tx
+                            .send(Action::SetTxStatus(TxSubmissionStatus::Failed(user_message)))
                             .await;
                     }
                 }

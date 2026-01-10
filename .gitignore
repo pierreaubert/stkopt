@@ -2,7 +2,6 @@
 /target
 /target-static
 
-
 # Editor
 *~
 *#
@@ -10,6 +9,9 @@
 # Logs
 *.log
 
+# Apple
+.DS_Store
+stkopt-ios
 
 # AI stuff
 GEMINI.md
