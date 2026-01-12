@@ -346,13 +346,25 @@ impl ChainClient {
             vec![Value::from_bytes(stash.clone())],
         );
 
-        let result: Option<DecodedValueThunk> = self
-            .client()
-            .storage()
-            .at_latest()
-            .await?
-            .fetch(&storage_query)
-            .await?;
+        let storage = self.client().storage().at_latest().await?;
+
+        // Light clients can fail with "Storage query errors" when they can't retrieve
+        // the storage proof. Treat this as "no nominations" rather than a fatal error.
+        let result: Option<DecodedValueThunk> = match storage.fetch(&storage_query).await {
+            Ok(r) => r,
+            Err(e) => {
+                let err_str = e.to_string();
+                if err_str.contains("Storage query errors") {
+                    tracing::debug!(
+                        "Light client storage query failed for pool {} nominations: {}",
+                        pool_id,
+                        err_str
+                    );
+                    return Ok(None);
+                }
+                return Err(e.into());
+            }
+        };
 
         let Some(value) = result else {
             return Ok(None);

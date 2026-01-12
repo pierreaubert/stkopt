@@ -1,0 +1,60 @@
+[package]
+name = "stkopt-gpui"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "stkopt-desktop"
+path = "src/main.rs"
+
+[dependencies]
+# Internal crates
+stkopt-chain.workspace = true
+stkopt-core.workspace = true
+subxt.workspace = true
+
+# GPUI framework (from zed git)
+gpui = { version = "*", git = "https://github.com/zed-industries/zed.git" }
+
+# UI components from local sotf
+gpui-ui-kit = { path = "../../../gpui-toolkit/gpui-ui-kit" }
+gpui-px = { path = "../../../gpui-toolkit/gpui-px", features = ["gpui"] }
+
+# Async runtime
+tokio = { workspace = true, features = ["full"] }
+futures.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling
+thiserror.workspace = true
+color-eyre.workspace = true
+anyhow.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# CLI
+clap.workspace = true
+
+# Utilities
+directories.workspace = true
+hex = "0.4"
+rusqlite = { workspace = true, features = ["bundled"] }
+nokhwa = { version = "0.10.10", features = ["input-native"] }
+image = { version = "0.25.9", default-features = false, features = ["jpeg", "png"] }
+rqrr = "0.10.0"
+chrono = "0.4.42"
+
+[dev-dependencies]
+# Property-based testing
+proptest = "1.4"
+
+# Async testing
+tokio-test = "0.4"
+
+# Test utilities
+pretty_assertions = "1.4"

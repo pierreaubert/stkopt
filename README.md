@@ -4,12 +4,14 @@ A terminal user interface (TUI) application for optimizing Polkadot staking. Bro
 
 ## WARNING
 
-The code is new and there has been no security review. Use at your own risk.
+- The code is new and there has been no security review. Use at your own risk.
+- If you webcam does not have a depth sensor then it is hard to get the TUI to scan the QR code (you need to be very still).
+- Subtleties like [this](https://forum.polkadot.network/t/validators-flipping-their-commision-twice-in-an-era-and-cheating-nominators/16569/3) are not yet implemented.
 
 ## Features
 
 - **Light client by default**: Uses smoldot embedded light client for fully decentralized connectivity (no trusted RPC required)
-- **Multi-network support**: Polkadot, Kusama, Westend, Paseo
+- **Multi-network support**: Polkadot, Kusama, Westend
 - **Validator browser**: View validators with APY, commission, and nomination counts
 - **Nomination pools**: Browse pools with aggregated APY
 - **Account status**: View balances, staking info, and nominations
@@ -31,12 +33,13 @@ Requires Rust 1.85 or later.
 ```bash
 git clone https://github.com/dotidx/stkopt.git
 cd stkopt
-cargo build --release
+cargo install just
+just build
 ```
 
 The binary will be at `./target/release/stkopt`.
 
-### macOS (with camera support)
+### Building for macOS with camera support
 
 QR code scanning requires camera access. On macOS, the binary must be signed with entitlements:
 
@@ -53,7 +56,7 @@ just build-macos
 
 **Camera permissions:** When you first use the QR scanner, macOS will prompt for camera access.
 
-### Building a DMG
+### Building a signed DMG on MacOS
 
 ```bash
 # Ad-hoc signed (local testing)
@@ -61,7 +64,7 @@ just build-macos
 
 # Developer ID signed (distribution)
 export DEVELOPER_ID="Developer ID Application: Your Name (TEAMID)"
-./scripts/build-dmg.sh
+./scripts/build-dmg.sh --sign
 
 # With notarization (for Gatekeeper)
 export DEVELOPER_ID="Developer ID Application: Your Name (TEAMID)"
@@ -87,7 +90,7 @@ You can check if it is working by typing
 ```bash
 sqlite3 ~/Library/Application\ Support/com.apple.TCC/TCC.db "SELECT client, * FROM access WHERE service='kTCCServiceCamera';"
 ```
-You should see Terminal in the list.
+You should see your Terminal in the list.
 
 Note: the old advise to authorize Terminal in Preferences -> Security & Privacy -> Privacy -> Camera is not working anymore.
 
@@ -103,7 +106,7 @@ stkopt --network westend
 stkopt --network paseo
 
 # Use traditional RPC instead of light client
-# (recommended for historical queries or when light client has issues)
+# (recommended for historical queries or when light client has issues on 3G for example)
 stkopt --rpc
 
 # Use custom RPC endpoints

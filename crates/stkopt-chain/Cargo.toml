@@ -19,6 +19,7 @@ reqwest.workspace = true
 ed25519-zebra.workspace = true
 
 hex = "0.4"
+bs58 = "0.5"
 
 [dev-dependencies]
 tracing-subscriber.workspace = true

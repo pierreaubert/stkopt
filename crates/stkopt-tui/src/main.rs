@@ -403,12 +403,11 @@ async fn main() -> Result<()> {
             Some(action) = action_rx.recv() => {
                 // Handle special actions
                 match &action {
-                    Action::SetWatchedAccount(account) => {
+                    Action::SetWatchedAccount(account, original_addr) => {
                         let _ = account_tx.send(account.clone()).await;
-                        // Save account to config (public key only)
-                        let addr_str = account.to_string();
+                        // Save account to config with original address string (preserves user's SS58 format)
                         app_config.add_account(
-                            addr_str,
+                            original_addr.clone(),
                             None,
                             Some(network.to_string()),
                         );
@@ -743,7 +742,7 @@ async fn main() -> Result<()> {
                         if let Some(&addr_str) = known_addresses.get(actual_idx) {
                             use std::str::FromStr;
                             if let Ok(account) = subxt::utils::AccountId32::from_str(addr_str) {
-                                let _ = action_tx.send(Action::SetWatchedAccount(account)).await;
+                                let _ = action_tx.send(Action::SetWatchedAccount(account, addr_str.to_string())).await;
                             }
                         }
                     }
@@ -1104,7 +1103,7 @@ async fn chain_task(
     };
 
     // Fetch era reward points
-    let (_, validator_points) = match client.get_era_reward_points(query_era).await {
+    let (total_points, validator_points) = match client.get_era_reward_points(query_era).await {
         Ok((total, points)) => {
             tracing::info!(
                 "Fetched points for {} validators (total: {})",
@@ -1197,9 +1196,6 @@ async fn chain_task(
         .map(|e| (*e.address.as_ref(), e.clone()))
         .collect();
 
-    // Calculate for APY calculation
-    let active_validator_count = exposures.len();
-
     // Build display validators
     let mut display_validators: Vec<DisplayValidator> = validators
         .iter()
@@ -1213,10 +1209,11 @@ async fn chain_task(
                 None => return None, // Skip validators not active in this era
             };
 
-            // Calculate APY
-            // Each validator gets an equal share of the era reward (simplified)
-            let validator_share = if active_validator_count > 0 {
-                era_reward / active_validator_count as u128
+            let points = points_map.get(&addr_bytes).copied().unwrap_or(0);
+
+            // Calculate APY based on era points (rewards distributed proportionally to points)
+            let validator_share = if total_points > 0 && points > 0 {
+                (era_reward as f64 * points as f64 / total_points as f64) as u128
             } else {
                 0
             };
@@ -1230,7 +1227,6 @@ async fn chain_task(
 
             let address_str = v.address.to_string();
             let name = identity_map.get(&address_str).cloned();
-            let points = points_map.get(&addr_bytes).copied().unwrap_or(0);
 
             Some(DisplayValidator {
                 address: address_str,
@@ -1362,9 +1358,38 @@ async fn chain_task(
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
 
+        // Fetch nominations with retry logic for light client failures
+        let mut nominations_result = None;
+        for attempt in 0..3 {
+            match client.get_pool_nominations(p.id).await {
+                Ok(noms) => {
+                    nominations_result = Some(Ok(noms));
+                    break;
+                }
+                Err(e) => {
+                    if attempt < 2 {
+                        tracing::debug!(
+                            "Pool {} nominations query failed (attempt {}), retrying: {}",
+                            p.id,
+                            attempt + 1,
+                            e
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                    } else {
+                        tracing::warn!(
+                            "Failed to get nominations for pool {} after 3 attempts: {}",
+                            p.id,
+                            e
+                        );
+                        nominations_result = Some(Err(e));
+                    }
+                }
+            }
+        }
+
         // Calculate APY based on nominated validators
-        let apy = match client.get_pool_nominations(p.id).await {
-            Ok(Some(nominations)) if !nominations.targets.is_empty() => {
+        let apy = match nominations_result {
+            Some(Ok(Some(nominations))) if !nominations.targets.is_empty() => {
                 // Calculate average APY from nominated validators
                 let mut total_apy = 0.0;
                 let mut count = 0;
@@ -1398,18 +1423,17 @@ async fn chain_task(
                     None
                 }
             }
-            Ok(Some(_)) => {
+            Some(Ok(Some(_))) => {
                 tracing::debug!("Pool {} has empty nominations", p.id);
                 None
             }
-            Ok(None) => {
+            Some(Ok(None)) => {
                 tracing::debug!("Pool {} has no nominations", p.id);
                 None
             }
-            Err(e) => {
-                tracing::warn!("Failed to get nominations for pool {}: {}", p.id, e);
-                // Connection might be failing, stop querying more pools
-                break;
+            Some(Err(_)) | None => {
+                // Error already logged, continue to next pool
+                None
             }
         };
 

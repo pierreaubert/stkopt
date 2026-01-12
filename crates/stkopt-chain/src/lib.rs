@@ -3,6 +3,7 @@ pub mod config;
 pub mod error;
 pub mod lightclient;
 pub mod queries;
+pub mod ss58;
 pub mod transactions;
 
 pub use client::{
@@ -21,6 +22,7 @@ pub use queries::pools::{
     derive_pool_account,
 };
 pub use queries::validators::{ValidatorExposure, ValidatorInfo, ValidatorPoints};
+pub use ss58::encode_ss58;
 pub use transactions::{
     DecodedSignature, Era, RewardDestination, SignatureType, SignedExtrinsic, TxStatus,
     UnsignedPayload, build_signed_extrinsic, decode_vault_signature, encode_for_qr,

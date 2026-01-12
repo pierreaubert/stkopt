@@ -208,6 +208,18 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     ];
     spans.extend(chain_display);
 
+    // Add watched account address
+    if let Some(account) = &app.watched_account {
+        let addr = account.to_string();
+        let short_addr = if addr.len() > 12 {
+            format!("{}…{}", &addr[..6], &addr[addr.len() - 6..])
+        } else {
+            addr
+        };
+        spans.push(Span::raw("  │  "));
+        spans.push(Span::styled(short_addr, Style::default().fg(p.accent)));
+    }
+
     let header_text = Line::from(spans);
 
     let header = Paragraph::new(header_text)

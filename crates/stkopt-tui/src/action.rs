@@ -185,8 +185,8 @@ pub enum Action {
     SetDisplayPools(Vec<DisplayPool>),
     /// Set loading progress (progress 0.0-1.0, bytes_loaded, estimated_total_bytes).
     SetLoadingProgress(f32, Option<u64>, Option<u64>),
-    /// Set the watched account address.
-    SetWatchedAccount(AccountId32),
+    /// Set the watched account address. Includes (AccountId32, original_input_string).
+    SetWatchedAccount(AccountId32, String),
     /// Set account status (balance, staking, nominations).
     SetAccountStatus(Box<AccountStatus>),
     /// Clear the watched account.

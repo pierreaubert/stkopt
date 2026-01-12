@@ -33,23 +33,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for ext in extensions {
 
         println!(" - {}", ext.identifier());
-
-        if ext.identifier() == "AuthorizeCall" {
-
-             println!("   Type: {:?}", ext.ty());
-
-             // We can resolve the type if we want detailed structure, 
-
-             // but just knowing if it's 0 (void) or not helps.
-
-             if let Some(type_info) = metadata.types().resolve(ext.ty()) {
-
-                 println!("   Type Info: {:?}", type_info.type_def());
-
-             }
-
-        }
-
     }
 
     

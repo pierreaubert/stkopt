@@ -1067,7 +1067,8 @@ impl App {
                 match self.validate_account_input() {
                     Ok(account) => {
                         self.validation_error = None;
-                        return Some(Action::SetWatchedAccount(account));
+                        let original_input = self.account_input.trim().to_string();
+                        return Some(Action::SetWatchedAccount(account, original_input));
                     }
                     Err(error_msg) => {
                         self.validation_error = Some(error_msg);
@@ -1276,11 +1277,12 @@ impl App {
                     }
                 }
             }
-            Action::SetWatchedAccount(account) => {
+            Action::SetWatchedAccount(account, _original) => {
                 self.watched_account = Some(account);
                 self.account_status = None; // Will be fetched
             }
             Action::SetAccountStatus(status) => {
+                tracing::debug!("SetAccountStatus action received, updating app state");
                 self.account_status = Some(*status);
             }
             Action::ClearAccount => {
@@ -1381,13 +1383,19 @@ impl App {
                 self.loading_history = false;
             }
             Action::AddStakingHistoryPoint(point) => {
-                // Insert in era order (oldest first)
-                let pos = self
-                    .staking_history
-                    .iter()
-                    .position(|p| p.era > point.era)
-                    .unwrap_or(self.staking_history.len());
-                self.staking_history.insert(pos, point);
+                // Check if this era already exists (avoid duplicates)
+                if let Some(existing_pos) = self.staking_history.iter().position(|p| p.era == point.era) {
+                    // Replace existing entry with new data
+                    self.staking_history[existing_pos] = point;
+                } else {
+                    // Insert in era order (oldest first)
+                    let pos = self
+                        .staking_history
+                        .iter()
+                        .position(|p| p.era > point.era)
+                        .unwrap_or(self.staking_history.len());
+                    self.staking_history.insert(pos, point);
+                }
             }
             Action::LoadStakingHistory => {
                 // Manual load request (clear if needed and start loading)

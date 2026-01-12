@@ -392,60 +392,77 @@ impl ChainClient {
             .and_then(|v: &Value<u32>| v.as_u128())
             .unwrap_or(0) as u32;
 
+        tracing::debug!("EraRewardPoints total: {}", total);
+
         let mut validators = Vec::new();
 
         // individual is a BTreeMap, which encodes as a sequence of (Key, Value) tuples
+        // The structure from scale-value is:
+        // individual = Composite([
+        //   Composite([AccountId_wrapper, points, ...]),  // entry 0 (key, value, next_entry...)
+        //   ...
+        // ])
+        // Each entry contains (AccountId nested 4 levels, points at index 1)
         if let Some(individual) = decoded.at("individual") {
-            // Iterate over the map entries
-            // Depending on subxt/scale-value version, this might be represented as a sequence of tuples
-            // or a map. We'll try to iterate assuming it's a sequence/composite.
-
-            // We can iterate by index or use values() iterator if available
-            // Let's iterate up to a reasonable limit or until we find no more items
-            for i in 0..10000 {
-                if let Some(entry) = individual.at(i) {
-                    // Each entry should be a tuple (AccountId, points)
-                    if let Some(account_val) = entry.at(0)
-                        && let Some(points_val) = entry.at(1)
-                    {
-                        // Extract account ID
-                        let mut account_bytes = [0u8; 32];
-                        let mut bytes_found = false;
-
-                        // AccountId might be wrapped or direct bytes
-                        // Try to get as slice of bytes if it's a Primitive(U128/U256 etc) or a Composite
-                        // subxt Value doesn't have as_bytes(), so we have to try different ways
-
-                        let mut extracted_bytes = Vec::new();
-
-                        // Case 1: Sequence of u8
-                        for k in 0..32 {
-                            if let Some(b_val) = account_val.at(k) {
-                                if let Some(b) = b_val.as_u128() {
-                                    extracted_bytes.push(b as u8);
-                                }
-                            } else {
-                                break;
-                            }
-                        }
-
-                        if extracted_bytes.len() == 32 {
-                            account_bytes.copy_from_slice(&extracted_bytes);
-                            bytes_found = true;
-                        }
-                        // Note: AccountId32 is [u8; 32], handled above via byte iteration
-
-                        if bytes_found {
-                            let points = points_val.as_u128().unwrap_or(0) as u32;
-                            validators.push(ValidatorPoints {
-                                address: AccountId32::from(account_bytes),
-                                points,
-                            });
-                        }
-                    }
-                } else {
-                    break;
+            // Recursively find all account IDs (32-byte sequences) and point values (u32)
+            // The structure from scale-value is deeply nested, so we traverse recursively.
+            fn find_accounts_and_points(
+                val: &Value<u32>,
+                accounts: &mut Vec<[u8; 32]>,
+                points: &mut Vec<u32>,
+                depth: usize,
+            ) {
+                if depth > 10 {
+                    return;
                 }
+
+                // Check if this is a 32-byte sequence (AccountId)
+                let mut bytes = Vec::new();
+                for k in 0..32 {
+                    if let Some(b_val) = val.at(k) {
+                        if let Some(b) = b_val.as_u128() {
+                            bytes.push(b as u8);
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                if bytes.len() == 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&bytes);
+                    accounts.push(arr);
+                    return;
+                }
+
+                // Check if this is a single u32 value (points)
+                if let Some(n) = val.as_u128() {
+                    if n < u32::MAX as u128 && n > 0 {
+                        points.push(n as u32);
+                    }
+                    return;
+                }
+
+                // Recursively check children
+                for i in 0..1000 {
+                    if let Some(child) = val.at(i) {
+                        find_accounts_and_points(child, accounts, points, depth + 1);
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            let mut found_accounts = Vec::new();
+            let mut found_points = Vec::new();
+            find_accounts_and_points(individual, &mut found_accounts, &mut found_points, 0);
+
+            // Pair accounts with points (they should be in matching order)
+            let count = found_accounts.len().min(found_points.len());
+            for i in 0..count {
+                validators.push(ValidatorPoints {
+                    address: AccountId32::from(found_accounts[i]),
+                    points: found_points[i],
+                });
             }
         }
 
@@ -479,100 +496,133 @@ impl ChainClient {
     /// Get staking exposure for validators in an era (using ErasStakersOverview).
     /// Returns partial results if iteration is interrupted (e.g., connection drop).
     /// Deduplicates by address (light clients may return duplicates during iteration).
+    /// Retries up to 3 times on light client storage query failures.
     pub async fn get_era_stakers_overview(
         &self,
         era: EraIndex,
     ) -> Result<Vec<ValidatorExposure>, ChainError> {
-        // For iterating with a partial key, we need to use the era as the first key
-        let storage_query = subxt::dynamic::storage(
-            "Staking",
-            "ErasStakersOverview",
-            vec![Value::u128(era as u128)],
-        );
-
         // Use HashMap to deduplicate by address (light clients may return duplicates)
         let mut exposures_map: HashMap<[u8; 32], ValidatorExposure> = HashMap::new();
-        let iter_result = self
-            .client()
-            .storage()
-            .at_latest()
-            .await?
-            .iter(storage_query)
-            .await;
 
-        let mut iter = match iter_result {
-            Ok(iter) => iter,
-            Err(e) => {
-                tracing::warn!("Failed to start era stakers iteration: {}", e);
-                return Err(e.into());
-            }
-        };
+        // Retry loop for light client failures
+        for attempt in 0..3 {
+            // For iterating with a partial key, we need to use the era as the first key
+            let storage_query = subxt::dynamic::storage(
+                "Staking",
+                "ErasStakersOverview",
+                vec![Value::u128(era as u128)],
+            );
 
-        loop {
-            match iter.next().await {
-                Some(Ok(kv)) => {
-                    let key_bytes = kv.key_bytes;
-                    let value: DecodedValueThunk = kv.value;
+            let iter_result = self
+                .client()
+                .storage()
+                .at_latest()
+                .await?
+                .iter(storage_query)
+                .await;
 
-                    // Key format: prefix + era (4 bytes) + account (32 bytes)
-                    if key_bytes.len() < 32 {
+            let mut iter = match iter_result {
+                Ok(iter) => iter,
+                Err(e) => {
+                    if attempt < 2 {
+                        tracing::debug!(
+                            "Failed to start era stakers iteration (attempt {}), retrying: {}",
+                            attempt + 1,
+                            e
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
                         continue;
                     }
-                    let Ok(account_bytes): Result<[u8; 32], _> =
-                        key_bytes[key_bytes.len() - 32..].try_into()
-                    else {
-                        continue;
-                    };
+                    tracing::warn!("Failed to start era stakers iteration after 3 attempts: {}", e);
+                    return Err(e.into());
+                }
+            };
 
-                    // Skip if we already have this validator
-                    if exposures_map.contains_key(&account_bytes) {
-                        continue;
+            let mut iteration_failed = false;
+            loop {
+                match iter.next().await {
+                    Some(Ok(kv)) => {
+                        let key_bytes = kv.key_bytes;
+                        let value: DecodedValueThunk = kv.value;
+
+                        // Key format: prefix + era (4 bytes) + account (32 bytes)
+                        if key_bytes.len() < 32 {
+                            continue;
+                        }
+                        let Ok(account_bytes): Result<[u8; 32], _> =
+                            key_bytes[key_bytes.len() - 32..].try_into()
+                        else {
+                            continue;
+                        };
+
+                        // Skip if we already have this validator
+                        if exposures_map.contains_key(&account_bytes) {
+                            continue;
+                        }
+
+                        let address = AccountId32::from(account_bytes);
+
+                        let Ok(decoded) = value.to_value() else {
+                            continue;
+                        };
+
+                        // PagedExposureMetadata = { total: Balance, own: Balance, nominator_count: u32, page_count: u32 }
+                        let total = decoded
+                            .at("total")
+                            .and_then(|v: &Value<u32>| v.as_u128())
+                            .unwrap_or(0);
+                        let own = decoded
+                            .at("own")
+                            .and_then(|v: &Value<u32>| v.as_u128())
+                            .unwrap_or(0);
+                        let nominator_count = decoded
+                            .at("nominator_count")
+                            .and_then(|v: &Value<u32>| v.as_u128())
+                            .unwrap_or(0) as u32;
+
+                        exposures_map.insert(
+                            account_bytes,
+                            ValidatorExposure {
+                                address,
+                                own,
+                                total,
+                                nominator_count,
+                            },
+                        );
                     }
-
-                    let address = AccountId32::from(account_bytes);
-
-                    let Ok(decoded) = value.to_value() else {
-                        continue;
-                    };
-
-                    // PagedExposureMetadata = { total: Balance, own: Balance, nominator_count: u32, page_count: u32 }
-                    let total = decoded
-                        .at("total")
-                        .and_then(|v: &Value<u32>| v.as_u128())
-                        .unwrap_or(0);
-                    let own = decoded
-                        .at("own")
-                        .and_then(|v: &Value<u32>| v.as_u128())
-                        .unwrap_or(0);
-                    let nominator_count = decoded
-                        .at("nominator_count")
-                        .and_then(|v: &Value<u32>| v.as_u128())
-                        .unwrap_or(0) as u32;
-
-                    exposures_map.insert(
-                        account_bytes,
-                        ValidatorExposure {
-                            address,
-                            own,
-                            total,
-                            nominator_count,
-                        },
-                    );
-                }
-                Some(Err(e)) => {
-                    // Connection error during iteration - return what we have so far
-                    tracing::warn!(
-                        "Era stakers iteration interrupted after {} entries: {}",
-                        exposures_map.len(),
-                        e
-                    );
-                    break;
-                }
-                None => {
-                    // Iteration complete
-                    break;
+                    Some(Err(e)) => {
+                        // Connection error during iteration
+                        if attempt < 2 {
+                            tracing::debug!(
+                                "Era stakers iteration interrupted after {} entries (attempt {}), retrying: {}",
+                                exposures_map.len(),
+                                attempt + 1,
+                                e
+                            );
+                            iteration_failed = true;
+                            break;
+                        }
+                        tracing::warn!(
+                            "Era stakers iteration interrupted after {} entries (final attempt): {}",
+                            exposures_map.len(),
+                            e
+                        );
+                        break;
+                    }
+                    None => {
+                        // Iteration complete
+                        break;
+                    }
                 }
             }
+
+            if iteration_failed {
+                tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+                continue;
+            }
+
+            // Iteration completed (successfully or with partial results on final attempt)
+            break;
         }
 
         let exposures: Vec<ValidatorExposure> = exposures_map.into_values().collect();
