@@ -246,50 +246,20 @@ mod tests {
 
     #[test]
     fn test_display_validator_clone() {
-        let v1 = DisplayValidator::new(
-            "addr".to_string(),
-            None,
-            0.05,
-            true,
-            500,
-            100,
-            10,
-            0,
-            None,
-        );
+        let v1 = DisplayValidator::new("addr".to_string(), None, 0.05, true, 500, 100, 10, 0, None);
         let v2 = v1.clone();
         assert_eq!(v1, v2);
     }
 
     #[test]
     fn test_display_validator_apy_percent() {
-        let v = DisplayValidator::new(
-            "addr".to_string(),
-            None,
-            0.0,
-            false,
-            0,
-            0,
-            0,
-            0,
-            Some(0.15),
-        );
+        let v = DisplayValidator::new("addr".to_string(), None, 0.0, false, 0, 0, 0, 0, Some(0.15));
         assert!((v.apy_percent() - 15.0).abs() < 0.001);
     }
 
     #[test]
     fn test_display_validator_apy_percent_none() {
-        let v = DisplayValidator::new(
-            "addr".to_string(),
-            None,
-            0.0,
-            false,
-            0,
-            0,
-            0,
-            0,
-            None,
-        );
+        let v = DisplayValidator::new("addr".to_string(), None, 0.0, false, 0, 0, 0, 0, None);
         assert!((v.apy_percent() - 0.0).abs() < 0.001);
     }
 
@@ -398,15 +368,7 @@ mod tests {
 
     #[test]
     fn test_display_pool_is_open() {
-        let open_pool = DisplayPool::new(
-            1,
-            "Open".to_string(),
-            PoolState::Open,
-            0,
-            0,
-            None,
-            None,
-        );
+        let open_pool = DisplayPool::new(1, "Open".to_string(), PoolState::Open, 0, 0, None, None);
         let blocked_pool = DisplayPool::new(
             2,
             "Blocked".to_string(),
@@ -447,15 +409,7 @@ mod tests {
 
     #[test]
     fn test_display_pool_apy_percent_none() {
-        let pool = DisplayPool::new(
-            1,
-            "Pool".to_string(),
-            PoolState::Open,
-            0,
-            0,
-            None,
-            None,
-        );
+        let pool = DisplayPool::new(1, "Pool".to_string(), PoolState::Open, 0, 0, None, None);
         assert!(pool.apy_percent().is_none());
     }
 
@@ -490,6 +444,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "persistence")]
     fn test_display_validator_serialization() {
         let v = DisplayValidator::new(
             "addr".to_string(),
@@ -508,6 +463,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "persistence")]
     fn test_staking_history_point_serialization() {
         let p = StakingHistoryPoint::new(100, "20240115".to_string(), 5000, 100000, 0.15);
         let json = serde_json::to_string(&p).unwrap();
@@ -516,6 +472,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "persistence")]
     fn test_display_pool_serialization() {
         let pool = DisplayPool::new(
             42,

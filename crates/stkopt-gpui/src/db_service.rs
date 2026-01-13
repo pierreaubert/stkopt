@@ -1,9 +1,9 @@
 use crate::app::{HistoryPoint, PoolInfo, ValidatorInfo};
 use crate::persistence::get_data_dir;
-use stkopt_core::db::{CachedAccountStatus, CachedChainMetadata, StakingDb};
 use anyhow::{Context, Result};
 use std::sync::{Arc, Mutex};
 use stkopt_core::Network;
+use stkopt_core::db::{CachedAccountStatus, CachedChainMetadata, StakingDb};
 
 /// Service for asynchronous database access.
 #[derive(Clone)]
@@ -44,12 +44,13 @@ impl DbService {
         limit: Option<u32>,
     ) -> Result<Vec<HistoryPoint>> {
         let db = self.db.clone();
-        self.handle.spawn_blocking(move || {
-            let db = db.lock().map_err(|_| anyhow::anyhow!("Db lock poisoned"))?;
-            db.get_history(network, &address, limit)
-                .context("Failed to get history")
-        })
-        .await?
+        self.handle
+            .spawn_blocking(move || {
+                let db = db.lock().map_err(|_| anyhow::anyhow!("Db lock poisoned"))?;
+                db.get_history(network, &address, limit)
+                    .context("Failed to get history")
+            })
+            .await?
     }
 
     /// Insert staking history points.
@@ -60,23 +61,25 @@ impl DbService {
         points: Vec<HistoryPoint>,
     ) -> Result<()> {
         let db = self.db.clone();
-        self.handle.spawn_blocking(move || {
-            let mut db = db.lock().map_err(|_| anyhow::anyhow!("Db lock poisoned"))?;
-            db.insert_history_batch(network, &address, &points)
-                .context("Failed to insert history")
-        })
-        .await?
+        self.handle
+            .spawn_blocking(move || {
+                let mut db = db.lock().map_err(|_| anyhow::anyhow!("Db lock poisoned"))?;
+                db.insert_history_batch(network, &address, &points)
+                    .context("Failed to insert history")
+            })
+            .await?
     }
 
     /// Get cached validators.
     pub async fn get_cached_validators(&self, network: Network) -> Result<Vec<ValidatorInfo>> {
         let db = self.db.clone();
-        self.handle.spawn_blocking(move || {
-            let db = db.lock().map_err(|_| anyhow::anyhow!("Db lock poisoned"))?;
-            db.get_cached_validators(network)
-                .context("Failed to get cached validators")
-        })
-        .await?
+        self.handle
+            .spawn_blocking(move || {
+                let db = db.lock().map_err(|_| anyhow::anyhow!("Db lock poisoned"))?;
+                db.get_cached_validators(network)
+                    .context("Failed to get cached validators")
+            })
+            .await?
     }
 
     /// Set cached validators.
@@ -87,38 +90,37 @@ impl DbService {
         validators: Vec<ValidatorInfo>,
     ) -> Result<usize> {
         let db = self.db.clone();
-        self.handle.spawn_blocking(move || {
-            let mut db = db.lock().map_err(|_| anyhow::anyhow!("Db lock poisoned"))?;
-            db.set_cached_validators(network, era, &validators)
-                .context("Failed to set cached validators")
-        })
-        .await?
+        self.handle
+            .spawn_blocking(move || {
+                let mut db = db.lock().map_err(|_| anyhow::anyhow!("Db lock poisoned"))?;
+                db.set_cached_validators(network, era, &validators)
+                    .context("Failed to set cached validators")
+            })
+            .await?
     }
 
     /// Get cached pools.
     pub async fn get_cached_pools(&self, network: Network) -> Result<Vec<PoolInfo>> {
         let db = self.db.clone();
-        self.handle.spawn_blocking(move || {
-            let db = db.lock().map_err(|_| anyhow::anyhow!("Db lock poisoned"))?;
-            db.get_cached_pools(network)
-                .context("Failed to get cached pools")
-        })
-        .await?
+        self.handle
+            .spawn_blocking(move || {
+                let db = db.lock().map_err(|_| anyhow::anyhow!("Db lock poisoned"))?;
+                db.get_cached_pools(network)
+                    .context("Failed to get cached pools")
+            })
+            .await?
     }
 
     /// Set cached pools.
-    pub async fn set_cached_pools(
-        &self,
-        network: Network,
-        pools: Vec<PoolInfo>,
-    ) -> Result<usize> {
+    pub async fn set_cached_pools(&self, network: Network, pools: Vec<PoolInfo>) -> Result<usize> {
         let db = self.db.clone();
-        self.handle.spawn_blocking(move || {
-            let mut db = db.lock().map_err(|_| anyhow::anyhow!("Db lock poisoned"))?;
-            db.set_cached_pools(network, &pools)
-                .context("Failed to set cached pools")
-        })
-        .await?
+        self.handle
+            .spawn_blocking(move || {
+                let mut db = db.lock().map_err(|_| anyhow::anyhow!("Db lock poisoned"))?;
+                db.set_cached_pools(network, &pools)
+                    .context("Failed to set cached pools")
+            })
+            .await?
     }
 
     /// Get chain metadata.
@@ -127,12 +129,13 @@ impl DbService {
         network: Network,
     ) -> Result<Option<CachedChainMetadata>> {
         let db = self.db.clone();
-        self.handle.spawn_blocking(move || {
-            let db = db.lock().map_err(|_| anyhow::anyhow!("Db lock poisoned"))?;
-            db.get_chain_metadata(network)
-                .context("Failed to get chain metadata")
-        })
-        .await?
+        self.handle
+            .spawn_blocking(move || {
+                let db = db.lock().map_err(|_| anyhow::anyhow!("Db lock poisoned"))?;
+                db.get_chain_metadata(network)
+                    .context("Failed to get chain metadata")
+            })
+            .await?
     }
 
     /// Set chain metadata.
@@ -142,12 +145,13 @@ impl DbService {
         meta: CachedChainMetadata,
     ) -> Result<()> {
         let db = self.db.clone();
-        self.handle.spawn_blocking(move || {
-            let db = db.lock().map_err(|_| anyhow::anyhow!("Db lock poisoned"))?;
-            db.set_chain_metadata(network, &meta)
-                .context("Failed to set chain metadata")
-        })
-        .await?
+        self.handle
+            .spawn_blocking(move || {
+                let db = db.lock().map_err(|_| anyhow::anyhow!("Db lock poisoned"))?;
+                db.set_chain_metadata(network, &meta)
+                    .context("Failed to set chain metadata")
+            })
+            .await?
     }
 
     /// Get cached account status.
@@ -157,12 +161,13 @@ impl DbService {
         address: String,
     ) -> Result<Option<CachedAccountStatus>> {
         let db = self.db.clone();
-        self.handle.spawn_blocking(move || {
-            let db = db.lock().map_err(|_| anyhow::anyhow!("Db lock poisoned"))?;
-            db.get_cached_account_status(network, &address)
-                .context("Failed to get cached account status")
-        })
-        .await?
+        self.handle
+            .spawn_blocking(move || {
+                let db = db.lock().map_err(|_| anyhow::anyhow!("Db lock poisoned"))?;
+                db.get_cached_account_status(network, &address)
+                    .context("Failed to get cached account status")
+            })
+            .await?
     }
 
     /// Set cached account status.
@@ -173,11 +178,12 @@ impl DbService {
         status: CachedAccountStatus,
     ) -> Result<()> {
         let db = self.db.clone();
-        self.handle.spawn_blocking(move || {
-            let db = db.lock().map_err(|_| anyhow::anyhow!("Db lock poisoned"))?;
-            db.set_cached_account_status(network, &address, &status)
-                .context("Failed to set cached account status")
-        })
-        .await?
+        self.handle
+            .spawn_blocking(move || {
+                let db = db.lock().map_err(|_| anyhow::anyhow!("Db lock poisoned"))?;
+                db.set_cached_account_status(network, &address, &status)
+                    .context("Failed to set cached account status")
+            })
+            .await?
     }
 }

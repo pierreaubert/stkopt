@@ -533,7 +533,10 @@ impl ChainClient {
                         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
                         continue;
                     }
-                    tracing::warn!("Failed to start era stakers iteration after 3 attempts: {}", e);
+                    tracing::warn!(
+                        "Failed to start era stakers iteration after 3 attempts: {}",
+                        e
+                    );
                     return Err(e.into());
                 }
             };

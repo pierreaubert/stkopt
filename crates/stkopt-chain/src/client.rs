@@ -436,10 +436,7 @@ impl ChainClient {
             encoded.len(),
             self.network
         );
-        tracing::debug!(
-            "Extrinsic hex: 0x{}",
-            hex::encode(encoded)
-        );
+        tracing::debug!("Extrinsic hex: 0x{}", hex::encode(encoded));
 
         // Submit via backend which returns a stream of transaction status updates
         let status_stream = self.client.backend().submit_transaction(encoded).await?;

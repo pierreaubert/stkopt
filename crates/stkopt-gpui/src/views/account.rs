@@ -6,7 +6,7 @@ use gpui_ui_kit::theme::ThemeExt;
 use gpui_ui_kit::*;
 use tokio::sync::mpsc;
 
-use crate::account::{validate_address, ValidationResult};
+use crate::account::{ValidationResult, validate_address};
 use crate::app::{ConnectionStatus, StkoptApp};
 use crate::chain::ChainUpdate;
 use crate::gpui_tokio::Tokio;
@@ -20,7 +20,7 @@ impl AccountSection {
             .id("top-test-button")
             .px_4()
             .py_2()
-            .bg(gpui::rgb(0x00ff00))  // Green for visibility
+            .bg(gpui::rgb(0x00ff00)) // Green for visibility
             .rounded_md()
             .cursor_pointer()
             .child(Text::new("TOP TEST BUTTON").color(gpui::rgb(0x000000)))
@@ -45,7 +45,10 @@ impl AccountSection {
     }
 
     fn render_account_input(app: &StkoptApp, cx: &Context<StkoptApp>) -> impl IntoElement {
-        tracing::debug!("[ACCOUNT] render_account_input called, current input: '{}'", app.account_input);
+        tracing::debug!(
+            "[ACCOUNT] render_account_input called, current input: '{}'",
+            app.account_input
+        );
         let theme = cx.theme();
         let entity = app.entity.clone();
 
@@ -251,7 +254,8 @@ impl AccountSection {
         let entity = app.entity.clone();
 
         // Filter address book entries for current network
-        let entries: Vec<_> = app.address_book
+        let entries: Vec<_> = app
+            .address_book
             .iter()
             .filter(|a| a.network == app.network)
             .collect();
@@ -273,25 +277,35 @@ impl AccountSection {
                 .border_b_1()
                 .border_color(theme.border)
                 .child(
-                    div()
-                        .flex_1()
-                        .child(Text::new("Address").size(TextSize::Sm).weight(TextWeight::Semibold)),
+                    div().flex_1().child(
+                        Text::new("Address")
+                            .size(TextSize::Sm)
+                            .weight(TextWeight::Semibold),
+                    ),
                 )
                 .child(
-                    div()
-                        .w(px(100.0))
-                        .child(Text::new("Network").size(TextSize::Sm).weight(TextWeight::Semibold)),
+                    div().w(px(100.0)).child(
+                        Text::new("Network")
+                            .size(TextSize::Sm)
+                            .weight(TextWeight::Semibold),
+                    ),
                 )
                 .child(
-                    div()
-                        .w(px(80.0))
-                        .child(Text::new("Actions").size(TextSize::Sm).weight(TextWeight::Semibold)),
+                    div().w(px(80.0)).child(
+                        Text::new("Actions")
+                            .size(TextSize::Sm)
+                            .weight(TextWeight::Semibold),
+                    ),
                 ),
         );
 
         // Address rows
         for (i, entry) in entries.iter().enumerate() {
-            let row_bg = if i % 2 == 0 { theme.background } else { theme.surface };
+            let row_bg = if i % 2 == 0 {
+                theme.background
+            } else {
+                theme.surface
+            };
             let address = entry.address.clone();
             let is_active = app.watched_account.as_ref() == Some(&address);
 
@@ -420,7 +434,11 @@ fn detail_row(
                 .size(TextSize::Sm)
                 .color(theme.text_secondary),
         )
-        .child(Text::new(value).size(TextSize::Sm).weight(TextWeight::Medium))
+        .child(
+            Text::new(value)
+                .size(TextSize::Sm)
+                .weight(TextWeight::Medium),
+        )
 }
 
 fn truncate_address(address: &str) -> String {
@@ -459,5 +477,6 @@ fn spawn_chain_update_loop(
             // will pick up pending updates on the next frame
         }
         tracing::info!("Chain update channel closed");
-    }).detach();
+    })
+    .detach();
 }

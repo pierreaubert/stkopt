@@ -169,53 +169,49 @@ impl QrModal {
             let qr_result = Self::generate_qr_code(qr_data);
 
             match qr_result {
-                Ok(qr_element) => {
-                    div()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .gap_4()
-                        .child(qr_element)
-                        .child(
-                            Text::new("Scan this QR code with Polkadot Vault")
-                                .size(TextSize::Sm)
-                                .color(theme.text_secondary),
-                        )
-                        .child(
-                            Text::new(format!("({} bytes)", qr_data.len()))
-                                .size(TextSize::Xs)
-                                .color(theme.text_secondary),
-                        )
-                }
-                Err(e) => {
-                    div()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .gap_4()
-                        .child(
-                            div()
-                                .w(px(250.0))
-                                .h(px(250.0))
-                                .bg(gpui::rgb(0xffffff))
-                                .rounded_lg()
-                                .border_1()
-                                .border_color(theme.border)
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(
-                                    Text::new(format!("QR Error:\n{}", e))
-                                        .size(TextSize::Xs)
-                                        .color(gpui::rgb(0xcc0000)),
-                                ),
-                        )
-                        .child(
-                            Text::new(format!("Payload size: {} bytes", qr_data.len()))
-                                .size(TextSize::Sm)
-                                .color(theme.text_secondary),
-                        )
-                }
+                Ok(qr_element) => div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_4()
+                    .child(qr_element)
+                    .child(
+                        Text::new("Scan this QR code with Polkadot Vault")
+                            .size(TextSize::Sm)
+                            .color(theme.text_secondary),
+                    )
+                    .child(
+                        Text::new(format!("({} bytes)", qr_data.len()))
+                            .size(TextSize::Xs)
+                            .color(theme.text_secondary),
+                    ),
+                Err(e) => div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_4()
+                    .child(
+                        div()
+                            .w(px(250.0))
+                            .h(px(250.0))
+                            .bg(gpui::rgb(0xffffff))
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(theme.border)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                Text::new(format!("QR Error:\n{}", e))
+                                    .size(TextSize::Xs)
+                                    .color(gpui::rgb(0xcc0000)),
+                            ),
+                    )
+                    .child(
+                        Text::new(format!("Payload size: {} bytes", qr_data.len()))
+                            .size(TextSize::Sm)
+                            .color(theme.text_secondary),
+                    ),
             }
         } else {
             div()
@@ -278,7 +274,10 @@ impl QrModal {
             let mut row = div().flex();
             for x in 0..size {
                 let idx = y * size + x;
-                let is_dark = modules.get(idx).map(|c| *c == qrcode::Color::Dark).unwrap_or(false);
+                let is_dark = modules
+                    .get(idx)
+                    .map(|c| *c == qrcode::Color::Dark)
+                    .unwrap_or(false);
                 let color = if is_dark { black } else { white };
 
                 row = row.child(
@@ -306,11 +305,7 @@ impl QrModal {
         let entity = app.entity.clone();
         let is_scanning = app.qr_reader.is_some();
 
-        let mut content = div()
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap_4();
+        let mut content = div().flex().flex_col().items_center().gap_4();
 
         // Camera preview area
         let preview_area = if let Some(ref preview) = app.camera_preview {
@@ -416,15 +411,11 @@ impl QrModal {
             );
         } else {
             content = content.child(
-                div()
-                    .p_4()
-                    .rounded_lg()
-                    .bg(rgba(0xfbbf2420))
-                    .child(
-                        Text::new("Scan the signed QR code first")
-                            .size(TextSize::Sm)
-                            .color(theme.text_secondary),
-                    ),
+                div().p_4().rounded_lg().bg(rgba(0xfbbf2420)).child(
+                    Text::new("Scan the signed QR code first")
+                        .size(TextSize::Sm)
+                        .color(theme.text_secondary),
+                ),
             );
         }
 

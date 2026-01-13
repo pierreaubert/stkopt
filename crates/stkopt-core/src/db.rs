@@ -3,7 +3,7 @@
 //! This module provides a unified database layer used by both TUI and GPUI frontends.
 //! The schema supports all features from both implementations.
 
-use rusqlite::{params, Connection, Result};
+use rusqlite::{Connection, Result, params};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -848,7 +848,13 @@ mod tests {
     fn test_insert_and_get_history() {
         let db = StakingDb::open_memory().unwrap();
 
-        let point = StakingHistoryPoint::new(1500, "20250101".to_string(), 1_000_000_000_000, 100_000_000_000_000, 0.15);
+        let point = StakingHistoryPoint::new(
+            1500,
+            "20250101".to_string(),
+            1_000_000_000_000,
+            100_000_000_000_000,
+            0.15,
+        );
 
         db.insert_history(Network::Polkadot, "15oF4uV", &point)
             .unwrap();
@@ -865,7 +871,12 @@ mod tests {
     fn test_insert_history_without_date() {
         let db = StakingDb::open_memory().unwrap();
 
-        let point = StakingHistoryPoint::new_without_date(1500, 1_000_000_000_000, 100_000_000_000_000, 0.15);
+        let point = StakingHistoryPoint::new_without_date(
+            1500,
+            1_000_000_000_000,
+            100_000_000_000_000,
+            0.15,
+        );
 
         db.insert_history(Network::Polkadot, "15oF4uV", &point)
             .unwrap();
@@ -999,12 +1010,24 @@ mod tests {
     fn test_insert_or_replace_history() {
         let db = StakingDb::open_memory().unwrap();
 
-        let point1 = StakingHistoryPoint::new(1500, "20250101".to_string(), 1_000_000_000_000, 100_000_000_000_000, 0.15);
+        let point1 = StakingHistoryPoint::new(
+            1500,
+            "20250101".to_string(),
+            1_000_000_000_000,
+            100_000_000_000_000,
+            0.15,
+        );
         db.insert_history(Network::Polkadot, "addr1", &point1)
             .unwrap();
 
         // Insert again with different values - should replace
-        let point2 = StakingHistoryPoint::new(1500, "20250101".to_string(), 2_000_000_000_000, 100_000_000_000_000, 0.16);
+        let point2 = StakingHistoryPoint::new(
+            1500,
+            "20250101".to_string(),
+            2_000_000_000_000,
+            100_000_000_000_000,
+            0.16,
+        );
         db.insert_history(Network::Polkadot, "addr1", &point2)
             .unwrap();
 
@@ -1230,7 +1253,10 @@ mod tests {
     #[test]
     fn test_count_cached_pools() {
         let mut db = StakingDb::open_memory().unwrap();
-        let pools = vec![make_test_pool(1, PoolState::Open), make_test_pool(2, PoolState::Blocked)];
+        let pools = vec![
+            make_test_pool(1, PoolState::Open),
+            make_test_pool(2, PoolState::Blocked),
+        ];
         db.set_cached_pools(Network::Polkadot, &pools).unwrap();
 
         let count = db.count_cached_pools(Network::Polkadot).unwrap();

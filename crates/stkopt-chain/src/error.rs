@@ -24,4 +24,7 @@ pub enum ChainError {
 
     #[error("Invalid data: {0}")]
     InvalidData(String),
+
+    #[error("Invalid address: {0}")]
+    InvalidAddress(String),
 }

@@ -1,8 +1,8 @@
 //! Log viewer component.
 
+use gpui::Styled; // Explicit import to ensure traits are visible
 use gpui::prelude::*;
 use gpui::*;
-use gpui::Styled; // Explicit import to ensure traits are visible
 use gpui_ui_kit::theme::ThemeExt;
 use gpui_ui_kit::*;
 
@@ -55,7 +55,7 @@ impl LogsView {
                         // Let's stick to natural order (oldest first) but user has to scroll.
                         // Wait, reverse is often better for "tail".
                         // Let's do newest atop for now as it's easier to see new stuff.
-                        
+
                         let color = match line.level {
                             LogLevel::Trace => theme.text_secondary,
                             LogLevel::Debug => theme.text_primary,
@@ -75,23 +75,18 @@ impl LogsView {
                                     .weight(TextWeight::Light),
                             )
                             .child(
-                                div()
-                                    .w(px(35.0))
-                                    .child(
-                                        Text::new(line.level.as_str())
-                                            .color(color)
-                                            .weight(TextWeight::Bold),
-                                    ),
+                                div().w(px(35.0)).child(
+                                    Text::new(line.level.as_str())
+                                        .color(color)
+                                        .weight(TextWeight::Bold),
+                                ),
                             )
                             .child(
                                 div()
                                     .w(px(100.0))
                                     .overflow_hidden()
                                     .whitespace_nowrap()
-                                    .child(
-                                        Text::new(line.target)
-                                            .color(theme.text_secondary),
-                                    ),
+                                    .child(Text::new(line.target).color(theme.text_secondary)),
                             )
                             .child(Text::new(line.message).color(theme.text_primary))
                     })),

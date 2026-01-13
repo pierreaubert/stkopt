@@ -270,12 +270,7 @@ impl Default for AppConfig {
 impl AppConfig {
     /// Add an account to the legacy accounts list (for TUI compatibility).
     /// Does not add duplicates.
-    pub fn add_account(
-        &mut self,
-        address: String,
-        label: Option<String>,
-        network: Option<String>,
-    ) {
+    pub fn add_account(&mut self, address: String, label: Option<String>, network: Option<String>) {
         if self.accounts.iter().any(|a| a.address == address) {
             return;
         }
@@ -477,7 +472,10 @@ mod tests {
 
     #[test]
     fn test_network_config_to_network() {
-        assert_eq!(NetworkConfig::Polkadot.to_network(), Some(Network::Polkadot));
+        assert_eq!(
+            NetworkConfig::Polkadot.to_network(),
+            Some(Network::Polkadot)
+        );
         assert_eq!(NetworkConfig::Kusama.to_network(), Some(Network::Kusama));
         assert_eq!(NetworkConfig::Westend.to_network(), Some(Network::Westend));
         assert_eq!(NetworkConfig::Paseo.to_network(), Some(Network::Paseo));
@@ -486,9 +484,15 @@ mod tests {
 
     #[test]
     fn test_network_config_from_network() {
-        assert_eq!(NetworkConfig::from(Network::Polkadot), NetworkConfig::Polkadot);
+        assert_eq!(
+            NetworkConfig::from(Network::Polkadot),
+            NetworkConfig::Polkadot
+        );
         assert_eq!(NetworkConfig::from(Network::Kusama), NetworkConfig::Kusama);
-        assert_eq!(NetworkConfig::from(Network::Westend), NetworkConfig::Westend);
+        assert_eq!(
+            NetworkConfig::from(Network::Westend),
+            NetworkConfig::Westend
+        );
         assert_eq!(NetworkConfig::from(Network::Paseo), NetworkConfig::Paseo);
     }
 
@@ -751,7 +755,10 @@ mod tests {
         let json = serde_json::to_string(&book).unwrap();
         let parsed: AddressBook = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed.find("1abc").unwrap().notes, Some("Notes".to_string()));
+        assert_eq!(
+            parsed.find("1abc").unwrap().notes,
+            Some("Notes".to_string())
+        );
     }
 
     // ==================== ValidatorCache Tests ====================
@@ -822,10 +829,12 @@ mod tests {
     fn test_get_address_book_path() {
         let result = get_address_book_path();
         assert!(result.is_ok());
-        assert!(result
-            .unwrap()
-            .to_string_lossy()
-            .contains("address_book.json"));
+        assert!(
+            result
+                .unwrap()
+                .to_string_lossy()
+                .contains("address_book.json")
+        );
     }
 
     // ==================== SavedAccount Tests ====================

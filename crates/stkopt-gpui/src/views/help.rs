@@ -6,7 +6,7 @@ use gpui_ui_kit::theme::ThemeExt;
 use gpui_ui_kit::*;
 
 use crate::app::StkoptApp;
-use crate::shortcuts::{shortcuts_by_category, Shortcut};
+use crate::shortcuts::{Shortcut, shortcuts_by_category};
 
 /// Help overlay component.
 pub struct HelpOverlay;
@@ -88,15 +88,11 @@ impl HelpOverlay {
         section = section.child(Heading::h3("Keyboard Shortcuts").into_any_element());
 
         for (category, shortcuts) in grouped {
-            let mut category_div = div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(
-                    Text::new(category.label())
-                        .size(TextSize::Sm)
-                        .color(theme.text_secondary),
-                );
+            let mut category_div = div().flex().flex_col().gap_2().child(
+                Text::new(category.label())
+                    .size(TextSize::Sm)
+                    .color(theme.text_secondary),
+            );
 
             for shortcut in shortcuts {
                 category_div = category_div.child(Self::render_shortcut_row(shortcut, cx));
@@ -166,7 +162,11 @@ impl HelpOverlay {
             ))
     }
 
-    fn render_tip(icon: &'static str, title: &'static str, description: &'static str) -> impl IntoElement {
+    fn render_tip(
+        icon: &'static str,
+        title: &'static str,
+        description: &'static str,
+    ) -> impl IntoElement {
         div()
             .flex()
             .gap_3()

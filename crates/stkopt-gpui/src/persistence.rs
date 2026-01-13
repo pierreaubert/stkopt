@@ -3,9 +3,9 @@
 //! Re-exports the unified configuration system from stkopt-core.
 
 pub use stkopt_core::config::{
-    get_address_book_path, get_config_path, get_data_dir, load_address_book, load_config,
-    save_address_book, save_config, AddressBook, AddressBookEntry, AppConfig,
-    ConnectionModeConfig, HistoryCache, NetworkConfig, ThemeConfig, ValidatorCache,
+    AddressBook, AddressBookEntry, AppConfig, ConnectionModeConfig, HistoryCache, NetworkConfig,
+    ThemeConfig, ValidatorCache, get_address_book_path, get_config_path, get_data_dir,
+    load_address_book, load_config, save_address_book, save_config,
 };
 
 #[cfg(test)]

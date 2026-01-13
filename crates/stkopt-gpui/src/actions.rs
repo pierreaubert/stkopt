@@ -136,7 +136,9 @@ mod tests {
 
     #[test]
     fn test_set_watched_account() {
-        let action = Action::SetWatchedAccount("15oF4uVJwmo4TdGW7VfQxNLavjCXviqxT9S1MgbjMNHr6Sp5".to_string());
+        let action = Action::SetWatchedAccount(
+            "15oF4uVJwmo4TdGW7VfQxNLavjCXviqxT9S1MgbjMNHr6Sp5".to_string(),
+        );
         match action {
             Action::SetWatchedAccount(addr) => assert!(addr.starts_with("15oF4u")),
             _ => panic!("Expected SetWatchedAccount"),

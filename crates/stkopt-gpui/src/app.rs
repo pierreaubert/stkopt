@@ -120,8 +120,6 @@ pub struct StkoptApp {
     pub optimization_max_commission: f64,
     /// Optimization target validator count
     pub optimization_target_count: usize,
-    /// QR payload hex string for signing
-    pub qr_payload: Option<String>,
     /// Chain handle for async operations
     pub chain_handle: Option<crate::chain::ChainHandle>,
     /// Connection error message
@@ -130,8 +128,8 @@ pub struct StkoptApp {
     pub pending_updates: Arc<Mutex<Vec<crate::chain::ChainUpdate>>>,
     /// Database service for caching
     pub db: crate::db_service::DbService,
-    /// Shared log buffer
-    pub log_buffer: Arc<crate::log::LogBuffer>,
+    /// Shared log buffer (LogBuffer is already Arc<Mutex<...>> internally)
+    pub log_buffer: crate::log::LogBuffer,
     /// Whether log window is visible
     pub show_logs: bool,
     /// Saved accounts (address book)
@@ -249,7 +247,11 @@ pub enum QrModalTab {
 
 impl QrModalTab {
     pub fn all() -> &'static [QrModalTab] {
-        &[QrModalTab::QrCode, QrModalTab::ScanSignature, QrModalTab::Submit]
+        &[
+            QrModalTab::QrCode,
+            QrModalTab::ScanSignature,
+            QrModalTab::Submit,
+        ]
     }
 
     pub fn label(&self) -> &'static str {
@@ -335,6 +337,14 @@ impl Network {
         }
     }
 
+    pub fn token_decimals(&self) -> u8 {
+        match self {
+            Network::Polkadot => 10,
+            Network::Kusama => 12,
+            Network::Westend => 12,
+        }
+    }
+
     /// Convert to stkopt_core::Network
     pub fn to_core(&self) -> stkopt_core::Network {
         match self {
@@ -381,10 +391,18 @@ pub fn generate_mock_pools(count: usize) -> Vec<PoolInfo> {
             PoolInfo {
                 id: (i + 1) as u32,
                 name: format!("{} #{}", name, i + 1),
-                state: if i % 10 == 9 { PoolState::Blocked } else { PoolState::Open },
+                state: if i % 10 == 9 {
+                    PoolState::Blocked
+                } else {
+                    PoolState::Open
+                },
                 member_count: 50 + (i * 17 % 500) as u32,
                 total_bonded: 100_000_000_000_000u128 + (i as u128 * 50_000_000_000_000),
-                commission: if i % 3 == 0 { Some(5.0 + (i % 10) as f64) } else { None },
+                commission: if i % 3 == 0 {
+                    Some(5.0 + (i % 10) as f64)
+                } else {
+                    None
+                },
                 apy: Some(12.0 + (i % 8) as f64 * 0.5), // Mock APY
             }
         })
@@ -392,10 +410,10 @@ pub fn generate_mock_pools(count: usize) -> Vec<PoolInfo> {
 }
 
 impl StkoptApp {
-    pub fn new(cx: &mut Context<Self>, log_buffer: Arc<crate::log::LogBuffer>) -> Self {
+    pub fn new(cx: &mut Context<Self>, log_buffer: crate::log::LogBuffer) -> Self {
         // Load saved config from disk
         let config = crate::persistence::load_config().unwrap_or_default();
-        
+
         // Convert network config to app network
         let network = match config.network {
             crate::persistence::NetworkConfig::Polkadot => Network::Polkadot,
@@ -404,7 +422,7 @@ impl StkoptApp {
             crate::persistence::NetworkConfig::Paseo => Network::Westend, // Paseo not yet supported in GPUI
             crate::persistence::NetworkConfig::Custom => Network::Polkadot,
         };
-        
+
         // Convert connection mode config
         let connection_mode = match config.connection_mode {
             crate::persistence::ConnectionModeConfig::Rpc => ConnectionMode::Rpc,
@@ -413,25 +431,30 @@ impl StkoptApp {
 
         // Initialize database and chain worker
         let handle = crate::gpui_tokio::Tokio::handle(cx);
-        let db = crate::db_service::DbService::new(handle.clone()).expect("Failed to initialize database");
-        let (chain_handle, mut update_rx) = crate::chain::spawn_chain_worker(Some(db.clone()), handle);
+        let db = crate::db_service::DbService::new(handle.clone())
+            .expect("Failed to initialize database");
+        let (chain_handle, mut update_rx) =
+            crate::chain::spawn_chain_worker(Some(db.clone()), handle);
 
         // Spawn chain update listener
         // We initialize pending_updates early to share with the listener
         let pending_updates = Arc::new(Mutex::new(Vec::new()));
         let listener_updates = pending_updates.clone();
-        
+
         let mut async_cx = cx.to_async();
-        cx.spawn(move |this: WeakEntity<Self>, _cx: &mut gpui::AsyncApp| async move {
-            while let Some(update) = update_rx.recv().await {
-                if let Ok(mut queue) = listener_updates.lock() {
-                    queue.push(update);
+        cx.spawn(
+            move |this: WeakEntity<Self>, _cx: &mut gpui::AsyncApp| async move {
+                while let Some(update) = update_rx.recv().await {
+                    if let Ok(mut queue) = listener_updates.lock() {
+                        queue.push(update);
+                    }
+                    // Notify the view to process updates in the next frame
+                    // We use process_pending_updates in render() to pick these up
+                    let _ = this.update(&mut async_cx, |_, cx: &mut Context<Self>| cx.notify());
                 }
-                // Notify the view to process updates in the next frame
-                // We use process_pending_updates in render() to pick these up
-                let _ = this.update(&mut async_cx, |_, cx: &mut Context<Self>| cx.notify());
-            }
-        }).detach();
+            },
+        )
+        .detach();
 
         // Auto-connect if enabled
         if config.auto_connect {
@@ -442,9 +465,10 @@ impl StkoptApp {
                 if let Err(e) = handle.connect(net.to_core(), use_light).await {
                     eprintln!("Failed to auto-connect: {}", e);
                 }
-            }).detach();
+            })
+            .detach();
         }
-        
+
         let instance = Self {
             // Start on Account tab since no address is set yet
             current_section: Section::Account,
@@ -476,7 +500,6 @@ impl StkoptApp {
             optimization_strategy: crate::optimization::SelectionStrategy::default(),
             optimization_max_commission: 0.15,
             optimization_target_count: 16,
-            qr_payload: None,
             chain_handle: Some(chain_handle),
             connection_error: None,
             pending_updates,
@@ -499,61 +522,74 @@ impl StkoptApp {
             camera_preview: None,
             scanned_signature: None,
         };
-        
+
         instance.load_cache(cx);
         instance
     }
-    
+
     /// Load cached data from the database.
     pub fn load_cache(&self, cx: &mut Context<Self>) {
         let db = self.db.clone();
         let network = self.network.to_core();
         let pending_updates = self.pending_updates.clone();
-        
-        let mut async_cx = cx.to_async();
-        cx.spawn(move |this: WeakEntity<Self>, _cx: &mut gpui::AsyncApp| async move {
-            let validators_res = db.get_cached_validators(network).await;
-            let pools_res = db.get_cached_pools(network).await;
-            
-            let mut updates = Vec::new();
-            if let Ok(validators) = validators_res
-                && !validators.is_empty()
-            {
-                updates.push(crate::chain::ChainUpdate::ValidatorsLoaded(validators));
-            }
-            if let Ok(pools) = pools_res
-                && !pools.is_empty()
-            {
-                updates.push(crate::chain::ChainUpdate::PoolsLoaded(pools));
-            }
-            
-            if !updates.is_empty() {
-                if let Ok(mut queue) = pending_updates.lock() {
-                    queue.extend(updates);
-                }
-                // Notify the view to process updates
-                let _ = this.update(&mut async_cx, |_, cx: &mut Context<Self>| cx.notify());
-            }
-        }).detach();
 
+        let mut async_cx = cx.to_async();
+        cx.spawn(
+            move |this: WeakEntity<Self>, _cx: &mut gpui::AsyncApp| async move {
+                let validators_res = db.get_cached_validators(network).await;
+                let pools_res = db.get_cached_pools(network).await;
+
+                let mut updates = Vec::new();
+                if let Ok(validators) = validators_res
+                    && !validators.is_empty()
+                {
+                    updates.push(crate::chain::ChainUpdate::ValidatorsLoaded(validators));
+                }
+                if let Ok(pools) = pools_res
+                    && !pools.is_empty()
+                {
+                    updates.push(crate::chain::ChainUpdate::PoolsLoaded(pools));
+                }
+
+                if !updates.is_empty() {
+                    if let Ok(mut queue) = pending_updates.lock() {
+                        queue.extend(updates);
+                    }
+                    // Notify the view to process updates
+                    let _ = this.update(&mut async_cx, |_, cx: &mut Context<Self>| cx.notify());
+                }
+            },
+        )
+        .detach();
     }
 
     /// Process any pending chain updates. Called during render.
     pub fn process_pending_updates(&mut self, cx: &mut Context<Self>) {
         let updates: Vec<crate::chain::ChainUpdate> = {
-            let mut pending = self.pending_updates.lock().unwrap();
-            std::mem::take(&mut *pending)
+            match self.pending_updates.lock() {
+                Ok(mut pending) => std::mem::take(&mut *pending),
+                Err(poisoned) => {
+                    // Mutex was poisoned (a thread panicked while holding it)
+                    // Recover by taking the data anyway
+                    tracing::warn!("pending_updates mutex was poisoned, recovering");
+                    std::mem::take(&mut *poisoned.into_inner())
+                }
+            }
         };
-        
+
         for update in updates {
             self.apply_chain_update(update, cx);
         }
     }
-    
+
     /// Apply a single chain update to the app state.
-    pub fn apply_chain_update(&mut self, update: crate::chain::ChainUpdate, cx: &mut Context<Self>) {
+    pub fn apply_chain_update(
+        &mut self,
+        update: crate::chain::ChainUpdate,
+        cx: &mut Context<Self>,
+    ) {
         use crate::chain::ChainUpdate;
-        
+
         match update {
             ChainUpdate::ConnectionStatus(status) => {
                 self.connection_status = match status {
@@ -581,20 +617,28 @@ impl StkoptApp {
                     total_balance: account_data.free_balance + account_data.reserved_balance,
                     transferable: account_data.free_balance,
                     bonded: account_data.staked_balance.unwrap_or(0),
-                    unbonding: 0, // TODO: Get from chain
-                    rewards_pending: 0, // TODO: Get from chain
+                    unbonding: account_data.unbonding_balance,
+                    rewards_pending: 0, // Rewards are auto-compounded or claimed, no "pending" in modern staking
                     is_nominating: account_data.is_nominating,
                     nomination_count: account_data.nominations.len(),
                 });
-                tracing::info!("Account data loaded: balance={}", account_data.free_balance);
+                tracing::info!(
+                    "Account data loaded: balance={}, unbonding={}",
+                    account_data.free_balance,
+                    account_data.unbonding_balance
+                );
             }
             ChainUpdate::HistoryLoaded(history) => {
                 self.staking_history = history;
             }
             ChainUpdate::QrPayloadGenerated(payload) => {
-                // Store the generated QR payload for display
+                // Store the generated QR payload for display in QR modal
                 tracing::info!("QR payload generated: {}", payload.description);
-                // TODO: Store in app state for display in QR modal
+                self.pending_tx_payload = Some(payload);
+                self.show_staking_modal = false;
+                self.show_pool_modal = false;
+                self.show_qr_modal = true;
+                self.qr_modal_tab = QrModalTab::QrCode;
             }
             ChainUpdate::TxSubmissionUpdate(result) => {
                 // Handle transaction submission result
@@ -604,7 +648,10 @@ impl StkoptApp {
                         tracing::info!("Transaction in block: 0x{}", hex::encode(block_hash));
                     }
                     TxSubmissionResult::Finalized { block_hash } => {
-                        tracing::info!("Transaction finalized in block: 0x{}", hex::encode(block_hash));
+                        tracing::info!(
+                            "Transaction finalized in block: 0x{}",
+                            hex::encode(block_hash)
+                        );
                     }
                     TxSubmissionResult::Dropped(reason) => {
                         tracing::warn!("Transaction dropped: {}", reason);
@@ -619,7 +666,7 @@ impl StkoptApp {
         }
         cx.notify();
     }
-    
+
     /// Save current settings to disk.
     pub fn save_config(&self) {
         let config = crate::persistence::AppConfig {
@@ -641,7 +688,11 @@ impl StkoptApp {
     /// Add an account to the address book if not already present.
     pub fn add_to_address_book(&mut self, address: String) {
         // Check if already exists
-        if self.address_book.iter().any(|a| a.address == address && a.network == self.network) {
+        if self
+            .address_book
+            .iter()
+            .any(|a| a.address == address && a.network == self.network)
+        {
             return;
         }
         self.address_book.push(SavedAccount {
@@ -653,7 +704,23 @@ impl StkoptApp {
 
     /// Remove an account from the address book.
     pub fn remove_from_address_book(&mut self, address: &str) {
-        self.address_book.retain(|a| a.address != address || a.network != self.network);
+        self.address_book
+            .retain(|a| a.address != address || a.network != self.network);
+    }
+
+    /// Get the token decimals for the current network.
+    pub fn token_decimals(&self) -> u8 {
+        self.network.token_decimals()
+    }
+
+    /// Get the decimal divisor (10^decimals) for the current network.
+    pub fn decimal_divisor(&self) -> u128 {
+        10u128.pow(self.network.token_decimals() as u32)
+    }
+
+    /// Get the token symbol for the current network.
+    pub fn token_symbol(&self) -> &'static str {
+        self.network.symbol()
     }
 
     /// Open the staking modal with a specific operation.
@@ -690,9 +757,9 @@ impl StkoptApp {
 
         // Parse amount if needed
         let amount = if self.staking_operation.requires_amount() {
-            let decimals = 10u128.pow(10); // DOT has 10 decimals
+            let divisor = self.decimal_divisor();
             match self.staking_amount_input.parse::<f64>() {
-                Ok(val) => (val * decimals as f64) as u128,
+                Ok(val) => (val * divisor as f64) as u128,
                 Err(_) => {
                     self.connection_error = Some("Invalid amount".to_string());
                     cx.notify();
@@ -707,41 +774,124 @@ impl StkoptApp {
         let operation = self.staking_operation;
         let mut async_cx = cx.to_async();
 
-        cx.spawn(move |this: gpui::WeakEntity<Self>, _cx: &mut gpui::AsyncApp| async move {
-            let result = match operation {
-                StakingOperation::Bond => handle.create_bond_payload(signer, amount).await,
-                StakingOperation::Unbond => handle.create_unbond_payload(signer, amount).await,
-                StakingOperation::BondExtra => handle.create_bond_extra_payload(signer, amount).await,
-                StakingOperation::WithdrawUnbonded => handle.create_withdraw_unbonded_payload(signer).await,
-                StakingOperation::Chill => handle.create_chill_payload(signer).await,
-                StakingOperation::Rebond | StakingOperation::Nominate | StakingOperation::ClaimRewards => {
-                    Err("Not implemented yet".to_string())
-                }
-            };
+        cx.spawn(
+            move |this: gpui::WeakEntity<Self>, _cx: &mut gpui::AsyncApp| async move {
+                let result = match operation {
+                    StakingOperation::Bond => handle.create_bond_payload(signer, amount).await,
+                    StakingOperation::Unbond => handle.create_unbond_payload(signer, amount).await,
+                    StakingOperation::BondExtra => {
+                        handle.create_bond_extra_payload(signer, amount).await
+                    }
+                    StakingOperation::WithdrawUnbonded => {
+                        handle.create_withdraw_unbonded_payload(signer).await
+                    }
+                    StakingOperation::Chill => handle.create_chill_payload(signer).await,
+                    StakingOperation::Rebond
+                    | StakingOperation::Nominate
+                    | StakingOperation::ClaimRewards => Err("Not implemented yet".to_string()),
+                };
 
-            match result {
-                Ok(payload) => {
-                    let _ = this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
-                        this.pending_tx_payload = Some(payload);
-                        this.show_staking_modal = false;
-                        this.show_qr_modal = true;
-                        this.qr_modal_tab = QrModalTab::QrCode;
-                        cx.notify();
-                    });
+                match result {
+                    Ok(payload) => {
+                        let _ = this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
+                            this.pending_tx_payload = Some(payload);
+                            this.show_staking_modal = false;
+                            this.show_qr_modal = true;
+                            this.qr_modal_tab = QrModalTab::QrCode;
+                            cx.notify();
+                        });
+                    }
+                    Err(e) => {
+                        let _ = this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
+                            this.connection_error = Some(e);
+                            cx.notify();
+                        });
+                    }
                 }
+            },
+        )
+        .detach();
+    }
+
+    /// Generate QR payload for nominating validators.
+    pub fn generate_nominate_qr(&mut self, targets: Vec<String>, cx: &mut Context<Self>) {
+        let Some(ref chain_handle) = self.chain_handle else {
+            self.connection_error = Some("Not connected".to_string());
+            cx.notify();
+            return;
+        };
+
+        let Some(ref address) = self.watched_account else {
+            self.connection_error = Some("No account selected".to_string());
+            cx.notify();
+            return;
+        };
+
+        // Parse the signer account address
+        let signer = match address.parse::<subxt::utils::AccountId32>() {
+            Ok(id) => id,
+            Err(e) => {
+                self.connection_error = Some(format!("Invalid signer address: {}", e));
+                cx.notify();
+                return;
+            }
+        };
+
+        // Parse all target validator addresses
+        let mut parsed_targets = Vec::with_capacity(targets.len());
+        for target in &targets {
+            match target.parse::<subxt::utils::AccountId32>() {
+                Ok(id) => parsed_targets.push(id),
                 Err(e) => {
-                    let _ = this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
-                        this.connection_error = Some(e);
-                        cx.notify();
-                    });
+                    self.connection_error =
+                        Some(format!("Invalid validator address {}: {}", target, e));
+                    cx.notify();
+                    return;
                 }
             }
-        })
+        }
+
+        if parsed_targets.is_empty() {
+            self.connection_error = Some("No validators selected".to_string());
+            cx.notify();
+            return;
+        }
+
+        let handle = chain_handle.clone();
+        let mut async_cx = cx.to_async();
+
+        cx.spawn(
+            move |this: gpui::WeakEntity<Self>, _cx: &mut gpui::AsyncApp| async move {
+                let result = handle.create_nominate_payload(signer, parsed_targets).await;
+
+                match result {
+                    Ok(payload) => {
+                        let _ = this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
+                            this.pending_tx_payload = Some(payload);
+                            this.show_qr_modal = true;
+                            this.qr_modal_tab = QrModalTab::QrCode;
+                            cx.notify();
+                        });
+                    }
+                    Err(e) => {
+                        let _ = this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
+                            this.connection_error = Some(e);
+                            cx.notify();
+                        });
+                    }
+                }
+            },
+        )
         .detach();
     }
 
     /// Open the pool modal with a specific operation.
-    pub fn open_pool_modal(&mut self, operation: PoolOperation, pool_id: Option<u32>, cx: &mut Context<Self>) {
+    pub fn open_pool_modal(
+        &mut self,
+        operation: PoolOperation,
+        pool_id: Option<u32>,
+        cx: &mut Context<Self>,
+    ) {
         self.pool_operation = operation;
         self.selected_pool_id = pool_id;
         self.pool_amount_input.clear();
@@ -775,9 +925,9 @@ impl StkoptApp {
 
         // Parse amount if needed
         let amount = if self.pool_operation.requires_amount() {
-            let decimals = 10u128.pow(10);
+            let divisor = self.decimal_divisor();
             match self.pool_amount_input.parse::<f64>() {
-                Ok(val) => (val * decimals as f64) as u128,
+                Ok(val) => (val * divisor as f64) as u128,
                 Err(_) => {
                     self.connection_error = Some("Invalid amount".to_string());
                     cx.notify();
@@ -793,47 +943,45 @@ impl StkoptApp {
         let operation = self.pool_operation;
         let mut async_cx = cx.to_async();
 
-        cx.spawn(move |this: gpui::WeakEntity<Self>, _cx: &mut gpui::AsyncApp| async move {
-            let result = match operation {
-                PoolOperation::Join => {
-                    if let Some(id) = pool_id {
-                        handle.create_pool_join_payload(signer, id, amount).await
-                    } else {
-                        Err("No pool selected".to_string())
+        cx.spawn(
+            move |this: gpui::WeakEntity<Self>, _cx: &mut gpui::AsyncApp| async move {
+                let result = match operation {
+                    PoolOperation::Join => {
+                        if let Some(id) = pool_id {
+                            handle.create_pool_join_payload(signer, id, amount).await
+                        } else {
+                            Err("No pool selected".to_string())
+                        }
+                    }
+                    PoolOperation::BondExtra => {
+                        handle.create_pool_bond_extra_payload(signer, amount).await
+                    }
+                    PoolOperation::ClaimPayout => handle.create_pool_claim_payload(signer).await,
+                    PoolOperation::Unbond => {
+                        handle.create_pool_unbond_payload(signer, amount).await
+                    }
+                    PoolOperation::Withdraw => handle.create_pool_withdraw_payload(signer).await,
+                };
+
+                match result {
+                    Ok(payload) => {
+                        let _ = this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
+                            this.pending_tx_payload = Some(payload);
+                            this.show_pool_modal = false;
+                            this.show_qr_modal = true;
+                            this.qr_modal_tab = QrModalTab::QrCode;
+                            cx.notify();
+                        });
+                    }
+                    Err(e) => {
+                        let _ = this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
+                            this.connection_error = Some(e);
+                            cx.notify();
+                        });
                     }
                 }
-                PoolOperation::BondExtra => {
-                    handle.create_pool_bond_extra_payload(signer, amount).await
-                }
-                PoolOperation::ClaimPayout => {
-                    handle.create_pool_claim_payload(signer).await
-                }
-                PoolOperation::Unbond => {
-                    handle.create_pool_unbond_payload(signer, amount).await
-                }
-                PoolOperation::Withdraw => {
-                    handle.create_pool_withdraw_payload(signer).await
-                }
-            };
-
-            match result {
-                Ok(payload) => {
-                    let _ = this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
-                        this.pending_tx_payload = Some(payload);
-                        this.show_pool_modal = false;
-                        this.show_qr_modal = true;
-                        this.qr_modal_tab = QrModalTab::QrCode;
-                        cx.notify();
-                    });
-                }
-                Err(e) => {
-                    let _ = this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
-                        this.connection_error = Some(e);
-                        cx.notify();
-                    });
-                }
-            }
-        })
+            },
+        )
         .detach();
     }
 
@@ -856,23 +1004,25 @@ impl StkoptApp {
         let num_eras = 30u32; // Load last 30 eras
         let mut async_cx = cx.to_async();
 
-        cx.spawn(move |this: gpui::WeakEntity<Self>, _cx: &mut gpui::AsyncApp| async move {
-            let result = chain_handle.fetch_history(address, num_eras).await;
-            let _ = this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
-                this.history_loading = false;
-                match result {
-                    Ok(history) => {
-                        tracing::info!("History loaded: {} points", history.len());
-                        this.staking_history = history;
+        cx.spawn(
+            move |this: gpui::WeakEntity<Self>, _cx: &mut gpui::AsyncApp| async move {
+                let result = chain_handle.fetch_history(address, num_eras).await;
+                let _ = this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
+                    this.history_loading = false;
+                    match result {
+                        Ok(history) => {
+                            tracing::info!("History loaded: {} points", history.len());
+                            this.staking_history = history;
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to load history: {}", e);
+                            this.connection_error = Some(format!("Failed to load history: {}", e));
+                        }
                     }
-                    Err(e) => {
-                        tracing::error!("Failed to load history: {}", e);
-                        this.connection_error = Some(format!("Failed to load history: {}", e));
-                    }
-                }
-                cx.notify();
-            });
-        })
+                    cx.notify();
+                });
+            },
+        )
         .detach();
     }
 
@@ -934,7 +1084,8 @@ impl StkoptApp {
                     }
                     // Move to submit tab
                     self.qr_modal_tab = QrModalTab::Submit;
-                    self.tx_status_message = Some(format!("Signature scanned ({} bytes)", data.len()));
+                    self.tx_status_message =
+                        Some(format!("Signature scanned ({} bytes)", data.len()));
                     cx.notify();
                     return;
                 }
@@ -989,19 +1140,34 @@ impl StkoptApp {
                         .items_center()
                         .gap_2()
                         .child(Text::new("⚡").size(TextSize::Lg))
-                        .child(
-                            Heading::h3("Staking Optimizer")
-                                .into_any_element(),
-                        ),
+                        .child(Heading::h3("Staking Optimizer").into_any_element()),
                 )
                 .child(
                     div()
                         .mt_2()
                         .flex()
                         .gap_1()
-                        .child(network_pill("DOT", Network::Polkadot, self.network, &theme, entity.clone()))
-                        .child(network_pill("KSM", Network::Kusama, self.network, &theme, entity.clone()))
-                        .child(network_pill("WND", Network::Westend, self.network, &theme, entity.clone())),
+                        .child(network_pill(
+                            "DOT",
+                            Network::Polkadot,
+                            self.network,
+                            &theme,
+                            entity.clone(),
+                        ))
+                        .child(network_pill(
+                            "KSM",
+                            Network::Kusama,
+                            self.network,
+                            &theme,
+                            entity.clone(),
+                        ))
+                        .child(network_pill(
+                            "WND",
+                            Network::Westend,
+                            self.network,
+                            &theme,
+                            entity.clone(),
+                        )),
                 ),
         );
 
@@ -1073,8 +1239,20 @@ impl StkoptApp {
         div()
             .flex()
             .gap_1()
-            .child(mode_pill("Light", ConnectionMode::LightClient, self.connection_mode, &theme, entity.clone()))
-            .child(mode_pill("RPC", ConnectionMode::Rpc, self.connection_mode, &theme, entity.clone()))
+            .child(mode_pill(
+                "Light",
+                ConnectionMode::LightClient,
+                self.connection_mode,
+                &theme,
+                entity.clone(),
+            ))
+            .child(mode_pill(
+                "RPC",
+                ConnectionMode::Rpc,
+                self.connection_mode,
+                &theme,
+                entity.clone(),
+            ))
     }
 
     fn render_connection_status(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -1089,13 +1267,7 @@ impl StkoptApp {
             .flex()
             .items_center()
             .gap_2()
-            .child(
-                div()
-                    .w(px(8.0))
-                    .h(px(8.0))
-                    .rounded_full()
-                    .bg(status_color),
-            )
+            .child(div().w(px(8.0)).h(px(8.0)).rounded_full().bg(status_color))
             .child(Text::new(status_text).size(TextSize::Sm))
     }
 
@@ -1127,7 +1299,7 @@ impl StkoptApp {
                     .flex_1()
                     .overflow_y_scroll()
                     .p_6()
-                    .bg(gpui::rgba(0x00000000))  // Transparent but present for hit-testing
+                    .bg(gpui::rgba(0x00000000)) // Transparent but present for hit-testing
                     .on_mouse_down(MouseButton::Left, |_event, _window, _cx| {
                         tracing::info!("[CONTENT] Scroll container clicked!");
                     })
@@ -1143,7 +1315,7 @@ impl Render for StkoptApp {
 
         // Poll camera for QR scan results
         self.poll_camera(cx);
-        
+
         let theme = cx.theme();
         let entity = self.entity.clone();
 
@@ -1159,115 +1331,62 @@ impl Render for StkoptApp {
                 tracing::info!("[ROOT] Root element clicked!");
             });
 
-        // Add keyboard handler for settings shortcut
-        #[cfg(target_os = "macos")]
-        {
-            root = root.on_key_down({
-                let entity = entity.clone();
-                move |event, _window, cx| {
-                    if event.keystroke.key == "," && event.keystroke.modifiers.platform {
-                        entity.update(cx, |this, cx| {
-                            this.show_settings = !this.show_settings;
-                            cx.notify();
-                        });
-                    }
-                    // Cmd+L to toggle logs
-                    if event.keystroke.key == "l" && event.keystroke.modifiers.platform {
-                        entity.update(cx, |this, cx| {
-                            this.show_logs = !this.show_logs;
-                            cx.notify();
-                        });
-                    }
-                    // Escape to close modals/settings/help/logs
-                    if event.keystroke.key == "escape" {
-                        entity.update(cx, |this, cx| {
-                            if this.show_qr_modal {
-                                this.show_qr_modal = false;
-                                this.pending_tx_payload = None;
-                                this.stop_camera(cx);
-                                cx.notify();
-                            } else if this.show_staking_modal {
-                                this.show_staking_modal = false;
-                                cx.notify();
-                            } else if this.show_pool_modal {
-                                this.show_pool_modal = false;
-                                cx.notify();
-                            } else if this.show_help {
-                                this.show_help = false;
-                                cx.notify();
-                            } else if this.show_settings {
-                                this.show_settings = false;
-                                cx.notify();
-                            } else if this.show_logs {
-                                this.show_logs = false;
-                                cx.notify();
-                            }
-                        });
-                    }
-                    // ? to toggle help
-                    if event.keystroke.key == "?" || (event.keystroke.key == "/" && event.keystroke.modifiers.shift) {
-                        entity.update(cx, |this, cx| {
-                            this.show_help = !this.show_help;
-                            cx.notify();
-                        });
-                    }
+        // Add keyboard handler for shortcuts (Cmd on macOS, Ctrl on other platforms)
+        root = root.on_key_down({
+            let entity = entity.clone();
+            move |event, _window, cx| {
+                // Check for platform modifier (Cmd on macOS, Ctrl elsewhere)
+                #[cfg(target_os = "macos")]
+                let has_cmd_modifier = event.keystroke.modifiers.platform;
+                #[cfg(not(target_os = "macos"))]
+                let has_cmd_modifier = event.keystroke.modifiers.control;
+
+                // Cmd/Ctrl+, to toggle settings
+                if event.keystroke.key == "," && has_cmd_modifier {
+                    entity.update(cx, |this, cx| {
+                        this.show_settings = !this.show_settings;
+                        cx.notify();
+                    });
                 }
-            });
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            root = root.on_key_down({
-                let entity = entity.clone();
-                move |event, _window, cx| {
-                    if event.keystroke.key == "," && event.keystroke.modifiers.control {
-                        entity.update(cx, |this, cx| {
-                            this.show_settings = !this.show_settings;
-                            cx.notify();
-                        });
-                    }
-                    // Ctrl+L to toggle logs
-                    if event.keystroke.key == "l" && event.keystroke.modifiers.control {
-                        entity.update(cx, |this, cx| {
-                            this.show_logs = !this.show_logs;
-                            cx.notify();
-                        });
-                    }
-                    // Escape to close modals/settings/help/logs
-                    if event.keystroke.key == "escape" {
-                        entity.update(cx, |this, cx| {
-                            if this.show_qr_modal {
-                                this.show_qr_modal = false;
-                                this.pending_tx_payload = None;
-                                this.stop_camera(cx);
-                                cx.notify();
-                            } else if this.show_staking_modal {
-                                this.show_staking_modal = false;
-                                cx.notify();
-                            } else if this.show_pool_modal {
-                                this.show_pool_modal = false;
-                                cx.notify();
-                            } else if this.show_help {
-                                this.show_help = false;
-                                cx.notify();
-                            } else if this.show_settings {
-                                this.show_settings = false;
-                                cx.notify();
-                            } else if this.show_logs {
-                                this.show_logs = false;
-                                cx.notify();
-                            }
-                        });
-                    }
-                    // ? to toggle help
-                    if event.keystroke.key == "?" || (event.keystroke.key == "/" && event.keystroke.modifiers.shift) {
-                        entity.update(cx, |this, cx| {
-                            this.show_help = !this.show_help;
-                            cx.notify();
-                        });
-                    }
+                // Cmd/Ctrl+L to toggle logs
+                if event.keystroke.key == "l" && has_cmd_modifier {
+                    entity.update(cx, |this, cx| {
+                        this.show_logs = !this.show_logs;
+                        cx.notify();
+                    });
                 }
-            });
-        }
+                // Escape to close modals/settings/help/logs (in priority order)
+                if event.keystroke.key == "escape" {
+                    entity.update(cx, |this, cx| {
+                        if this.show_qr_modal {
+                            this.show_qr_modal = false;
+                            this.pending_tx_payload = None;
+                            this.stop_camera(cx);
+                        } else if this.show_staking_modal {
+                            this.show_staking_modal = false;
+                        } else if this.show_pool_modal {
+                            this.show_pool_modal = false;
+                        } else if this.show_help {
+                            this.show_help = false;
+                        } else if this.show_settings {
+                            this.show_settings = false;
+                        } else if this.show_logs {
+                            this.show_logs = false;
+                        }
+                        cx.notify();
+                    });
+                }
+                // ? to toggle help
+                if event.keystroke.key == "?"
+                    || (event.keystroke.key == "/" && event.keystroke.modifiers.shift)
+                {
+                    entity.update(cx, |this, cx| {
+                        this.show_help = !this.show_help;
+                        cx.notify();
+                    });
+                }
+            }
+        });
 
         if self.show_settings {
             root = root.child(
@@ -1324,8 +1443,16 @@ fn network_pill(
     entity: Entity<StkoptApp>,
 ) -> impl IntoElement {
     let is_active = network == current;
-    let bg = if is_active { theme.accent } else { theme.surface_hover };
-    let text_color = if is_active { rgba(0xffffffff) } else { theme.text_secondary };
+    let bg = if is_active {
+        theme.accent
+    } else {
+        theme.surface_hover
+    };
+    let text_color = if is_active {
+        rgba(0xffffffff)
+    } else {
+        theme.text_secondary
+    };
 
     div()
         .id(SharedString::from(format!("network-{:?}", network)))
@@ -1345,11 +1472,20 @@ fn network_pill(
                 if this.network != network {
                     this.network = network;
                     this.save_config();
-                    // Disconnect and reconnect with new network
+                    // Disconnect from current network (keep chain_handle for future commands)
                     if this.connection_status == ConnectionStatus::Connected {
+                        if let Some(ref handle) = this.chain_handle {
+                            let handle = handle.clone();
+                            cx.spawn(move |_: gpui::WeakEntity<StkoptApp>, _: &mut gpui::AsyncApp| async move {
+                                let _ = handle.disconnect().await;
+                            }).detach();
+                        }
                         this.connection_status = ConnectionStatus::Disconnected;
-                        this.chain_handle = None;
                     }
+                    // Clear cached data for old network
+                    this.validators.clear();
+                    this.pools.clear();
+                    this.staking_history.clear();
                     cx.notify();
                 }
             });
@@ -1365,8 +1501,16 @@ fn mode_pill(
     entity: Entity<StkoptApp>,
 ) -> impl IntoElement {
     let is_active = mode == current;
-    let bg = if is_active { theme.accent } else { theme.surface_hover };
-    let text_color = if is_active { rgba(0xffffffff) } else { theme.text_secondary };
+    let bg = if is_active {
+        theme.accent
+    } else {
+        theme.surface_hover
+    };
+    let text_color = if is_active {
+        rgba(0xffffffff)
+    } else {
+        theme.text_secondary
+    };
 
     div()
         .id(SharedString::from(format!("mode-{:?}", mode)))
@@ -1386,10 +1530,15 @@ fn mode_pill(
                 if this.connection_mode != mode {
                     this.connection_mode = mode;
                     this.save_config();
-                    // Disconnect and reconnect with new mode
+                    // Disconnect from current connection (keep chain_handle for future commands)
                     if this.connection_status == ConnectionStatus::Connected {
+                        if let Some(ref handle) = this.chain_handle {
+                            let handle = handle.clone();
+                            cx.spawn(move |_: gpui::WeakEntity<StkoptApp>, _: &mut gpui::AsyncApp| async move {
+                                let _ = handle.disconnect().await;
+                            }).detach();
+                        }
                         this.connection_status = ConnectionStatus::Disconnected;
-                        this.chain_handle = None;
                     }
                     cx.notify();
                 }

@@ -173,6 +173,156 @@ pub enum ConnectionStatus {
     Error(String),
 }
 
+/// Reward destination for staking rewards.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum RewardDestination {
+    /// Rewards are automatically bonded (compounding).
+    #[default]
+    Staked,
+    /// Rewards are paid to the stash account.
+    Stash,
+    /// Rewards are paid to the controller account.
+    Controller,
+    /// Rewards are paid to a specific account (SS58 encoded).
+    Account(String),
+    /// Rewards are burned (do not use).
+    None,
+}
+
+impl RewardDestination {
+    /// Get display label for UI.
+    pub fn label(&self) -> &'static str {
+        match self {
+            RewardDestination::Staked => "Compound (Staked)",
+            RewardDestination::Stash => "Stash Account",
+            RewardDestination::Controller => "Controller Account",
+            RewardDestination::Account(_) => "Custom Account",
+            RewardDestination::None => "None (Burn)",
+        }
+    }
+}
+
+/// Transaction type for staking operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionType {
+    /// Nominate validators.
+    Nominate,
+    /// Bond tokens for staking.
+    Bond,
+    /// Bond extra tokens to existing stake.
+    BondExtra,
+    /// Unbond tokens from stake.
+    Unbond,
+    /// Withdraw unbonded tokens.
+    WithdrawUnbonded,
+    /// Chill (stop nominating).
+    Chill,
+    /// Set controller account.
+    SetController,
+    /// Set payee for rewards.
+    SetPayee,
+    /// Rebond tokens that are unbonding.
+    Rebond,
+    /// Join nomination pool.
+    PoolJoin,
+    /// Bond extra to pool.
+    PoolBondExtra,
+    /// Claim pool rewards.
+    PoolClaimPayout,
+    /// Unbond from pool.
+    PoolUnbond,
+    /// Withdraw from pool.
+    PoolWithdrawUnbonded,
+}
+
+impl TransactionType {
+    /// Get display label for the transaction type.
+    pub fn label(&self) -> &'static str {
+        match self {
+            TransactionType::Nominate => "Nominate",
+            TransactionType::Bond => "Bond",
+            TransactionType::BondExtra => "Bond Extra",
+            TransactionType::Unbond => "Unbond",
+            TransactionType::WithdrawUnbonded => "Withdraw Unbonded",
+            TransactionType::Chill => "Chill",
+            TransactionType::SetController => "Set Controller",
+            TransactionType::SetPayee => "Set Payee",
+            TransactionType::Rebond => "Rebond",
+            TransactionType::PoolJoin => "Join Pool",
+            TransactionType::PoolBondExtra => "Pool Bond Extra",
+            TransactionType::PoolClaimPayout => "Claim Pool Rewards",
+            TransactionType::PoolUnbond => "Pool Unbond",
+            TransactionType::PoolWithdrawUnbonded => "Pool Withdraw",
+        }
+    }
+
+    /// Get description for the transaction type.
+    pub fn description(&self) -> &'static str {
+        match self {
+            TransactionType::Nominate => "Select validators to nominate",
+            TransactionType::Bond => "Lock tokens for staking",
+            TransactionType::BondExtra => "Add more tokens to existing stake",
+            TransactionType::Unbond => "Start unbonding tokens (28 day wait)",
+            TransactionType::WithdrawUnbonded => "Withdraw fully unbonded tokens",
+            TransactionType::Chill => "Stop nominating validators",
+            TransactionType::SetController => "Change controller account",
+            TransactionType::SetPayee => "Change reward destination",
+            TransactionType::Rebond => "Cancel unbonding and restake",
+            TransactionType::PoolJoin => "Join a nomination pool",
+            TransactionType::PoolBondExtra => "Add more tokens to pool stake",
+            TransactionType::PoolClaimPayout => "Claim pending pool rewards",
+            TransactionType::PoolUnbond => "Start unbonding from pool",
+            TransactionType::PoolWithdrawUnbonded => "Withdraw unbonded pool tokens",
+        }
+    }
+}
+
+/// Transaction status in the signing/submission lifecycle.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum TransactionStatus {
+    /// Transaction is being built.
+    #[default]
+    Building,
+    /// Transaction is ready for signing.
+    ReadyToSign,
+    /// Waiting for signature (QR displayed).
+    AwaitingSignature,
+    /// Signature received, ready to submit.
+    Signed,
+    /// Transaction submitted, waiting for inclusion.
+    Submitted,
+    /// Transaction included in block.
+    InBlock(String),
+    /// Transaction finalized.
+    Finalized(String),
+    /// Transaction failed.
+    Failed(String),
+}
+
+impl TransactionStatus {
+    /// Check if transaction is pending (not yet finalized or failed).
+    pub fn is_pending(&self) -> bool {
+        !matches!(
+            self,
+            TransactionStatus::Finalized(_) | TransactionStatus::Failed(_)
+        )
+    }
+
+    /// Get display label.
+    pub fn label(&self) -> &'static str {
+        match self {
+            TransactionStatus::Building => "Building",
+            TransactionStatus::ReadyToSign => "Ready to Sign",
+            TransactionStatus::AwaitingSignature => "Awaiting Signature",
+            TransactionStatus::Signed => "Signed",
+            TransactionStatus::Submitted => "Submitted",
+            TransactionStatus::InBlock(_) => "In Block",
+            TransactionStatus::Finalized(_) => "Finalized",
+            TransactionStatus::Failed(_) => "Failed",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

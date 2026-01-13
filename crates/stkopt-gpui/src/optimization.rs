@@ -115,7 +115,9 @@ pub fn optimize_selection(
             candidates.sort_by(|a, b| {
                 let apy_a = a.1.apy.unwrap_or(0.0);
                 let apy_b = b.1.apy.unwrap_or(0.0);
-                apy_b.partial_cmp(&apy_a).unwrap_or(std::cmp::Ordering::Equal)
+                apy_b
+                    .partial_cmp(&apy_a)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             });
         }
         SelectionStrategy::MinCommission => {
@@ -130,19 +132,23 @@ pub fn optimize_selection(
             candidates.sort_by(|a, b| {
                 let apy_a = a.1.apy.unwrap_or(0.0);
                 let apy_b = b.1.apy.unwrap_or(0.0);
-                apy_b.partial_cmp(&apy_a).unwrap_or(std::cmp::Ordering::Equal)
+                apy_b
+                    .partial_cmp(&apy_a)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             });
             // Take top 10% or at least 3x target
-            let top_count = (candidates.len() / 10).max(criteria.target_count * 3).min(candidates.len());
+            let top_count = (candidates.len() / 10)
+                .max(criteria.target_count * 3)
+                .min(candidates.len());
             let top_portion = &mut candidates[..top_count];
-            
+
             // Simple shuffle using time-based seed
             use std::time::{SystemTime, UNIX_EPOCH};
             let seed = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_nanos() as usize)
                 .unwrap_or(0);
-            
+
             for i in (1..top_portion.len()).rev() {
                 let j = (seed.wrapping_mul(i + 1).wrapping_add(i)) % (i + 1);
                 top_portion.swap(i, j);
@@ -153,34 +159,38 @@ pub fn optimize_selection(
             candidates.sort_by(|a, b| {
                 let apy_a = a.1.apy.unwrap_or(0.0);
                 let apy_b = b.1.apy.unwrap_or(0.0);
-                apy_b.partial_cmp(&apy_a).unwrap_or(std::cmp::Ordering::Equal)
+                apy_b
+                    .partial_cmp(&apy_a)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             });
         }
     }
 
     // Select top N based on target count
-    let selected: Vec<(usize, &ValidatorInfo)> = if criteria.strategy == SelectionStrategy::DiversifyByStake {
-        // Special handling: take half from top APY, half from low stake
-        let half = criteria.target_count / 2;
-        let remaining = criteria.target_count - half;
-        
-        let top_apy: Vec<_> = candidates.iter().take(half).cloned().collect();
-        let selected_indices: std::collections::HashSet<_> = top_apy.iter().map(|(i, _)| *i).collect();
-        
-        // Sort remaining by stake ascending
-        let mut by_stake: Vec<_> = candidates
-            .iter()
-            .filter(|(i, _)| !selected_indices.contains(i))
-            .cloned()
-            .collect();
-        by_stake.sort_by(|a, b| a.1.total_stake.cmp(&b.1.total_stake));
-        
-        let mut result = top_apy;
-        result.extend(by_stake.into_iter().take(remaining));
-        result
-    } else {
-        candidates.into_iter().take(criteria.target_count).collect()
-    };
+    let selected: Vec<(usize, &ValidatorInfo)> =
+        if criteria.strategy == SelectionStrategy::DiversifyByStake {
+            // Special handling: take half from top APY, half from low stake
+            let half = criteria.target_count / 2;
+            let remaining = criteria.target_count - half;
+
+            let top_apy: Vec<_> = candidates.iter().take(half).cloned().collect();
+            let selected_indices: std::collections::HashSet<_> =
+                top_apy.iter().map(|(i, _)| *i).collect();
+
+            // Sort remaining by stake ascending
+            let mut by_stake: Vec<_> = candidates
+                .iter()
+                .filter(|(i, _)| !selected_indices.contains(i))
+                .cloned()
+                .collect();
+            by_stake.sort_by(|a, b| a.1.total_stake.cmp(&b.1.total_stake));
+
+            let mut result = top_apy;
+            result.extend(by_stake.into_iter().take(remaining));
+            result
+        } else {
+            candidates.into_iter().take(criteria.target_count).collect()
+        };
 
     if selected.is_empty() {
         return OptimizationResult::default();
@@ -188,7 +198,7 @@ pub fn optimize_selection(
 
     // Calculate statistics
     let selected_indices: Vec<usize> = selected.iter().map(|(i, _)| *i).collect();
-    
+
     let (min_apy, max_apy, sum_apy, total_stake, sum_commission) = selected.iter().fold(
         (f64::MAX, f64::MIN, 0.0, 0u128, 0.0),
         |(min, max, sum, stake, comm), (_, v)| {

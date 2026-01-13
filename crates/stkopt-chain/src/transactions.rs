@@ -6,18 +6,8 @@ use subxt::dynamic::At;
 use subxt::ext::scale_value::{Primitive, Value};
 pub use subxt::utils::AccountId32;
 
-/// Reward destination for staking rewards.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RewardDestination {
-    /// Rewards are automatically bonded (compounding).
-    Staked,
-    /// Rewards are paid to the controller account (usually same as stash now).
-    Controller,
-    /// Rewards are paid to a specific account.
-    Account(AccountId32),
-    /// Rewards are burned (do not use).
-    None,
-}
+// Re-export the core RewardDestination for convenience
+pub use stkopt_core::RewardDestination;
 
 /// Unsigned extrinsic payload for QR code signing.
 #[derive(Debug, Clone)]
@@ -213,13 +203,19 @@ impl ChainClient {
             RewardDestination::Staked => {
                 Value::unnamed_variant("Staked", std::iter::empty::<Value<()>>())
             }
+            RewardDestination::Stash => {
+                Value::unnamed_variant("Stash", std::iter::empty::<Value<()>>())
+            }
             RewardDestination::Controller => {
                 Value::unnamed_variant("Controller", std::iter::empty::<Value<()>>())
             }
-            RewardDestination::Account(addr) => Value::unnamed_variant(
-                "Account",
-                vec![Value::from_bytes(addr)], // AccountId32 bytes directly
-            ),
+            RewardDestination::Account(addr_str) => {
+                // Parse SS58 address string to AccountId32
+                let addr: AccountId32 = addr_str.parse().map_err(|e| {
+                    ChainError::InvalidAddress(format!("Invalid SS58 address: {}", e))
+                })?;
+                Value::unnamed_variant("Account", vec![Value::from_bytes(addr)])
+            }
             RewardDestination::None => {
                 Value::unnamed_variant("None", std::iter::empty::<Value<()>>())
             }
@@ -679,10 +675,7 @@ pub fn decode_vault_signature(qr_data: &[u8]) -> Result<DecodedSignature, String
             0x01 => SignatureType::Sr25519,
             0x02 => SignatureType::Ecdsa,
             _ => {
-                return Err(format!(
-                    "Unsupported crypto type: 0x{:02x}",
-                    crypto_type
-                ));
+                return Err(format!("Unsupported crypto type: 0x{:02x}", crypto_type));
             }
         };
         if binary_data[2] != 0x00 {
@@ -693,8 +686,15 @@ pub fn decode_vault_signature(qr_data: &[u8]) -> Result<DecodedSignature, String
         }
         let mut signature = [0u8; 64];
         signature.copy_from_slice(&binary_data[3..67]);
-        tracing::info!("Decoded UOS {:?} signature: {} bytes", sig_type, signature.len());
-        return Ok(DecodedSignature { signature, sig_type });
+        tracing::info!(
+            "Decoded UOS {:?} signature: {} bytes",
+            sig_type,
+            signature.len()
+        );
+        return Ok(DecodedSignature {
+            signature,
+            sig_type,
+        });
     }
 
     // Check for simple format: crypto_type (1 byte) + signature (64 bytes)
@@ -709,8 +709,15 @@ pub fn decode_vault_signature(qr_data: &[u8]) -> Result<DecodedSignature, String
         if let Some(sig_type) = sig_type {
             let mut signature = [0u8; 64];
             signature.copy_from_slice(&binary_data[1..65]);
-            tracing::info!("Decoded {:?} signature: {} bytes", sig_type, signature.len());
-            return Ok(DecodedSignature { signature, sig_type });
+            tracing::info!(
+                "Decoded {:?} signature: {} bytes",
+                sig_type,
+                signature.len()
+            );
+            return Ok(DecodedSignature {
+                signature,
+                sig_type,
+            });
         }
     }
 
@@ -718,7 +725,10 @@ pub fn decode_vault_signature(qr_data: &[u8]) -> Result<DecodedSignature, String
     if binary_data.len() == 64 {
         let mut signature = [0u8; 64];
         signature.copy_from_slice(&binary_data);
-        tracing::info!("Decoded raw signature (assuming Sr25519): {} bytes", signature.len());
+        tracing::info!(
+            "Decoded raw signature (assuming Sr25519): {} bytes",
+            signature.len()
+        );
         return Ok(DecodedSignature {
             signature,
             sig_type: SignatureType::Sr25519,

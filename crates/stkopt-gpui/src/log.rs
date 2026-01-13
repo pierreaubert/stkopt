@@ -82,7 +82,7 @@ impl LogBuffer {
     }
 
     /// Appends lines to the generic buffer if provided.
-    /// This optimization avoids full clone if we render incrementally, 
+    /// This optimization avoids full clone if we render incrementally,
     /// but for now we follow TUI approach.
     pub fn len(&self) -> usize {
         match self.inner.lock() {

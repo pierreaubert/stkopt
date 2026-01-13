@@ -37,9 +37,13 @@ impl PoolsSection {
                                             let handle = handle.clone();
                                             Tokio::spawn(cx, async move {
                                                 if let Err(e) = handle.fetch_pools().await {
-                                                    tracing::error!("Failed to refresh pools: {}", e);
+                                                    tracing::error!(
+                                                        "Failed to refresh pools: {}",
+                                                        e
+                                                    );
                                                 }
-                                            }).detach();
+                                            })
+                                            .detach();
                                         }
                                     });
                                 }
@@ -93,37 +97,51 @@ impl PoolsSection {
                 .bg(theme.surface)
                 .border_b_1()
                 .border_color(theme.border)
-                .child(div().w(px(50.0)).child(Text::new("ID").size(TextSize::Sm).weight(TextWeight::Semibold)))
                 .child(
-                    div()
-                        .flex_1()
-                        .child(Text::new("Pool Name").size(TextSize::Sm).weight(TextWeight::Semibold)),
+                    div().w(px(50.0)).child(
+                        Text::new("ID")
+                            .size(TextSize::Sm)
+                            .weight(TextWeight::Semibold),
+                    ),
                 )
                 .child(
-                    div()
-                        .w(px(100.0))
-                        .child(Text::new("Members").size(TextSize::Sm).weight(TextWeight::Semibold)),
+                    div().flex_1().child(
+                        Text::new("Pool Name")
+                            .size(TextSize::Sm)
+                            .weight(TextWeight::Semibold),
+                    ),
                 )
                 .child(
-                    div()
-                        .w(px(120.0))
-                        .child(Text::new("Total Bonded").size(TextSize::Sm).weight(TextWeight::Semibold)),
+                    div().w(px(100.0)).child(
+                        Text::new("Members")
+                            .size(TextSize::Sm)
+                            .weight(TextWeight::Semibold),
+                    ),
                 )
                 .child(
-                    div()
-                        .w(px(80.0))
-                        .child(Text::new("State").size(TextSize::Sm).weight(TextWeight::Semibold)),
+                    div().w(px(120.0)).child(
+                        Text::new("Total Bonded")
+                            .size(TextSize::Sm)
+                            .weight(TextWeight::Semibold),
+                    ),
                 )
                 .child(
-                    div()
-                        .w(px(70.0))
-                        .child(Text::new("").size(TextSize::Sm)), // Actions column header
+                    div().w(px(80.0)).child(
+                        Text::new("State")
+                            .size(TextSize::Sm)
+                            .weight(TextWeight::Semibold),
+                    ),
+                )
+                .child(
+                    div().w(px(70.0)).child(Text::new("").size(TextSize::Sm)), // Actions column header
                 ),
         );
 
         // Pool rows
+        let symbol = app.token_symbol();
+        let decimals = app.token_decimals();
         for (i, pool) in app.pools.iter().enumerate() {
-            let bonded_str = format_bonded(pool.total_bonded);
+            let bonded_str = format_bonded(pool.total_bonded, symbol, decimals);
             let state_str = match pool.state {
                 crate::app::PoolState::Open => "Open",
                 crate::app::PoolState::Blocked => "Blocked",
@@ -134,7 +152,11 @@ impl PoolsSection {
                 crate::app::PoolState::Blocked => theme.warning,
                 crate::app::PoolState::Destroying => theme.error,
             };
-            let row_bg = if i % 2 == 0 { theme.background } else { theme.surface };
+            let row_bg = if i % 2 == 0 {
+                theme.background
+            } else {
+                theme.surface
+            };
             let pool_id = pool.id;
             let is_open = pool.state == crate::app::PoolState::Open;
 
@@ -148,9 +170,11 @@ impl PoolsSection {
                     .border_b_1()
                     .border_color(theme.border)
                     .child(
-                        div()
-                            .w(px(50.0))
-                            .child(Text::new(format!("#{}", pool.id)).size(TextSize::Sm).color(theme.text_secondary)),
+                        div().w(px(50.0)).child(
+                            Text::new(format!("#{}", pool.id))
+                                .size(TextSize::Sm)
+                                .color(theme.text_secondary),
+                        ),
                     )
                     .child(
                         div()
@@ -173,22 +197,27 @@ impl PoolsSection {
                             .child(Text::new(state_str).size(TextSize::Sm).color(state_color)),
                     )
                     .child(
-                        div()
-                            .w(px(70.0))
-                            .child(
-                                Button::new(SharedString::from(format!("btn-join-pool-{}", pool_id)), "Join")
-                                    .size(ButtonSize::Xs)
-                                    .variant(ButtonVariant::Primary)
-                                    .disabled(!is_open)
-                                    .on_click({
-                                        let entity = entity.clone();
-                                        move |_window, cx| {
-                                            entity.update(cx, |this, cx| {
-                                                this.open_pool_modal(PoolOperation::Join, Some(pool_id), cx);
-                                            });
-                                        }
-                                    }),
-                            ),
+                        div().w(px(70.0)).child(
+                            Button::new(
+                                SharedString::from(format!("btn-join-pool-{}", pool_id)),
+                                "Join",
+                            )
+                            .size(ButtonSize::Xs)
+                            .variant(ButtonVariant::Primary)
+                            .disabled(!is_open)
+                            .on_click({
+                                let entity = entity.clone();
+                                move |_window, cx| {
+                                    entity.update(cx, |this, cx| {
+                                        this.open_pool_modal(
+                                            PoolOperation::Join,
+                                            Some(pool_id),
+                                            cx,
+                                        );
+                                    });
+                                }
+                            }),
+                        ),
                     ),
             );
         }
@@ -197,13 +226,14 @@ impl PoolsSection {
     }
 }
 
-fn format_bonded(amount: u128) -> String {
-    let dot = amount / 10_000_000_000;
-    if dot >= 1_000_000 {
-        format!("{:.1}M DOT", dot as f64 / 1_000_000.0)
-    } else if dot >= 1_000 {
-        format!("{:.1}K DOT", dot as f64 / 1_000.0)
+fn format_bonded(amount: u128, symbol: &str, decimals: u8) -> String {
+    let divisor = 10u128.pow(decimals as u32);
+    let whole = amount / divisor;
+    if whole >= 1_000_000 {
+        format!("{:.2}M {}", whole as f64 / 1_000_000.0, symbol)
+    } else if whole >= 1_000 {
+        format!("{:.2}K {}", whole as f64 / 1_000.0, symbol)
     } else {
-        format!("{} DOT", dot)
+        format!("{:.2} {}", amount as f64 / divisor as f64, symbol)
     }
 }

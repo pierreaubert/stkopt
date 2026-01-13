@@ -53,7 +53,11 @@ impl PoolModal {
             )
     }
 
-    fn render_header(operation: PoolOperation, app: &StkoptApp, cx: &Context<StkoptApp>) -> impl IntoElement {
+    fn render_header(
+        operation: PoolOperation,
+        app: &StkoptApp,
+        cx: &Context<StkoptApp>,
+    ) -> impl IntoElement {
         let theme = cx.theme();
         let pool_info = if let Some(id) = app.selected_pool_id {
             format!("Pool #{}", id)
@@ -86,19 +90,24 @@ impl PoolModal {
     fn render_body(app: &StkoptApp, cx: &Context<StkoptApp>) -> impl IntoElement {
         let theme = cx.theme();
         let operation = app.pool_operation;
-        let symbol = app.network.symbol();
+        let symbol = app.token_symbol();
+        let decimals = app.token_decimals();
 
         let mut body = div().flex().flex_col().gap_4().p_4();
 
         // Show balance info
         if let Some(ref info) = app.staking_info {
-            let available = format_balance(info.transferable, symbol);
+            let available = format_balance(info.transferable, symbol, decimals);
 
             body = body.child(
                 div()
                     .flex()
                     .justify_between()
-                    .child(Text::new("Available Balance:").size(TextSize::Sm).color(theme.text_secondary))
+                    .child(
+                        Text::new("Available Balance:")
+                            .size(TextSize::Sm)
+                            .color(theme.text_secondary),
+                    )
                     .child(Text::new(available).size(TextSize::Sm)),
             );
         }
@@ -138,7 +147,11 @@ impl PoolModal {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .child(Text::new("Amount").size(TextSize::Sm).color(theme.text_secondary))
+                    .child(
+                        Text::new("Amount")
+                            .size(TextSize::Sm)
+                            .color(theme.text_secondary),
+                    )
                     .child(
                         div()
                             .flex()
@@ -160,11 +173,13 @@ impl PoolModal {
                                             app.pool_amount_input.clone()
                                         })
                                         .size(TextSize::Md)
-                                        .color(if app.pool_amount_input.is_empty() {
-                                            theme.text_secondary
-                                        } else {
-                                            theme.text_primary
-                                        }),
+                                        .color(
+                                            if app.pool_amount_input.is_empty() {
+                                                theme.text_secondary
+                                            } else {
+                                                theme.text_primary
+                                            },
+                                        ),
                                     ),
                             )
                             .child(Text::new(symbol).size(TextSize::Md)),
@@ -174,15 +189,11 @@ impl PoolModal {
 
         // Operation description
         body = body.child(
-            div()
-                .p_3()
-                .rounded_md()
-                .bg(rgba(0x3b82f620))
-                .child(
-                    Text::new(Self::operation_description(operation))
-                        .size(TextSize::Sm)
-                        .color(theme.text_secondary),
-                ),
+            div().p_3().rounded_md().bg(rgba(0x3b82f620)).child(
+                Text::new(Self::operation_description(operation))
+                    .size(TextSize::Sm)
+                    .color(theme.text_secondary),
+            ),
         );
 
         body
@@ -244,18 +255,23 @@ impl PoolModal {
 
     fn operation_description(operation: PoolOperation) -> &'static str {
         match operation {
-            PoolOperation::Join => "Join this nomination pool with the specified amount. Your stake will be managed by the pool.",
+            PoolOperation::Join => {
+                "Join this nomination pool with the specified amount. Your stake will be managed by the pool."
+            }
             PoolOperation::BondExtra => "Add more tokens to your existing pool stake.",
             PoolOperation::ClaimPayout => "Claim your pending pool rewards.",
-            PoolOperation::Unbond => "Start unbonding tokens from the pool. They will be available to withdraw after the unbonding period.",
+            PoolOperation::Unbond => {
+                "Start unbonding tokens from the pool. They will be available to withdraw after the unbonding period."
+            }
             PoolOperation::Withdraw => "Withdraw tokens that have completed the unbonding period.",
         }
     }
 }
 
-fn format_balance(amount: u128, symbol: &str) -> String {
-    let decimals = 10u128.pow(10);
-    let whole = amount / decimals;
-    let frac = (amount % decimals) / 10u128.pow(6);
+fn format_balance(amount: u128, symbol: &str, decimals: u8) -> String {
+    let divisor = 10u128.pow(decimals as u32);
+    let frac_divisor = 10u128.pow(decimals.saturating_sub(4) as u32);
+    let whole = amount / divisor;
+    let frac = (amount % divisor) / frac_divisor;
     format!("{}.{:04} {}", whole, frac, symbol)
 }

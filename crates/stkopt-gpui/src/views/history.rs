@@ -16,18 +16,20 @@ impl HistorySection {
         let entity = app.entity.clone();
         let is_loading = app.history_loading;
         let has_account = app.watched_account.is_some();
+        let symbol = app.token_symbol();
+        let decimals = app.token_decimals();
 
         let (total_rewards, avg_apy, eras_count) = if !app.staking_history.is_empty() {
             let total: u128 = app.staking_history.iter().map(|h| h.reward).sum();
-            let avg_apy: f64 =
-                app.staking_history.iter().map(|h| h.apy).sum::<f64>() / app.staking_history.len() as f64;
+            let avg_apy: f64 = app.staking_history.iter().map(|h| h.apy).sum::<f64>()
+                / app.staking_history.len() as f64;
             (
-                format_balance(total),
+                format_balance(total, symbol, decimals),
                 format!("{:.2}%", avg_apy * 100.0),
                 app.staking_history.len().to_string(),
             )
         } else {
-            ("-- DOT".to_string(), "--%".to_string(), "0".to_string())
+            (format!("-- {}", symbol), "--%".to_string(), "0".to_string())
         };
 
         let refresh_button = Button::new(
@@ -144,31 +146,53 @@ impl HistorySection {
                 .bg(theme.surface)
                 .border_b_1()
                 .border_color(theme.border)
-                .child(div().w(px(80.0)).child(Text::new("Era").size(TextSize::Sm).weight(TextWeight::Semibold)))
                 .child(
-                    div()
-                        .flex_1()
-                        .child(Text::new("Staked").size(TextSize::Sm).weight(TextWeight::Semibold)),
+                    div().w(px(80.0)).child(
+                        Text::new("Era")
+                            .size(TextSize::Sm)
+                            .weight(TextWeight::Semibold),
+                    ),
                 )
                 .child(
-                    div()
-                        .w(px(120.0))
-                        .child(Text::new("Rewards").size(TextSize::Sm).weight(TextWeight::Semibold)),
+                    div().flex_1().child(
+                        Text::new("Staked")
+                            .size(TextSize::Sm)
+                            .weight(TextWeight::Semibold),
+                    ),
                 )
                 .child(
-                    div()
-                        .w(px(80.0))
-                        .child(Text::new("APY").size(TextSize::Sm).weight(TextWeight::Semibold)),
+                    div().w(px(120.0)).child(
+                        Text::new("Rewards")
+                            .size(TextSize::Sm)
+                            .weight(TextWeight::Semibold),
+                    ),
+                )
+                .child(
+                    div().w(px(80.0)).child(
+                        Text::new("APY")
+                            .size(TextSize::Sm)
+                            .weight(TextWeight::Semibold),
+                    ),
                 ),
         );
 
         // History rows (show last 15 eras)
+        let symbol = app.token_symbol();
+        let decimals = app.token_decimals();
         for (i, point) in app.staking_history.iter().rev().take(15).enumerate() {
-            let staked_str = format_balance(point.bonded);
-            let rewards_str = format_balance(point.reward);
+            let staked_str = format_balance(point.bonded, symbol, decimals);
+            let rewards_str = format_balance(point.reward, symbol, decimals);
             let apy_str = format!("{:.2}%", point.apy * 100.0);
-            let row_bg = if i % 2 == 0 { theme.background } else { theme.surface };
-            let apy_color = if point.apy > 0.15 { theme.success } else { theme.text_primary };
+            let row_bg = if i % 2 == 0 {
+                theme.background
+            } else {
+                theme.surface
+            };
+            let apy_color = if point.apy > 0.15 {
+                theme.success
+            } else {
+                theme.text_primary
+            };
 
             list = list.child(
                 div()
@@ -180,9 +204,11 @@ impl HistorySection {
                     .border_b_1()
                     .border_color(theme.border)
                     .child(
-                        div()
-                            .w(px(80.0))
-                            .child(Text::new(format!("#{}", point.era)).size(TextSize::Sm).color(theme.text_secondary)),
+                        div().w(px(80.0)).child(
+                            Text::new(format!("#{}", point.era))
+                                .size(TextSize::Sm)
+                                .color(theme.text_secondary),
+                        ),
                     )
                     .child(
                         div()
@@ -190,9 +216,11 @@ impl HistorySection {
                             .child(Text::new(staked_str).size(TextSize::Sm)),
                     )
                     .child(
-                        div()
-                            .w(px(120.0))
-                            .child(Text::new(rewards_str).size(TextSize::Sm).color(theme.success)),
+                        div().w(px(120.0)).child(
+                            Text::new(rewards_str)
+                                .size(TextSize::Sm)
+                                .color(theme.success),
+                        ),
                     )
                     .child(
                         div()
@@ -205,14 +233,14 @@ impl HistorySection {
         // Show count if more history exists
         if app.staking_history.len() > 15 {
             list = list.child(
-                div()
-                    .px_4()
-                    .py_3()
-                    .child(
-                        Text::new(format!("Showing last 15 of {} eras", app.staking_history.len()))
-                            .size(TextSize::Sm)
-                            .color(theme.text_secondary),
-                    ),
+                div().px_4().py_3().child(
+                    Text::new(format!(
+                        "Showing last 15 of {} eras",
+                        app.staking_history.len()
+                    ))
+                    .size(TextSize::Sm)
+                    .color(theme.text_secondary),
+                ),
             );
         }
 
@@ -236,11 +264,7 @@ fn stat_card(
                     .size(TextSize::Sm)
                     .color(theme.text_secondary),
             )
-            .child(
-                Text::new(value)
-                    .size(TextSize::Lg)
-                    .weight(TextWeight::Bold),
-            ),
+            .child(Text::new(value).size(TextSize::Lg).weight(TextWeight::Bold)),
     )
 }
 
@@ -269,9 +293,10 @@ fn stat_card_success(
     )
 }
 
-fn format_balance(amount: u128) -> String {
-    let decimals = 10u128.pow(10);
-    let whole = amount / decimals;
-    let frac = (amount % decimals) / 10u128.pow(6);
-    format!("{}.{:04} DOT", whole, frac)
+fn format_balance(amount: u128, symbol: &str, decimals: u8) -> String {
+    let divisor = 10u128.pow(decimals as u32);
+    let frac_divisor = 10u128.pow(decimals.saturating_sub(4) as u32);
+    let whole = amount / divisor;
+    let frac = (amount % divisor) / frac_divisor;
+    format!("{}.{:04} {}", whole, frac, symbol)
 }

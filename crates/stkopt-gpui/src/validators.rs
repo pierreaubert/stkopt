@@ -16,16 +16,19 @@ pub fn sort_validators(
                 let b_name = b.name.as_deref().unwrap_or(&b.address);
                 a_name.cmp(b_name)
             }
-            ValidatorSortColumn::Commission => {
-                a.commission.partial_cmp(&b.commission).unwrap_or(std::cmp::Ordering::Equal)
-            }
+            ValidatorSortColumn::Commission => a
+                .commission
+                .partial_cmp(&b.commission)
+                .unwrap_or(std::cmp::Ordering::Equal),
             ValidatorSortColumn::TotalStake => a.total_stake.cmp(&b.total_stake),
             ValidatorSortColumn::OwnStake => a.own_stake.cmp(&b.own_stake),
             ValidatorSortColumn::NominatorCount => a.nominator_count.cmp(&b.nominator_count),
             ValidatorSortColumn::Apy => {
                 let a_apy = a.apy.unwrap_or(0.0);
                 let b_apy = b.apy.unwrap_or(0.0);
-                a_apy.partial_cmp(&b_apy).unwrap_or(std::cmp::Ordering::Equal)
+                a_apy
+                    .partial_cmp(&b_apy)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             }
         };
         if ascending { cmp } else { cmp.reverse() }

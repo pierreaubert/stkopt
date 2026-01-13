@@ -149,11 +149,48 @@ impl ValidatorsSection {
                 .bg(theme.surface)
                 .border_b_1()
                 .border_color(theme.border)
-                .child(div().w(px(40.0)).child(Text::new("#").size(TextSize::Sm).weight(TextWeight::Semibold)))
-                .child(sortable_header("Validator", ValidatorSortColumn::Name, sort_column, sort_asc, &theme, entity.clone()))
-                .child(sortable_header_fixed("Total Stake", 120.0, ValidatorSortColumn::TotalStake, sort_column, sort_asc, &theme, entity.clone()))
-                .child(sortable_header_fixed("Commission", 100.0, ValidatorSortColumn::Commission, sort_column, sort_asc, &theme, entity.clone()))
-                .child(sortable_header_fixed("APY", 80.0, ValidatorSortColumn::Apy, sort_column, sort_asc, &theme, entity.clone())),
+                .child(
+                    div().w(px(40.0)).child(
+                        Text::new("#")
+                            .size(TextSize::Sm)
+                            .weight(TextWeight::Semibold),
+                    ),
+                )
+                .child(sortable_header(
+                    "Validator",
+                    ValidatorSortColumn::Name,
+                    sort_column,
+                    sort_asc,
+                    &theme,
+                    entity.clone(),
+                ))
+                .child(sortable_header_fixed(
+                    "Total Stake",
+                    120.0,
+                    ValidatorSortColumn::TotalStake,
+                    sort_column,
+                    sort_asc,
+                    &theme,
+                    entity.clone(),
+                ))
+                .child(sortable_header_fixed(
+                    "Commission",
+                    100.0,
+                    ValidatorSortColumn::Commission,
+                    sort_column,
+                    sort_asc,
+                    &theme,
+                    entity.clone(),
+                ))
+                .child(sortable_header_fixed(
+                    "APY",
+                    80.0,
+                    ValidatorSortColumn::Apy,
+                    sort_column,
+                    sort_asc,
+                    &theme,
+                    entity.clone(),
+                )),
         );
 
         // Validator rows (limit to first 50 for performance)
@@ -170,10 +207,21 @@ impl ValidatorsSection {
             } else {
                 validator.address.clone()
             };
-            let stake_str = format_stake(validator.total_stake);
+            let stake_str = format_stake(
+                validator.total_stake,
+                app.token_symbol(),
+                app.token_decimals(),
+            );
             let commission_str = format!("{:.1}%", validator.commission);
-            let apy_str = validator.apy.map(|a| format!("{:.1}%", a)).unwrap_or_else(|| "-".to_string());
-            let row_bg = if i % 2 == 0 { theme.background } else { theme.surface };
+            let apy_str = validator
+                .apy
+                .map(|a| format!("{:.1}%", a))
+                .unwrap_or_else(|| "-".to_string());
+            let row_bg = if i % 2 == 0 {
+                theme.background
+            } else {
+                theme.surface
+            };
             let apy_color = if validator.apy.unwrap_or(0.0) > 15.0 {
                 theme.success
             } else {
@@ -190,9 +238,11 @@ impl ValidatorsSection {
                     .border_b_1()
                     .border_color(theme.border)
                     .child(
-                        div()
-                            .w(px(40.0))
-                            .child(Text::new(format!("{}", i + 1)).size(TextSize::Sm).color(theme.text_secondary)),
+                        div().w(px(40.0)).child(
+                            Text::new(format!("{}", i + 1))
+                                .size(TextSize::Sm)
+                                .color(theme.text_secondary),
+                        ),
                     )
                     .child(
                         div()
@@ -219,11 +269,7 @@ impl ValidatorsSection {
                     .child(
                         div()
                             .w(px(80.0))
-                            .child(
-                                Text::new(apy_str)
-                                    .size(TextSize::Sm)
-                                    .color(apy_color),
-                            ),
+                            .child(Text::new(apy_str).size(TextSize::Sm).color(apy_color)),
                     ),
             );
         }
@@ -231,14 +277,11 @@ impl ValidatorsSection {
         // Show count if more validators exist
         if filtered.len() > 50 {
             list = list.child(
-                div()
-                    .px_4()
-                    .py_3()
-                    .child(
-                        Text::new(format!("... and {} more validators", filtered.len() - 50))
-                            .size(TextSize::Sm)
-                            .color(theme.text_secondary),
-                    ),
+                div().px_4().py_3().child(
+                    Text::new(format!("... and {} more validators", filtered.len() - 50))
+                        .size(TextSize::Sm)
+                        .color(theme.text_secondary),
+                ),
             );
         }
 
@@ -275,7 +318,11 @@ fn sortable_header(
                     this.validator_sort_asc = false; // Default to descending for new column
                 }
                 // Sort the validators
-                crate::validators::sort_validators(&mut this.validators, this.validator_sort, this.validator_sort_asc);
+                crate::validators::sort_validators(
+                    &mut this.validators,
+                    this.validator_sort,
+                    this.validator_sort_asc,
+                );
                 cx.notify();
             });
         })
@@ -283,7 +330,11 @@ fn sortable_header(
             Text::new(format!("{}{}", label, indicator))
                 .size(TextSize::Sm)
                 .weight(TextWeight::Semibold)
-                .color(if is_active { theme.accent } else { theme.text_primary }),
+                .color(if is_active {
+                    theme.accent
+                } else {
+                    theme.text_primary
+                }),
         )
 }
 
@@ -316,7 +367,11 @@ fn sortable_header_fixed(
                     this.validator_sort = column;
                     this.validator_sort_asc = false;
                 }
-                crate::validators::sort_validators(&mut this.validators, this.validator_sort, this.validator_sort_asc);
+                crate::validators::sort_validators(
+                    &mut this.validators,
+                    this.validator_sort,
+                    this.validator_sort_asc,
+                );
                 cx.notify();
             });
         })
@@ -324,17 +379,22 @@ fn sortable_header_fixed(
             Text::new(format!("{}{}", label, indicator))
                 .size(TextSize::Sm)
                 .weight(TextWeight::Semibold)
-                .color(if is_active { theme.accent } else { theme.text_primary }),
+                .color(if is_active {
+                    theme.accent
+                } else {
+                    theme.text_primary
+                }),
         )
 }
 
-fn format_stake(stake: u128) -> String {
-    let dot = stake / 10_000_000_000; // Convert planck to DOT
-    if dot >= 1_000_000 {
-        format!("{:.1}M DOT", dot as f64 / 1_000_000.0)
-    } else if dot >= 1_000 {
-        format!("{:.1}K DOT", dot as f64 / 1_000.0)
+fn format_stake(stake: u128, symbol: &str, decimals: u8) -> String {
+    let divisor = 10u128.pow(decimals as u32);
+    let whole = stake / divisor;
+    if whole >= 1_000_000 {
+        format!("{:.2}M {}", whole as f64 / 1_000_000.0, symbol)
+    } else if whole >= 1_000 {
+        format!("{:.2}K {}", whole as f64 / 1_000.0, symbol)
     } else {
-        format!("{} DOT", dot)
+        format!("{:.2} {}", stake as f64 / divisor as f64, symbol)
     }
 }

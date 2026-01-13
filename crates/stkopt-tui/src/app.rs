@@ -584,22 +584,38 @@ impl App {
                 }
             }
             KeyCode::Tab | KeyCode::Right => {
-                let max_tab = if self.qr.pending_signed.is_some() { 4 } else { 3 };
+                let max_tab = if self.qr.pending_signed.is_some() {
+                    4
+                } else {
+                    3
+                };
                 self.qr.modal_tab = (self.qr.modal_tab + 1) % max_tab;
                 return self.handle_qr_tab_change();
             }
             KeyCode::BackTab | KeyCode::Left => {
-                let max_tab = if self.qr.pending_signed.is_some() { 3 } else { 2 };
-                self.qr.modal_tab = if self.qr.modal_tab == 0 { max_tab } else { self.qr.modal_tab - 1 };
+                let max_tab = if self.qr.pending_signed.is_some() {
+                    3
+                } else {
+                    2
+                };
+                self.qr.modal_tab = if self.qr.modal_tab == 0 {
+                    max_tab
+                } else {
+                    self.qr.modal_tab - 1
+                };
                 return self.handle_qr_tab_change();
             }
-            KeyCode::Char('s') if self.qr.pending_unsigned.is_some() && self.qr.pending_signed.is_none() => {
+            KeyCode::Char('s')
+                if self.qr.pending_unsigned.is_some() && self.qr.pending_signed.is_none() =>
+            {
                 self.qr.modal_tab = 2;
                 self.camera.status = Some(CameraScanStatus::Initializing);
                 self.camera.frames_captured = 0;
                 return Some(Action::StartSignatureScan);
             }
-            KeyCode::Char('s') | KeyCode::Enter if self.qr.pending_signed.is_some() && self.qr.modal_tab == 3 => {
+            KeyCode::Char('s') | KeyCode::Enter
+                if self.qr.pending_signed.is_some() && self.qr.modal_tab == 3 =>
+            {
                 if let Some(ref tx) = self.qr.pending_signed {
                     if matches!(tx.status, TxSubmissionStatus::ReadyToSubmit) {
                         return Some(Action::SubmitTransaction);
@@ -970,10 +986,9 @@ impl App {
                 }
                 KeyCode::Char('r') | KeyCode::Right | KeyCode::Left => {
                     let next = match self.rewards_destination {
-                        RewardDestination::Staked => RewardDestination::Controller,
-                        RewardDestination::Controller => {
-                            RewardDestination::Account(AccountId32::from([0u8; 32]))
-                        }
+                        RewardDestination::Staked => RewardDestination::Stash,
+                        RewardDestination::Stash => RewardDestination::Controller,
+                        RewardDestination::Controller => RewardDestination::Account(String::new()),
                         RewardDestination::Account(_) => RewardDestination::None,
                         RewardDestination::None => RewardDestination::Staked,
                     };
@@ -1018,12 +1033,13 @@ impl App {
             StakingInputMode::BondExtra => Some(Action::GenerateBondExtraQR { value: amount }),
             StakingInputMode::PoolJoin => {
                 if let Some(idx) = self.selected_pool_for_join
-                    && let Some(pool) = self.pools.get(idx) {
-                        return Some(Action::GeneratePoolJoinQR {
-                            pool_id: pool.id,
-                            amount,
-                        });
-                    }
+                    && let Some(pool) = self.pools.get(idx)
+                {
+                    return Some(Action::GeneratePoolJoinQR {
+                        pool_id: pool.id,
+                        amount,
+                    });
+                }
                 None
             }
             StakingInputMode::PoolBondExtra => Some(Action::GeneratePoolBondExtraQR { amount }),
@@ -1274,7 +1290,8 @@ impl App {
                     if let Some(start) = self.loading.start_time {
                         let elapsed = start.elapsed().as_secs_f64();
                         if elapsed > 0.5 {
-                            self.loading.bandwidth = Some(self.loading.bytes_loaded as f64 / elapsed);
+                            self.loading.bandwidth =
+                                Some(self.loading.bytes_loaded as f64 / elapsed);
                         }
                     }
                 }
@@ -1386,13 +1403,16 @@ impl App {
             }
             Action::AddStakingHistoryPoint(point) => {
                 // Check if this era already exists (avoid duplicates)
-                if let Some(existing_pos) = self.history.points.iter().position(|p| p.era == point.era) {
+                if let Some(existing_pos) =
+                    self.history.points.iter().position(|p| p.era == point.era)
+                {
                     // Replace existing entry with new data
                     self.history.points[existing_pos] = point;
                 } else {
                     // Insert in era order (oldest first)
                     let pos = self
-                        .history.points
+                        .history
+                        .points
                         .iter()
                         .position(|p| p.era > point.era)
                         .unwrap_or(self.history.points.len());

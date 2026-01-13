@@ -3,17 +3,18 @@
 //! This module provides the actual blockchain connection and data fetching
 //! for the GPUI app, using the stkopt-chain crate.
 
+use std::collections::HashMap;
 use stkopt_chain::{
-    ChainClient, ConnectionConfig, ConnectionMode as ChainConnectionMode, RpcEndpoints,
-    PoolState as ChainPoolState, RewardDestination, UnsignedPayload, encode_for_qr,
+    ChainClient, ConnectionConfig, ConnectionMode as ChainConnectionMode, PeopleChainClient,
+    PoolState as ChainPoolState, RewardDestination, RpcEndpoints, UnsignedPayload, encode_for_qr,
 };
-use stkopt_core::{ConnectionStatus, Network};
+use stkopt_core::{ConnectionStatus, Network, get_era_apy};
 use subxt::utils::AccountId32;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::app::{HistoryPoint, PoolInfo, PoolState, ValidatorInfo};
-use stkopt_core::db::{CachedAccountStatus, CachedChainMetadata};
 use crate::db_service::DbService;
+use stkopt_core::db::{CachedAccountStatus, CachedChainMetadata};
 
 /// Maximum realistic APY (50%). Higher values indicate data issues.
 const MAX_REALISTIC_APY: f64 = 0.50;
@@ -154,6 +155,7 @@ pub struct AccountData {
     pub free_balance: u128,
     pub reserved_balance: u128,
     pub staked_balance: Option<u128>,
+    pub unbonding_balance: u128,
     pub is_nominating: bool,
     pub nominations: Vec<String>,
     pub pool_id: Option<u32>,
@@ -172,8 +174,173 @@ pub struct TransactionPayload {
     pub description: String,
 }
 
-/// Convert raw validators from chain to display format.
-fn enrich_raw_validators(validators: &[stkopt_chain::ValidatorInfo]) -> Vec<ValidatorInfo> {
+/// Enrich validators with stake, points, identity, and APY data.
+///
+/// This function fetches additional data from the chain to populate all validator fields:
+/// - Stake data from ErasStakersOverview
+/// - Points from ErasRewardPoints
+/// - Identity names from People chain
+/// - APY calculated from era rewards
+async fn enrich_validators(
+    client: &ChainClient,
+    validators: &[stkopt_chain::ValidatorInfo],
+    people_client: Option<&PeopleChainClient>,
+) -> Vec<ValidatorInfo> {
+    // Get active era for staking queries
+    let era = match client.get_active_era().await {
+        Ok(Some(era)) => era,
+        Ok(None) => {
+            tracing::warn!("No active era found, returning basic validator data");
+            return basic_validator_conversion(validators);
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Failed to get active era: {}, returning basic validator data",
+                e
+            );
+            return basic_validator_conversion(validators);
+        }
+    };
+    let era_index = era.index;
+    let era_duration_ms = era.duration_ms;
+
+    // Get era stakers overview (stake data)
+    let exposures = match client.get_era_stakers_overview(era_index).await {
+        Ok(exp) => exp,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to get era stakers: {}, returning basic validator data",
+                e
+            );
+            return basic_validator_conversion(validators);
+        }
+    };
+    let exposure_map: HashMap<[u8; 32], _> = exposures
+        .iter()
+        .map(|e| (*e.address.as_ref(), e.clone()))
+        .collect();
+    tracing::info!("Got {} era stakers exposures", exposure_map.len());
+
+    // Get era reward points
+    let (total_points, points_vec) = match client.get_era_reward_points(era_index).await {
+        Ok(result) => result,
+        Err(e) => {
+            tracing::warn!("Failed to get era reward points: {}", e);
+            (0, Vec::new())
+        }
+    };
+    let points_map: HashMap<[u8; 32], u32> = points_vec
+        .iter()
+        .map(|p| (*p.address.as_ref(), p.points))
+        .collect();
+    tracing::info!(
+        "Got {} validator points, total: {}",
+        points_map.len(),
+        total_points
+    );
+
+    // Get era validator reward for APY calculation
+    let era_reward = match client
+        .get_era_validator_reward(era_index.saturating_sub(1))
+        .await
+    {
+        Ok(Some(reward)) => reward,
+        Ok(None) => {
+            tracing::debug!("No era reward for era {}", era_index.saturating_sub(1));
+            0
+        }
+        Err(e) => {
+            tracing::warn!("Failed to get era reward: {}", e);
+            0
+        }
+    };
+
+    // Fetch identities from People chain
+    let identity_map: HashMap<String, String> = if let Some(people) = people_client {
+        let addresses: Vec<AccountId32> = validators.iter().map(|v| v.address.clone()).collect();
+        match people.get_identities(&addresses).await {
+            Ok(identities) => {
+                tracing::info!("Fetched {} identities from People chain", identities.len());
+                identities
+                    .into_iter()
+                    .filter_map(|id| id.display_name.map(|name| (id.address.to_string(), name)))
+                    .collect()
+            }
+            Err(e) => {
+                tracing::warn!("Failed to fetch identities: {}", e);
+                HashMap::new()
+            }
+        }
+    } else {
+        tracing::debug!("People chain client not available, skipping identity fetch");
+        HashMap::new()
+    };
+
+    // Build enriched validators
+    let mut enriched: Vec<ValidatorInfo> = validators
+        .iter()
+        .filter_map(|v| {
+            let addr_bytes: [u8; 32] = *v.address.as_ref();
+
+            // Get exposure data (skip validators not active in this era)
+            let exposure = exposure_map.get(&addr_bytes);
+            let (total_stake, own_stake, nominator_count) = match exposure {
+                Some(e) => (e.total, e.own, e.nominator_count),
+                None => {
+                    // Include validators without exposure but with zeroed stake data
+                    (0, 0, 0)
+                }
+            };
+
+            let points = points_map.get(&addr_bytes).copied().unwrap_or(0);
+
+            // Calculate APY based on era points
+            let apy = if era_reward > 0 && total_points > 0 && points > 0 && total_stake > 0 {
+                let validator_share =
+                    (era_reward as f64 * points as f64 / total_points as f64) as u128;
+                let nominator_reward =
+                    ((validator_share as f64) * (1.0 - v.preferences.commission)) as u128;
+                Some(get_era_apy(nominator_reward, total_stake, era_duration_ms))
+            } else {
+                None
+            };
+
+            let address_str = v.address.to_string();
+            let name = identity_map.get(&address_str).cloned();
+
+            Some(ValidatorInfo {
+                address: address_str,
+                name,
+                commission: v.preferences.commission,
+                blocked: v.preferences.blocked,
+                total_stake,
+                own_stake,
+                nominator_count,
+                points,
+                apy,
+            })
+        })
+        .collect();
+
+    // Sort by APY descending (validators with APY first, then by APY value)
+    enriched.sort_by(|a, b| match (a.apy, b.apy) {
+        (Some(a_apy), Some(b_apy)) => b_apy
+            .partial_cmp(&a_apy)
+            .unwrap_or(std::cmp::Ordering::Equal),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+
+    tracing::info!(
+        "Enriched {} validators with stake/identity/APY data",
+        enriched.len()
+    );
+    enriched
+}
+
+/// Basic validator conversion without enrichment (fallback).
+fn basic_validator_conversion(validators: &[stkopt_chain::ValidatorInfo]) -> Vec<ValidatorInfo> {
     validators
         .iter()
         .map(|v| ValidatorInfo {
@@ -244,7 +411,10 @@ impl ChainHandle {
     /// Request connection to a network.
     pub async fn connect(&self, network: Network, use_light_client: bool) -> Result<(), String> {
         self.command_tx
-            .send(ChainCommand::Connect { network, use_light_client })
+            .send(ChainCommand::Connect {
+                network,
+                use_light_client,
+            })
             .await
             .map_err(|e| format!("Failed to send connect command: {}", e))
     }
@@ -261,7 +431,10 @@ impl ChainHandle {
     pub async fn fetch_account(&self, address: String) -> Result<AccountData, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
-            .send(ChainCommand::FetchAccount { address, reply: reply_tx })
+            .send(ChainCommand::FetchAccount {
+                address,
+                reply: reply_tx,
+            })
             .await
             .map_err(|e| format!("Failed to send fetch account command: {}", e))?;
         reply_rx.await.map_err(|_| "Channel closed".to_string())?
@@ -288,10 +461,18 @@ impl ChainHandle {
     }
 
     /// Fetch staking history for an account.
-    pub async fn fetch_history(&self, address: String, eras: u32) -> Result<Vec<HistoryPoint>, String> {
+    pub async fn fetch_history(
+        &self,
+        address: String,
+        eras: u32,
+    ) -> Result<Vec<HistoryPoint>, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
-            .send(ChainCommand::FetchHistory { address, eras, reply: reply_tx })
+            .send(ChainCommand::FetchHistory {
+                address,
+                eras,
+                reply: reply_tx,
+            })
             .await
             .map_err(|e| format!("Failed to send fetch history command: {}", e))?;
         reply_rx.await.map_err(|_| "Channel closed".to_string())?
@@ -300,70 +481,122 @@ impl ChainHandle {
     // === Transaction Payload Generation ===
 
     /// Create a bond transaction payload.
-    pub async fn create_bond_payload(&self, signer: AccountId32, value: u128) -> Result<TransactionPayload, String> {
+    pub async fn create_bond_payload(
+        &self,
+        signer: AccountId32,
+        value: u128,
+    ) -> Result<TransactionPayload, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
-            .send(ChainCommand::CreateBondPayload { signer, value, reply: reply_tx })
+            .send(ChainCommand::CreateBondPayload {
+                signer,
+                value,
+                reply: reply_tx,
+            })
             .await
             .map_err(|e| format!("Failed to send command: {}", e))?;
         reply_rx.await.map_err(|_| "Channel closed".to_string())?
     }
 
     /// Create an unbond transaction payload.
-    pub async fn create_unbond_payload(&self, signer: AccountId32, value: u128) -> Result<TransactionPayload, String> {
+    pub async fn create_unbond_payload(
+        &self,
+        signer: AccountId32,
+        value: u128,
+    ) -> Result<TransactionPayload, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
-            .send(ChainCommand::CreateUnbondPayload { signer, value, reply: reply_tx })
+            .send(ChainCommand::CreateUnbondPayload {
+                signer,
+                value,
+                reply: reply_tx,
+            })
             .await
             .map_err(|e| format!("Failed to send command: {}", e))?;
         reply_rx.await.map_err(|_| "Channel closed".to_string())?
     }
 
     /// Create a bond_extra transaction payload.
-    pub async fn create_bond_extra_payload(&self, signer: AccountId32, value: u128) -> Result<TransactionPayload, String> {
+    pub async fn create_bond_extra_payload(
+        &self,
+        signer: AccountId32,
+        value: u128,
+    ) -> Result<TransactionPayload, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
-            .send(ChainCommand::CreateBondExtraPayload { signer, value, reply: reply_tx })
+            .send(ChainCommand::CreateBondExtraPayload {
+                signer,
+                value,
+                reply: reply_tx,
+            })
             .await
             .map_err(|e| format!("Failed to send command: {}", e))?;
         reply_rx.await.map_err(|_| "Channel closed".to_string())?
     }
 
     /// Create a set_payee transaction payload.
-    pub async fn create_set_payee_payload(&self, signer: AccountId32, destination: RewardDestination) -> Result<TransactionPayload, String> {
+    pub async fn create_set_payee_payload(
+        &self,
+        signer: AccountId32,
+        destination: RewardDestination,
+    ) -> Result<TransactionPayload, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
-            .send(ChainCommand::CreateSetPayeePayload { signer, destination, reply: reply_tx })
+            .send(ChainCommand::CreateSetPayeePayload {
+                signer,
+                destination,
+                reply: reply_tx,
+            })
             .await
             .map_err(|e| format!("Failed to send command: {}", e))?;
         reply_rx.await.map_err(|_| "Channel closed".to_string())?
     }
 
     /// Create a withdraw_unbonded transaction payload.
-    pub async fn create_withdraw_unbonded_payload(&self, signer: AccountId32) -> Result<TransactionPayload, String> {
+    pub async fn create_withdraw_unbonded_payload(
+        &self,
+        signer: AccountId32,
+    ) -> Result<TransactionPayload, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
-            .send(ChainCommand::CreateWithdrawUnbondedPayload { signer, reply: reply_tx })
+            .send(ChainCommand::CreateWithdrawUnbondedPayload {
+                signer,
+                reply: reply_tx,
+            })
             .await
             .map_err(|e| format!("Failed to send command: {}", e))?;
         reply_rx.await.map_err(|_| "Channel closed".to_string())?
     }
 
     /// Create a chill transaction payload.
-    pub async fn create_chill_payload(&self, signer: AccountId32) -> Result<TransactionPayload, String> {
+    pub async fn create_chill_payload(
+        &self,
+        signer: AccountId32,
+    ) -> Result<TransactionPayload, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
-            .send(ChainCommand::CreateChillPayload { signer, reply: reply_tx })
+            .send(ChainCommand::CreateChillPayload {
+                signer,
+                reply: reply_tx,
+            })
             .await
             .map_err(|e| format!("Failed to send command: {}", e))?;
         reply_rx.await.map_err(|_| "Channel closed".to_string())?
     }
 
     /// Create a nominate transaction payload.
-    pub async fn create_nominate_payload(&self, signer: AccountId32, targets: Vec<AccountId32>) -> Result<TransactionPayload, String> {
+    pub async fn create_nominate_payload(
+        &self,
+        signer: AccountId32,
+        targets: Vec<AccountId32>,
+    ) -> Result<TransactionPayload, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
-            .send(ChainCommand::CreateNominatePayload { signer, targets, reply: reply_tx })
+            .send(ChainCommand::CreateNominatePayload {
+                signer,
+                targets,
+                reply: reply_tx,
+            })
             .await
             .map_err(|e| format!("Failed to send command: {}", e))?;
         reply_rx.await.map_err(|_| "Channel closed".to_string())?
@@ -372,50 +605,88 @@ impl ChainHandle {
     // === Pool Operations ===
 
     /// Create a pool join transaction payload.
-    pub async fn create_pool_join_payload(&self, signer: AccountId32, pool_id: u32, amount: u128) -> Result<TransactionPayload, String> {
+    pub async fn create_pool_join_payload(
+        &self,
+        signer: AccountId32,
+        pool_id: u32,
+        amount: u128,
+    ) -> Result<TransactionPayload, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
-            .send(ChainCommand::CreatePoolJoinPayload { signer, pool_id, amount, reply: reply_tx })
+            .send(ChainCommand::CreatePoolJoinPayload {
+                signer,
+                pool_id,
+                amount,
+                reply: reply_tx,
+            })
             .await
             .map_err(|e| format!("Failed to send command: {}", e))?;
         reply_rx.await.map_err(|_| "Channel closed".to_string())?
     }
 
     /// Create a pool bond_extra transaction payload.
-    pub async fn create_pool_bond_extra_payload(&self, signer: AccountId32, amount: u128) -> Result<TransactionPayload, String> {
+    pub async fn create_pool_bond_extra_payload(
+        &self,
+        signer: AccountId32,
+        amount: u128,
+    ) -> Result<TransactionPayload, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
-            .send(ChainCommand::CreatePoolBondExtraPayload { signer, amount, reply: reply_tx })
+            .send(ChainCommand::CreatePoolBondExtraPayload {
+                signer,
+                amount,
+                reply: reply_tx,
+            })
             .await
             .map_err(|e| format!("Failed to send command: {}", e))?;
         reply_rx.await.map_err(|_| "Channel closed".to_string())?
     }
 
     /// Create a pool claim_payout transaction payload.
-    pub async fn create_pool_claim_payload(&self, signer: AccountId32) -> Result<TransactionPayload, String> {
+    pub async fn create_pool_claim_payload(
+        &self,
+        signer: AccountId32,
+    ) -> Result<TransactionPayload, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
-            .send(ChainCommand::CreatePoolClaimPayload { signer, reply: reply_tx })
+            .send(ChainCommand::CreatePoolClaimPayload {
+                signer,
+                reply: reply_tx,
+            })
             .await
             .map_err(|e| format!("Failed to send command: {}", e))?;
         reply_rx.await.map_err(|_| "Channel closed".to_string())?
     }
 
     /// Create a pool unbond transaction payload.
-    pub async fn create_pool_unbond_payload(&self, signer: AccountId32, amount: u128) -> Result<TransactionPayload, String> {
+    pub async fn create_pool_unbond_payload(
+        &self,
+        signer: AccountId32,
+        amount: u128,
+    ) -> Result<TransactionPayload, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
-            .send(ChainCommand::CreatePoolUnbondPayload { signer, amount, reply: reply_tx })
+            .send(ChainCommand::CreatePoolUnbondPayload {
+                signer,
+                amount,
+                reply: reply_tx,
+            })
             .await
             .map_err(|e| format!("Failed to send command: {}", e))?;
         reply_rx.await.map_err(|_| "Channel closed".to_string())?
     }
 
     /// Create a pool withdraw_unbonded transaction payload.
-    pub async fn create_pool_withdraw_payload(&self, signer: AccountId32) -> Result<TransactionPayload, String> {
+    pub async fn create_pool_withdraw_payload(
+        &self,
+        signer: AccountId32,
+    ) -> Result<TransactionPayload, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
-            .send(ChainCommand::CreatePoolWithdrawPayload { signer, reply: reply_tx })
+            .send(ChainCommand::CreatePoolWithdrawPayload {
+                signer,
+                reply: reply_tx,
+            })
             .await
             .map_err(|e| format!("Failed to send command: {}", e))?;
         reply_rx.await.map_err(|_| "Channel closed".to_string())?
@@ -424,10 +695,16 @@ impl ChainHandle {
     // === Transaction Submission ===
 
     /// Submit a signed extrinsic to the network.
-    pub async fn submit_signed_extrinsic(&self, extrinsic: Vec<u8>) -> Result<TxSubmissionResult, String> {
+    pub async fn submit_signed_extrinsic(
+        &self,
+        extrinsic: Vec<u8>,
+    ) -> Result<TxSubmissionResult, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
-            .send(ChainCommand::SubmitSignedExtrinsic { extrinsic, reply: reply_tx })
+            .send(ChainCommand::SubmitSignedExtrinsic {
+                extrinsic,
+                reply: reply_tx,
+            })
             .await
             .map_err(|e| format!("Failed to send command: {}", e))?;
         reply_rx.await.map_err(|_| "Channel closed".to_string())?
@@ -437,6 +714,7 @@ impl ChainHandle {
 /// Chain worker state.
 struct ChainWorker {
     client: Option<ChainClient>,
+    people_client: Option<PeopleChainClient>,
     update_tx: mpsc::Sender<ChainUpdate>,
     db: Option<DbService>,
 }
@@ -445,6 +723,7 @@ impl ChainWorker {
     fn new(update_tx: mpsc::Sender<ChainUpdate>, db: Option<DbService>) -> Self {
         Self {
             client: None,
+            people_client: None,
             update_tx,
             db,
         }
@@ -452,7 +731,10 @@ impl ChainWorker {
 
     async fn handle_connect(&mut self, network: Network, use_light_client: bool) {
         // Send connecting status
-        let _ = self.update_tx.send(ChainUpdate::ConnectionStatus(ConnectionStatus::Connecting)).await;
+        let _ = self
+            .update_tx
+            .send(ChainUpdate::ConnectionStatus(ConnectionStatus::Connecting))
+            .await;
 
         let config = ConnectionConfig {
             mode: if use_light_client {
@@ -465,7 +747,7 @@ impl ChainWorker {
 
         // Create status channel
         let (status_tx, mut status_rx) = mpsc::channel::<ConnectionStatus>(10);
-        
+
         // Forward status updates
         let update_tx = self.update_tx.clone();
         tokio::spawn(async move {
@@ -478,17 +760,46 @@ impl ChainWorker {
             Ok(client) => {
                 tracing::info!("Connected to {} via {:?}", network, config.mode);
                 self.client = Some(client);
-                let _ = self.update_tx.send(ChainUpdate::ConnectionStatus(ConnectionStatus::Connected)).await;
-                
+                let _ = self
+                    .update_tx
+                    .send(ChainUpdate::ConnectionStatus(ConnectionStatus::Connected))
+                    .await;
+
+                // Connect to People chain for identity queries
+                if let Some(ref client) = self.client {
+                    match client.connect_people_chain().await {
+                        Ok(people_subxt) => {
+                            tracing::info!("Connected to {} People chain", network);
+                            self.people_client = Some(PeopleChainClient::new(people_subxt));
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to connect to People chain (identity data will be unavailable): {}",
+                                e
+                            );
+                            self.people_client = None;
+                        }
+                    }
+                }
+
                 // Fetch and persist chain metadata
                 if let Some(ref client) = self.client {
                     let info = client.get_chain_info();
                     let genesis_hash = hex::encode(client.genesis_hash());
-                    
+
                     // Fetch dynamic data
-                    let era_duration_ms = client.get_era_duration_ms().await.unwrap_or(24 * 60 * 60 * 1000);
-                    let current_era = client.get_active_era().await.ok().flatten().map(|e| e.index).unwrap_or(0);
-                    
+                    let era_duration_ms = client
+                        .get_era_duration_ms()
+                        .await
+                        .unwrap_or(24 * 60 * 60 * 1000);
+                    let current_era = client
+                        .get_active_era()
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|e| e.index)
+                        .unwrap_or(0);
+
                     // Token properties based on network
                     let (token_symbol, token_decimals, ss58_prefix) = match network {
                         Network::Polkadot => ("DOT".to_string(), 10, 0),
@@ -520,23 +831,40 @@ impl ChainWorker {
             Err(e) => {
                 tracing::error!("Failed to connect: {}", e);
                 let _ = self.update_tx.send(ChainUpdate::Error(e.to_string())).await;
-                let _ = self.update_tx.send(ChainUpdate::ConnectionStatus(ConnectionStatus::Error(e.to_string()))).await;
+                let _ = self
+                    .update_tx
+                    .send(ChainUpdate::ConnectionStatus(ConnectionStatus::Error(
+                        e.to_string(),
+                    )))
+                    .await;
             }
         }
     }
 
     async fn handle_disconnect(&mut self) {
         self.client = None;
-        let _ = self.update_tx.send(ChainUpdate::ConnectionStatus(ConnectionStatus::Disconnected)).await;
+        self.people_client = None;
+        let _ = self
+            .update_tx
+            .send(ChainUpdate::ConnectionStatus(
+                ConnectionStatus::Disconnected,
+            ))
+            .await;
     }
 
     async fn fetch_validators_internal(&mut self, network: Network) {
         if let Some(ref client) = self.client {
             match client.get_validators().await {
                 Ok(validators) => {
-                    tracing::info!("Fetched {} raw validators", validators.len());
-                    let enriched = enrich_raw_validators(&validators);
-                    
+                    tracing::info!(
+                        "Fetched {} raw validators, enriching with stake/identity/APY data...",
+                        validators.len()
+                    );
+
+                    // Enrich validators with full data (stake, identity, APY)
+                    let enriched =
+                        enrich_validators(client, &validators, self.people_client.as_ref()).await;
+
                     // Persist to DB
                     if let Some(ref db) = self.db {
                         // Get current era from metadata or default to 0
@@ -546,23 +874,40 @@ impl ChainWorker {
                             0
                         };
 
-                        if let Err(e) = db.set_cached_validators(network, era, enriched.clone()).await {
+                        if let Err(e) = db
+                            .set_cached_validators(network, era, enriched.clone())
+                            .await
+                        {
                             tracing::warn!("Failed to cache validators: {}", e);
                         }
                     }
 
-                    tracing::info!("Converted to {} enriched validators", enriched.len());
-                    let _ = self.update_tx.send(ChainUpdate::ValidatorsLoaded(enriched)).await;
+                    tracing::info!("Sending {} enriched validators to UI", enriched.len());
+                    let _ = self
+                        .update_tx
+                        .send(ChainUpdate::ValidatorsLoaded(enriched))
+                        .await;
                 }
                 Err(e) => {
                     tracing::error!("Failed to fetch validators: {}", e);
-                    let _ = self.update_tx.send(ChainUpdate::Error(format!("Failed to fetch validators: {}", e))).await;
+                    let _ = self
+                        .update_tx
+                        .send(ChainUpdate::Error(format!(
+                            "Failed to fetch validators: {}",
+                            e
+                        )))
+                        .await;
                 }
             }
         }
     }
 
-    async fn handle_fetch_account(&mut self, network: Network, address: String, reply: oneshot::Sender<Result<AccountData, String>>) {
+    async fn handle_fetch_account(
+        &mut self,
+        network: Network,
+        address: String,
+        reply: oneshot::Sender<Result<AccountData, String>>,
+    ) {
         let result = if let Some(ref client) = self.client {
             match address.parse::<subxt::utils::AccountId32>() {
                 Ok(account_id) => {
@@ -574,16 +919,24 @@ impl ChainWorker {
 
                     match balance {
                         Ok(bal) => {
-                            let staked = staking.ok().flatten().map(|s| s.active);
-                            let noms: Vec<String> = nominations.ok().flatten().map(|n| {
-                                n.targets.iter().map(|t| t.to_string()).collect()
-                            }).unwrap_or_default();
+                            let staking_ledger = staking.ok().flatten();
+                            let staked = staking_ledger.as_ref().map(|s| s.active);
+                            let unbonding = staking_ledger
+                                .as_ref()
+                                .map(|s| s.unlocking.iter().map(|c| c.value).sum())
+                                .unwrap_or(0);
+                            let noms: Vec<String> = nominations
+                                .ok()
+                                .flatten()
+                                .map(|n| n.targets.iter().map(|t| t.to_string()).collect())
+                                .unwrap_or_default();
                             let pool_id = pool.ok().flatten().map(|p| p.pool_id);
 
                             let account_data = AccountData {
                                 free_balance: bal.free,
                                 reserved_balance: bal.reserved,
                                 staked_balance: staked,
+                                unbonding_balance: unbonding,
                                 is_nominating: !noms.is_empty(),
                                 nominations: noms.clone(),
                                 pool_id,
@@ -596,11 +949,22 @@ impl ChainWorker {
                                     reserved_balance: account_data.reserved_balance,
                                     frozen_balance: bal.frozen,
                                     staked_amount: account_data.staked_balance.unwrap_or(0),
-                                    nominations_json: if noms.is_empty() { None } else { serde_json::to_string(&noms).ok() },
+                                    nominations_json: if noms.is_empty() {
+                                        None
+                                    } else {
+                                        serde_json::to_string(&noms).ok()
+                                    },
                                     pool_id: account_data.pool_id,
                                     pool_points: None, // Need to fetch pool points
                                 };
-                                if let Err(e) = db.set_cached_account_status(network, address.clone(), cached_status).await {
+                                if let Err(e) = db
+                                    .set_cached_account_status(
+                                        network,
+                                        address.clone(),
+                                        cached_status,
+                                    )
+                                    .await
+                                {
                                     tracing::warn!("Failed to cache account status: {}", e);
                                 }
                             }
@@ -619,11 +983,17 @@ impl ChainWorker {
         let _ = reply.send(result);
     }
 
-    async fn handle_fetch_validators(&mut self, network: Network, reply: oneshot::Sender<Result<Vec<ValidatorInfo>, String>>) {
+    async fn handle_fetch_validators(
+        &mut self,
+        network: Network,
+        reply: oneshot::Sender<Result<Vec<ValidatorInfo>, String>>,
+    ) {
         let result = if let Some(ref client) = self.client {
             match client.get_validators().await {
                 Ok(validators) => {
-                    let enriched = enrich_raw_validators(&validators);
+                    tracing::info!("Fetched {} raw validators, enriching...", validators.len());
+                    let enriched =
+                        enrich_validators(client, &validators, self.people_client.as_ref()).await;
 
                     // Persist to DB
                     if let Some(ref db) = self.db {
@@ -633,7 +1003,10 @@ impl ChainWorker {
                             0
                         };
 
-                        if let Err(e) = db.set_cached_validators(network, era, enriched.clone()).await {
+                        if let Err(e) = db
+                            .set_cached_validators(network, era, enriched.clone())
+                            .await
+                        {
                             tracing::warn!("Failed to cache validators: {}", e);
                         }
                     }
@@ -648,7 +1021,11 @@ impl ChainWorker {
         let _ = reply.send(result);
     }
 
-    async fn handle_fetch_pools(&mut self, network: Network, reply: oneshot::Sender<Result<Vec<PoolInfo>, String>>) {
+    async fn handle_fetch_pools(
+        &mut self,
+        network: Network,
+        reply: oneshot::Sender<Result<Vec<PoolInfo>, String>>,
+    ) {
         let result = if let Some(ref client) = self.client {
             match client.get_nomination_pools().await {
                 Ok(pools) => {
@@ -664,8 +1041,8 @@ impl ChainWorker {
                             },
                             member_count: p.member_count,
                             total_bonded: p.points,
-                            commission: None, // TODO: Fetch commission
-                            apy: None, // TODO: Calculate from rewards
+                            commission: p.commission,
+                            apy: None, // Pool APY requires tracking rewards over time
                         })
                         .collect();
 
@@ -688,9 +1065,16 @@ impl ChainWorker {
 
     // === Transaction Payload Handlers ===
 
-    async fn handle_create_bond_payload(&self, signer: AccountId32, value: u128, reply: oneshot::Sender<Result<TransactionPayload, String>>) {
+    async fn handle_create_bond_payload(
+        &self,
+        signer: AccountId32,
+        value: u128,
+        reply: oneshot::Sender<Result<TransactionPayload, String>>,
+    ) {
         let result = if let Some(ref client) = self.client {
-            client.create_bond_payload(&signer, value, true).await
+            client
+                .create_bond_payload(&signer, value, true)
+                .await
                 .map(|p| make_transaction_payload(p, signer))
                 .map_err(|e| format!("Failed to create bond payload: {}", e))
         } else {
@@ -699,9 +1083,16 @@ impl ChainWorker {
         let _ = reply.send(result);
     }
 
-    async fn handle_create_unbond_payload(&self, signer: AccountId32, value: u128, reply: oneshot::Sender<Result<TransactionPayload, String>>) {
+    async fn handle_create_unbond_payload(
+        &self,
+        signer: AccountId32,
+        value: u128,
+        reply: oneshot::Sender<Result<TransactionPayload, String>>,
+    ) {
         let result = if let Some(ref client) = self.client {
-            client.create_unbond_payload(&signer, value, true).await
+            client
+                .create_unbond_payload(&signer, value, true)
+                .await
                 .map(|p| make_transaction_payload(p, signer))
                 .map_err(|e| format!("Failed to create unbond payload: {}", e))
         } else {
@@ -710,9 +1101,16 @@ impl ChainWorker {
         let _ = reply.send(result);
     }
 
-    async fn handle_create_bond_extra_payload(&self, signer: AccountId32, value: u128, reply: oneshot::Sender<Result<TransactionPayload, String>>) {
+    async fn handle_create_bond_extra_payload(
+        &self,
+        signer: AccountId32,
+        value: u128,
+        reply: oneshot::Sender<Result<TransactionPayload, String>>,
+    ) {
         let result = if let Some(ref client) = self.client {
-            client.create_bond_extra_payload(&signer, value, true).await
+            client
+                .create_bond_extra_payload(&signer, value, true)
+                .await
                 .map(|p| make_transaction_payload(p, signer))
                 .map_err(|e| format!("Failed to create bond_extra payload: {}", e))
         } else {
@@ -721,9 +1119,16 @@ impl ChainWorker {
         let _ = reply.send(result);
     }
 
-    async fn handle_create_set_payee_payload(&self, signer: AccountId32, destination: RewardDestination, reply: oneshot::Sender<Result<TransactionPayload, String>>) {
+    async fn handle_create_set_payee_payload(
+        &self,
+        signer: AccountId32,
+        destination: RewardDestination,
+        reply: oneshot::Sender<Result<TransactionPayload, String>>,
+    ) {
         let result = if let Some(ref client) = self.client {
-            client.create_set_payee_payload(&signer, destination, true).await
+            client
+                .create_set_payee_payload(&signer, destination, true)
+                .await
                 .map(|p| make_transaction_payload(p, signer))
                 .map_err(|e| format!("Failed to create set_payee payload: {}", e))
         } else {
@@ -732,10 +1137,16 @@ impl ChainWorker {
         let _ = reply.send(result);
     }
 
-    async fn handle_create_withdraw_unbonded_payload(&self, signer: AccountId32, reply: oneshot::Sender<Result<TransactionPayload, String>>) {
+    async fn handle_create_withdraw_unbonded_payload(
+        &self,
+        signer: AccountId32,
+        reply: oneshot::Sender<Result<TransactionPayload, String>>,
+    ) {
         let result = if let Some(ref client) = self.client {
             // Use 0 slashing spans as default
-            client.create_withdraw_unbonded_payload(&signer, 0, true).await
+            client
+                .create_withdraw_unbonded_payload(&signer, 0, true)
+                .await
                 .map(|p| make_transaction_payload(p, signer))
                 .map_err(|e| format!("Failed to create withdraw_unbonded payload: {}", e))
         } else {
@@ -744,9 +1155,15 @@ impl ChainWorker {
         let _ = reply.send(result);
     }
 
-    async fn handle_create_chill_payload(&self, signer: AccountId32, reply: oneshot::Sender<Result<TransactionPayload, String>>) {
+    async fn handle_create_chill_payload(
+        &self,
+        signer: AccountId32,
+        reply: oneshot::Sender<Result<TransactionPayload, String>>,
+    ) {
         let result = if let Some(ref client) = self.client {
-            client.create_chill_payload(&signer, true).await
+            client
+                .create_chill_payload(&signer, true)
+                .await
                 .map(|p| make_transaction_payload(p, signer))
                 .map_err(|e| format!("Failed to create chill payload: {}", e))
         } else {
@@ -755,9 +1172,16 @@ impl ChainWorker {
         let _ = reply.send(result);
     }
 
-    async fn handle_create_nominate_payload(&self, signer: AccountId32, targets: Vec<AccountId32>, reply: oneshot::Sender<Result<TransactionPayload, String>>) {
+    async fn handle_create_nominate_payload(
+        &self,
+        signer: AccountId32,
+        targets: Vec<AccountId32>,
+        reply: oneshot::Sender<Result<TransactionPayload, String>>,
+    ) {
         let result = if let Some(ref client) = self.client {
-            client.create_nominate_payload(&signer, &targets, true).await
+            client
+                .create_nominate_payload(&signer, &targets, true)
+                .await
                 .map(|p| make_transaction_payload(p, signer))
                 .map_err(|e| format!("Failed to create nominate payload: {}", e))
         } else {
@@ -768,9 +1192,17 @@ impl ChainWorker {
 
     // === Pool Operation Handlers ===
 
-    async fn handle_create_pool_join_payload(&self, signer: AccountId32, pool_id: u32, amount: u128, reply: oneshot::Sender<Result<TransactionPayload, String>>) {
+    async fn handle_create_pool_join_payload(
+        &self,
+        signer: AccountId32,
+        pool_id: u32,
+        amount: u128,
+        reply: oneshot::Sender<Result<TransactionPayload, String>>,
+    ) {
         let result = if let Some(ref client) = self.client {
-            client.create_pool_join_payload(&signer, pool_id, amount, true).await
+            client
+                .create_pool_join_payload(&signer, pool_id, amount, true)
+                .await
                 .map(|p| make_transaction_payload(p, signer))
                 .map_err(|e| format!("Failed to create pool_join payload: {}", e))
         } else {
@@ -779,9 +1211,16 @@ impl ChainWorker {
         let _ = reply.send(result);
     }
 
-    async fn handle_create_pool_bond_extra_payload(&self, signer: AccountId32, amount: u128, reply: oneshot::Sender<Result<TransactionPayload, String>>) {
+    async fn handle_create_pool_bond_extra_payload(
+        &self,
+        signer: AccountId32,
+        amount: u128,
+        reply: oneshot::Sender<Result<TransactionPayload, String>>,
+    ) {
         let result = if let Some(ref client) = self.client {
-            client.create_pool_bond_extra_payload(&signer, amount, true).await
+            client
+                .create_pool_bond_extra_payload(&signer, amount, true)
+                .await
                 .map(|p| make_transaction_payload(p, signer))
                 .map_err(|e| format!("Failed to create pool_bond_extra payload: {}", e))
         } else {
@@ -790,9 +1229,15 @@ impl ChainWorker {
         let _ = reply.send(result);
     }
 
-    async fn handle_create_pool_claim_payload(&self, signer: AccountId32, reply: oneshot::Sender<Result<TransactionPayload, String>>) {
+    async fn handle_create_pool_claim_payload(
+        &self,
+        signer: AccountId32,
+        reply: oneshot::Sender<Result<TransactionPayload, String>>,
+    ) {
         let result = if let Some(ref client) = self.client {
-            client.create_pool_claim_payload(&signer, true).await
+            client
+                .create_pool_claim_payload(&signer, true)
+                .await
                 .map(|p| make_transaction_payload(p, signer))
                 .map_err(|e| format!("Failed to create pool_claim payload: {}", e))
         } else {
@@ -801,10 +1246,17 @@ impl ChainWorker {
         let _ = reply.send(result);
     }
 
-    async fn handle_create_pool_unbond_payload(&self, signer: AccountId32, amount: u128, reply: oneshot::Sender<Result<TransactionPayload, String>>) {
+    async fn handle_create_pool_unbond_payload(
+        &self,
+        signer: AccountId32,
+        amount: u128,
+        reply: oneshot::Sender<Result<TransactionPayload, String>>,
+    ) {
         let result = if let Some(ref client) = self.client {
             // For pool unbond, member_account is the same as signer
-            client.create_pool_unbond_payload(&signer, &signer, amount, true).await
+            client
+                .create_pool_unbond_payload(&signer, &signer, amount, true)
+                .await
                 .map(|p| make_transaction_payload(p, signer))
                 .map_err(|e| format!("Failed to create pool_unbond payload: {}", e))
         } else {
@@ -813,10 +1265,16 @@ impl ChainWorker {
         let _ = reply.send(result);
     }
 
-    async fn handle_create_pool_withdraw_payload(&self, signer: AccountId32, reply: oneshot::Sender<Result<TransactionPayload, String>>) {
+    async fn handle_create_pool_withdraw_payload(
+        &self,
+        signer: AccountId32,
+        reply: oneshot::Sender<Result<TransactionPayload, String>>,
+    ) {
         let result = if let Some(ref client) = self.client {
             // For pool withdraw, member_account is the same as signer, 0 slashing spans
-            client.create_pool_withdraw_payload(&signer, &signer, 0, true).await
+            client
+                .create_pool_withdraw_payload(&signer, &signer, 0, true)
+                .await
                 .map(|p| make_transaction_payload(p, signer))
                 .map_err(|e| format!("Failed to create pool_withdraw payload: {}", e))
         } else {
@@ -827,7 +1285,11 @@ impl ChainWorker {
 
     // === Transaction Submission Handler ===
 
-    async fn handle_submit_signed_extrinsic(&self, extrinsic: Vec<u8>, reply: oneshot::Sender<Result<TxSubmissionResult, String>>) {
+    async fn handle_submit_signed_extrinsic(
+        &self,
+        extrinsic: Vec<u8>,
+        reply: oneshot::Sender<Result<TxSubmissionResult, String>>,
+    ) {
         let result = if let Some(ref client) = self.client {
             match client.submit_signed_extrinsic(&extrinsic).await {
                 Ok(progress) => {
@@ -869,7 +1331,11 @@ impl ChainWorker {
             return;
         };
 
-        tracing::info!("Loading staking history for {} ({} eras)", address, num_eras);
+        tracing::info!(
+            "Loading staking history for {} ({} eras)",
+            address,
+            num_eras
+        );
 
         // Parse address to AccountId32 for chain queries
         let account: AccountId32 = match address.parse() {
@@ -883,7 +1349,10 @@ impl ChainWorker {
         // Try to load cached history first
         let mut cached_history = Vec::new();
         if let Some(ref db) = self.db {
-            match db.get_history(network, address.clone(), Some(num_eras)).await {
+            match db
+                .get_history(network, address.clone(), Some(num_eras))
+                .await
+            {
                 Ok(history) if !history.is_empty() => {
                     tracing::info!("Loaded {} cached history points", history.len());
                     cached_history = history;
@@ -934,7 +1403,8 @@ impl ChainWorker {
         }
         cached_history = good_cached;
 
-        let cached_eras: std::collections::HashSet<u32> = cached_history.iter().map(|h| h.era).collect();
+        let cached_eras: std::collections::HashSet<u32> =
+            cached_history.iter().map(|h| h.era).collect();
         let eras_to_fetch: Vec<u32> = (start_era..current_era)
             .filter(|era| !cached_eras.contains(era))
             .collect();
@@ -982,14 +1452,21 @@ impl ChainWorker {
             // Log raw values for debugging
             tracing::debug!(
                 "Era {} raw data: era_reward={}, total_staked={}, user_bonded={}, apy={:.4}",
-                era, era_reward, total_staked, user_bonded, apy
+                era,
+                era_reward,
+                total_staked,
+                user_bonded,
+                apy
             );
 
             // Skip eras with unrealistic APY (likely corrupted data)
             if !is_realistic_apy(apy) {
                 tracing::warn!(
                     "Era {} has unrealistic APY {:.2}% (reward={}, staked={}), skipping",
-                    era, apy * 100.0, era_reward, total_staked
+                    era,
+                    apy * 100.0,
+                    era_reward,
+                    total_staked
                 );
                 continue;
             }
@@ -1006,14 +1483,21 @@ impl ChainWorker {
             };
 
             new_points.push(point);
-            tracing::debug!("Added history point for era {} (APY: {:.2}%)", era, apy * 100.0);
+            tracing::debug!(
+                "Added history point for era {} (APY: {:.2}%)",
+                era,
+                apy * 100.0
+            );
         }
 
         // Cache new points to database
         if let Some(ref db) = self.db
             && !new_points.is_empty()
         {
-            if let Err(e) = db.insert_history_batch(network, address.clone(), new_points.clone()).await {
+            if let Err(e) = db
+                .insert_history_batch(network, address.clone(), new_points.clone())
+                .await
+            {
                 tracing::warn!("Failed to cache history: {}", e);
             } else {
                 tracing::info!("Cached {} new history points", new_points.len());
@@ -1031,7 +1515,10 @@ impl ChainWorker {
 }
 
 /// Spawn the chain worker and return a handle.
-pub fn spawn_chain_worker(db: Option<DbService>, handle: tokio::runtime::Handle) -> (ChainHandle, mpsc::Receiver<ChainUpdate>) {
+pub fn spawn_chain_worker(
+    db: Option<DbService>,
+    handle: tokio::runtime::Handle,
+) -> (ChainHandle, mpsc::Receiver<ChainUpdate>) {
     let (command_tx, mut command_rx) = mpsc::channel::<ChainCommand>(32);
     let (update_tx, update_rx) = mpsc::channel::<ChainUpdate>(32);
 
@@ -1041,7 +1528,10 @@ pub fn spawn_chain_worker(db: Option<DbService>, handle: tokio::runtime::Handle)
 
         while let Some(command) = command_rx.recv().await {
             match command {
-                ChainCommand::Connect { network, use_light_client } => {
+                ChainCommand::Connect {
+                    network,
+                    use_light_client,
+                } => {
                     current_network = network;
                     worker.handle_connect(network, use_light_client).await;
                 }
@@ -1049,7 +1539,9 @@ pub fn spawn_chain_worker(db: Option<DbService>, handle: tokio::runtime::Handle)
                     worker.handle_disconnect().await;
                 }
                 ChainCommand::FetchAccount { address, reply } => {
-                    worker.handle_fetch_account(current_network, address, reply).await;
+                    worker
+                        .handle_fetch_account(current_network, address, reply)
+                        .await;
                 }
                 ChainCommand::FetchValidators { reply } => {
                     worker.handle_fetch_validators(current_network, reply).await;
@@ -1057,50 +1549,111 @@ pub fn spawn_chain_worker(db: Option<DbService>, handle: tokio::runtime::Handle)
                 ChainCommand::FetchPools { reply } => {
                     worker.handle_fetch_pools(current_network, reply).await;
                 }
-                ChainCommand::FetchHistory { address, eras, reply } => {
-                    worker.handle_fetch_history(current_network, address, eras, reply).await;
+                ChainCommand::FetchHistory {
+                    address,
+                    eras,
+                    reply,
+                } => {
+                    worker
+                        .handle_fetch_history(current_network, address, eras, reply)
+                        .await;
                 }
                 // === Transaction Payload Generation ===
-                ChainCommand::CreateBondPayload { signer, value, reply } => {
-                    worker.handle_create_bond_payload(signer, value, reply).await;
+                ChainCommand::CreateBondPayload {
+                    signer,
+                    value,
+                    reply,
+                } => {
+                    worker
+                        .handle_create_bond_payload(signer, value, reply)
+                        .await;
                 }
-                ChainCommand::CreateUnbondPayload { signer, value, reply } => {
-                    worker.handle_create_unbond_payload(signer, value, reply).await;
+                ChainCommand::CreateUnbondPayload {
+                    signer,
+                    value,
+                    reply,
+                } => {
+                    worker
+                        .handle_create_unbond_payload(signer, value, reply)
+                        .await;
                 }
-                ChainCommand::CreateBondExtraPayload { signer, value, reply } => {
-                    worker.handle_create_bond_extra_payload(signer, value, reply).await;
+                ChainCommand::CreateBondExtraPayload {
+                    signer,
+                    value,
+                    reply,
+                } => {
+                    worker
+                        .handle_create_bond_extra_payload(signer, value, reply)
+                        .await;
                 }
-                ChainCommand::CreateSetPayeePayload { signer, destination, reply } => {
-                    worker.handle_create_set_payee_payload(signer, destination, reply).await;
+                ChainCommand::CreateSetPayeePayload {
+                    signer,
+                    destination,
+                    reply,
+                } => {
+                    worker
+                        .handle_create_set_payee_payload(signer, destination, reply)
+                        .await;
                 }
                 ChainCommand::CreateWithdrawUnbondedPayload { signer, reply } => {
-                    worker.handle_create_withdraw_unbonded_payload(signer, reply).await;
+                    worker
+                        .handle_create_withdraw_unbonded_payload(signer, reply)
+                        .await;
                 }
                 ChainCommand::CreateChillPayload { signer, reply } => {
                     worker.handle_create_chill_payload(signer, reply).await;
                 }
-                ChainCommand::CreateNominatePayload { signer, targets, reply } => {
-                    worker.handle_create_nominate_payload(signer, targets, reply).await;
+                ChainCommand::CreateNominatePayload {
+                    signer,
+                    targets,
+                    reply,
+                } => {
+                    worker
+                        .handle_create_nominate_payload(signer, targets, reply)
+                        .await;
                 }
                 // === Pool Operations ===
-                ChainCommand::CreatePoolJoinPayload { signer, pool_id, amount, reply } => {
-                    worker.handle_create_pool_join_payload(signer, pool_id, amount, reply).await;
+                ChainCommand::CreatePoolJoinPayload {
+                    signer,
+                    pool_id,
+                    amount,
+                    reply,
+                } => {
+                    worker
+                        .handle_create_pool_join_payload(signer, pool_id, amount, reply)
+                        .await;
                 }
-                ChainCommand::CreatePoolBondExtraPayload { signer, amount, reply } => {
-                    worker.handle_create_pool_bond_extra_payload(signer, amount, reply).await;
+                ChainCommand::CreatePoolBondExtraPayload {
+                    signer,
+                    amount,
+                    reply,
+                } => {
+                    worker
+                        .handle_create_pool_bond_extra_payload(signer, amount, reply)
+                        .await;
                 }
                 ChainCommand::CreatePoolClaimPayload { signer, reply } => {
                     worker.handle_create_pool_claim_payload(signer, reply).await;
                 }
-                ChainCommand::CreatePoolUnbondPayload { signer, amount, reply } => {
-                    worker.handle_create_pool_unbond_payload(signer, amount, reply).await;
+                ChainCommand::CreatePoolUnbondPayload {
+                    signer,
+                    amount,
+                    reply,
+                } => {
+                    worker
+                        .handle_create_pool_unbond_payload(signer, amount, reply)
+                        .await;
                 }
                 ChainCommand::CreatePoolWithdrawPayload { signer, reply } => {
-                    worker.handle_create_pool_withdraw_payload(signer, reply).await;
+                    worker
+                        .handle_create_pool_withdraw_payload(signer, reply)
+                        .await;
                 }
                 // === Transaction Submission ===
                 ChainCommand::SubmitSignedExtrinsic { extrinsic, reply } => {
-                    worker.handle_submit_signed_extrinsic(extrinsic, reply).await;
+                    worker
+                        .handle_submit_signed_extrinsic(extrinsic, reply)
+                        .await;
                 }
             }
         }
@@ -1119,17 +1672,22 @@ mod tests {
             free_balance: 1000,
             reserved_balance: 100,
             staked_balance: Some(500),
+            unbonding_balance: 200,
             is_nominating: true,
             nominations: vec!["validator1".to_string()],
             pool_id: None,
         };
         assert_eq!(data.free_balance, 1000);
+        assert_eq!(data.unbonding_balance, 200);
         assert!(data.is_nominating);
     }
 
     #[test]
     fn test_chain_update_variants() {
         let update = ChainUpdate::ConnectionStatus(ConnectionStatus::Connected);
-        assert!(matches!(update, ChainUpdate::ConnectionStatus(ConnectionStatus::Connected)));
+        assert!(matches!(
+            update,
+            ChainUpdate::ConnectionStatus(ConnectionStatus::Connected)
+        ));
     }
 }

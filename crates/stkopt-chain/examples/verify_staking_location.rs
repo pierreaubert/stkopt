@@ -25,7 +25,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("===========================================");
     println!("Verifying Staking Pallet Location");
-    println!("Mode: {}", if use_light_client { "Light Client" } else { "RPC" });
+    println!(
+        "Mode: {}",
+        if use_light_client {
+            "Light Client"
+        } else {
+            "RPC"
+        }
+    );
     println!("===========================================\n");
 
     if use_light_client {
@@ -43,12 +50,19 @@ async fn test_rpc() -> Result<(), Box<dyn std::error::Error>> {
     println!("Connecting to {}...", KUSAMA_RELAY);
     let relay_client = OnlineClient::<PolkadotConfig>::from_url(KUSAMA_RELAY).await?;
     println!("Connected!");
-    println!("Latest block: {:?}", relay_client.blocks().at_latest().await?.number());
+    println!(
+        "Latest block: {:?}",
+        relay_client.blocks().at_latest().await?.number()
+    );
 
     let relay_has_staking = check_staking_pallet(&relay_client);
     println!(
         "Staking pallet present: {}\n",
-        if relay_has_staking { "YES ✓" } else { "NO ✗" }
+        if relay_has_staking {
+            "YES ✓"
+        } else {
+            "NO ✗"
+        }
     );
 
     if relay_has_staking {
@@ -96,7 +110,11 @@ async fn test_light_client() -> Result<(), Box<dyn std::error::Error>> {
     let relay_has_staking = check_staking_pallet(&relay_client);
     println!(
         "Staking pallet present: {}\n",
-        if relay_has_staking { "YES ✓" } else { "NO ✗" }
+        if relay_has_staking {
+            "YES ✓"
+        } else {
+            "NO ✗"
+        }
     );
 
     if relay_has_staking {
@@ -162,7 +180,10 @@ fn check_staking_pallet(client: &OnlineClient<PolkadotConfig>) -> bool {
     );
 
     // List all pallets for debugging
-    println!("Pallets on this chain ({} total):", metadata.pallets().count());
+    println!(
+        "Pallets on this chain ({} total):",
+        metadata.pallets().count()
+    );
     let pallets: Vec<_> = metadata.pallets().map(|p| p.name()).collect();
     for (i, name) in pallets.iter().enumerate() {
         if *name == "Staking" {
@@ -190,7 +211,10 @@ async fn test_active_era(client: &OnlineClient<PolkadotConfig>) {
     match storage.fetch(&storage_query).await {
         Ok(Some(value)) => {
             let decoded = value.to_value().unwrap();
-            if let Some(index) = decoded.at("index").and_then(|v: &subxt::dynamic::Value<u32>| v.as_u128()) {
+            if let Some(index) = decoded
+                .at("index")
+                .and_then(|v: &subxt::dynamic::Value<u32>| v.as_u128())
+            {
                 println!("  ActiveEra index: {} ✓", index);
             } else {
                 println!("  Got value but couldn't decode era index");

@@ -50,7 +50,9 @@ pub fn validate_address(input: &str) -> ValidationResult {
     }
 
     if input.len() < 3 {
-        return ValidationResult::Invalid("Address is too short (minimum 3 characters)".to_string());
+        return ValidationResult::Invalid(
+            "Address is too short (minimum 3 characters)".to_string(),
+        );
     }
 
     // SS58 addresses start with alphanumeric characters
@@ -159,12 +161,18 @@ mod tests {
     fn test_validate_invalid_characters() {
         let result = validate_address("1abc!@#$%^&*()");
         assert!(matches!(result, ValidationResult::Invalid(_)));
-        assert!(result.error_message().unwrap().contains("special characters"));
+        assert!(
+            result
+                .error_message()
+                .unwrap()
+                .contains("special characters")
+        );
     }
 
     #[test]
     fn test_validate_too_long() {
-        let result = validate_address("1abcdefghijklmnopqrstuvwxyz1234567890abcdefghijklmnopqrstuvwxyz");
+        let result =
+            validate_address("1abcdefghijklmnopqrstuvwxyz1234567890abcdefghijklmnopqrstuvwxyz");
         assert!(matches!(result, ValidationResult::Invalid(_)));
         assert!(result.error_message().unwrap().contains("too long"));
     }

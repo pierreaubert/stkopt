@@ -263,7 +263,10 @@ async fn main() -> Result<()> {
             && !cached_history.is_empty()
         {
             // Filter out cached entries with unrealistic APY (likely bad data)
-            let filtered: Vec<_> = cached_history.into_iter().filter(|h| h.apy <= 0.50).collect();
+            let filtered: Vec<_> = cached_history
+                .into_iter()
+                .filter(|h| h.apy <= 0.50)
+                .collect();
             tracing::info!("Loaded {} cached history points", filtered.len());
             app.history.points = filtered;
             app.history.loaded_for = Some(last_addr.to_string());
@@ -794,12 +797,13 @@ async fn send_staking_qr(
 ) {
     let qr_data = stkopt_chain::encode_for_qr(&payload, &signer);
     let tx_info = build_tx_info(&payload, &signer, targets);
-    let pending = crate::action::PendingUnsignedTx {
-        payload,
-        signer,
-    };
-    let _ = action_tx.send(Action::SetPendingUnsignedTx(Some(pending))).await;
-    let _ = action_tx.send(Action::SetQRData(Some(qr_data), Some(tx_info))).await;
+    let pending = crate::action::PendingUnsignedTx { payload, signer };
+    let _ = action_tx
+        .send(Action::SetPendingUnsignedTx(Some(pending)))
+        .await;
+    let _ = action_tx
+        .send(Action::SetQRData(Some(qr_data), Some(tx_info)))
+        .await;
 }
 
 /// Clear QR data and pending transaction info from the UI.
@@ -948,7 +952,11 @@ async fn chain_task(
     let mut bytes_transferred: u64 = 1000; // Era info ~1KB
 
     let _ = action_tx
-        .send(Action::SetLoadingProgress(0.1, Some(bytes_transferred), None))
+        .send(Action::SetLoadingProgress(
+            0.1,
+            Some(bytes_transferred),
+            None,
+        ))
         .await;
 
     // Open database for caching
@@ -1046,7 +1054,11 @@ async fn chain_task(
 
     bytes_transferred += validators.len() as u64 * 200; // ~200 bytes per validator
     let _ = action_tx
-        .send(Action::SetLoadingProgress(0.3, Some(bytes_transferred), None))
+        .send(Action::SetLoadingProgress(
+            0.3,
+            Some(bytes_transferred),
+            None,
+        ))
         .await;
 
     // Fetch staker exposures for the previous era (active era - 1)
@@ -1088,7 +1100,11 @@ async fn chain_task(
 
     bytes_transferred += exposures.len() as u64 * 100; // ~100 bytes per exposure
     let _ = action_tx
-        .send(Action::SetLoadingProgress(0.6, Some(bytes_transferred), None))
+        .send(Action::SetLoadingProgress(
+            0.6,
+            Some(bytes_transferred),
+            None,
+        ))
         .await;
 
     // Fetch era reward
@@ -1132,7 +1148,11 @@ async fn chain_task(
 
     bytes_transferred += 500 + points_len as u64 * 50; // Era reward ~500B + ~50 bytes per point entry
     let _ = action_tx
-        .send(Action::SetLoadingProgress(0.7, Some(bytes_transferred), None))
+        .send(Action::SetLoadingProgress(
+            0.7,
+            Some(bytes_transferred),
+            None,
+        ))
         .await;
 
     // Fetch fresh validator identities from People chain and update cache
@@ -1192,7 +1212,11 @@ async fn chain_task(
 
     bytes_transferred += identity_map.len() as u64 * 100; // ~100 bytes per identity
     let _ = action_tx
-        .send(Action::SetLoadingProgress(0.8, Some(bytes_transferred), None))
+        .send(Action::SetLoadingProgress(
+            0.8,
+            Some(bytes_transferred),
+            None,
+        ))
         .await;
 
     // Build exposure map for quick lookup
@@ -1267,7 +1291,11 @@ async fn chain_task(
     );
 
     let _ = action_tx
-        .send(Action::SetLoadingProgress(0.9, Some(bytes_transferred), None))
+        .send(Action::SetLoadingProgress(
+            0.9,
+            Some(bytes_transferred),
+            None,
+        ))
         .await;
 
     // Cache validators to database for faster startup next time
@@ -1468,7 +1496,11 @@ async fn chain_task(
 
     bytes_transferred += display_pools.len() as u64 * 150; // ~150 bytes per pool
     let _ = action_tx
-        .send(Action::SetLoadingProgress(1.0, Some(bytes_transferred), None))
+        .send(Action::SetLoadingProgress(
+            1.0,
+            Some(bytes_transferred),
+            None,
+        ))
         .await;
     let _ = action_tx.send(Action::SetDisplayPools(display_pools)).await;
 
@@ -1526,14 +1558,19 @@ async fn chain_task(
                     pool_membership,
                 };
 
-                let _ = action_tx.send(Action::SetAccountStatus(Box::new(status))).await;
+                let _ = action_tx
+                    .send(Action::SetAccountStatus(Box::new(status)))
+                    .await;
                 tracing::info!("Account status updated");
             }
             ChainRequest::GenerateNominationQR { signer, targets } => {
                 tracing::info!("Generating nomination QR for {} validators", targets.len());
                 let target_strings: Vec<String> = targets.iter().map(|t| t.to_string()).collect();
 
-                match client.create_nominate_payload(&signer, &targets, true).await {
+                match client
+                    .create_nominate_payload(&signer, &targets, true)
+                    .await
+                {
                     Ok(payload) => {
                         tracing::info!("QR data generated ({} bytes)", payload.call_data.len());
                         send_staking_qr(&action_tx, payload, signer, target_strings).await;
@@ -1544,8 +1581,16 @@ async fn chain_task(
                     }
                 }
             }
-            ChainRequest::FetchHistory { account, num_eras, cancel_rx } => {
-                tracing::info!("Loading staking history for {} ({} eras)", account, num_eras);
+            ChainRequest::FetchHistory {
+                account,
+                num_eras,
+                cancel_rx,
+            } => {
+                tracing::info!(
+                    "Loading staking history for {} ({} eras)",
+                    account,
+                    num_eras
+                );
 
                 let address = account.to_string();
 
@@ -1664,7 +1709,10 @@ async fn chain_task(
                     if apy > 0.50 {
                         tracing::warn!(
                             "Era {} has unrealistic APY {:.2}% (reward={}, staked={}), skipping",
-                            era, apy * 100.0, era_reward, total_staked
+                            era,
+                            apy * 100.0,
+                            era_reward,
+                            total_staked
                         );
                         continue;
                     }
@@ -1672,14 +1720,17 @@ async fn chain_task(
                     // Estimate user's reward proportional to their stake
                     // NOTE: This is an estimate based on current stake, which may differ from actual historical stake
                     let user_reward = if user_bonded > 0 && total_staked > 0 {
-                        let estimated = (era_reward as f64 * user_bonded as f64 / total_staked as f64) as u128;
+                        let estimated =
+                            (era_reward as f64 * user_bonded as f64 / total_staked as f64) as u128;
 
                         // Sanity check: cap estimated reward to avoid unrealistic values
                         let max_reasonable_reward = user_bonded / 200; // 0.5% of stake
                         if estimated > max_reasonable_reward && max_reasonable_reward > 0 {
                             tracing::warn!(
                                 "Era {} reward estimate {} exceeds bound {}, capping",
-                                era, estimated, max_reasonable_reward
+                                era,
+                                estimated,
+                                max_reasonable_reward
                             );
                             max_reasonable_reward
                         } else {
@@ -1690,7 +1741,8 @@ async fn chain_task(
                     };
 
                     // Calculate date for this era
-                    let era_date = calculate_era_date(era, current_era, current_era_start_ms, era_duration_ms);
+                    let era_date =
+                        calculate_era_date(era, current_era, current_era_start_ms, era_duration_ms);
 
                     let point = crate::action::StakingHistoryPoint {
                         era,
@@ -1702,7 +1754,11 @@ async fn chain_task(
 
                     new_points.push(point.clone());
                     let _ = action_tx.send(Action::AddStakingHistoryPoint(point)).await;
-                    tracing::debug!("Added history point for era {} (APY: {:.2}%)", era, apy * 100.0);
+                    tracing::debug!(
+                        "Added history point for era {} (APY: {:.2}%)",
+                        era,
+                        apy * 100.0
+                    );
                 }
 
                 // Store new points to database
@@ -1729,15 +1785,21 @@ async fn chain_task(
                 let (signer, result) = match &op {
                     StakingOp::Bond { signer, value } => (
                         signer,
-                        client.create_bond_payload(signer, *value, use_mortal_era).await,
+                        client
+                            .create_bond_payload(signer, *value, use_mortal_era)
+                            .await,
                     ),
                     StakingOp::Unbond { signer, value } => (
                         signer,
-                        client.create_unbond_payload(signer, *value, use_mortal_era).await,
+                        client
+                            .create_unbond_payload(signer, *value, use_mortal_era)
+                            .await,
                     ),
                     StakingOp::BondExtra { signer, value } => (
                         signer,
-                        client.create_bond_extra_payload(signer, *value, use_mortal_era).await,
+                        client
+                            .create_bond_extra_payload(signer, *value, use_mortal_era)
+                            .await,
                     ),
                     StakingOp::SetPayee {
                         signer,
@@ -1776,7 +1838,9 @@ async fn chain_task(
                     ),
                     StakingOp::PoolClaim { signer } => (
                         signer,
-                        client.create_pool_claim_payload(signer, use_mortal_era).await,
+                        client
+                            .create_pool_claim_payload(signer, use_mortal_era)
+                            .await,
                     ),
                     StakingOp::PoolUnbond { signer, amount } => (
                         signer,
@@ -1838,7 +1902,9 @@ async fn chain_task(
                         tracing::error!("Failed to submit transaction: {}", error_str);
 
                         // Provide more helpful error messages for common issues
-                        let user_message = if error_str.contains("1010") || error_str.contains("Invalid Transaction") {
+                        let user_message = if error_str.contains("1010")
+                            || error_str.contains("Invalid Transaction")
+                        {
                             "Transaction rejected - may be expired or already submitted. Please generate a new QR code.".to_string()
                         } else if error_str.contains("1014") || error_str.contains("Priority") {
                             "Transaction priority too low. Please try again.".to_string()
@@ -1849,7 +1915,9 @@ async fn chain_task(
                         };
 
                         let _ = action_tx
-                            .send(Action::SetTxStatus(TxSubmissionStatus::Failed(user_message)))
+                            .send(Action::SetTxStatus(TxSubmissionStatus::Failed(
+                                user_message,
+                            )))
                             .await;
                     }
                 }

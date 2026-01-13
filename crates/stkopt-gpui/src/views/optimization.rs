@@ -6,7 +6,7 @@ use gpui_ui_kit::theme::ThemeExt;
 use gpui_ui_kit::*;
 
 use crate::app::StkoptApp;
-use crate::optimization::{optimize_selection, OptimizationCriteria, SelectionStrategy};
+use crate::optimization::{OptimizationCriteria, SelectionStrategy, optimize_selection};
 
 pub struct OptimizationSection;
 
@@ -33,15 +33,17 @@ impl OptimizationSection {
                 div()
                     .flex()
                     .gap_4()
-                    .child(Badge::new(format!("{} validators available", validator_count)))
-                    .child(
-                        Badge::new(format!("{} selected", selected_count))
-                            .variant(if selected_count > 0 {
-                                BadgeVariant::Success
-                            } else {
-                                BadgeVariant::Default
-                            }),
-                    ),
+                    .child(Badge::new(format!(
+                        "{} validators available",
+                        validator_count
+                    )))
+                    .child(Badge::new(format!("{} selected", selected_count)).variant(
+                        if selected_count > 0 {
+                            BadgeVariant::Success
+                        } else {
+                            BadgeVariant::Default
+                        },
+                    )),
             )
             .child(
                 Card::new().content(
@@ -50,30 +52,26 @@ impl OptimizationSection {
                         .flex_col()
                         .gap_4()
                         .child(Heading::h3("Selection Strategy"))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_3()
-                                .children(SelectionStrategy::all().iter().map(|strategy| {
-                                    let strategy_value = *strategy;
-                                    let is_selected = strategy_value == current_strategy;
-                                    let entity = app.entity.clone();
+                        .child(div().flex().flex_col().gap_3().children(
+                            SelectionStrategy::all().iter().map(|strategy| {
+                                let strategy_value = *strategy;
+                                let is_selected = strategy_value == current_strategy;
+                                let entity = app.entity.clone();
 
-                                    strategy_option_clickable(
-                                        strategy.label(),
-                                        strategy.description(),
-                                        is_selected,
-                                        &theme,
-                                        move |_window, cx| {
-                                            entity.update(cx, |this, cx| {
-                                                this.optimization_strategy = strategy_value;
-                                                cx.notify();
-                                            });
-                                        }
-                                    )
-                                })),
-                        ),
+                                strategy_option_clickable(
+                                    strategy.label(),
+                                    strategy.description(),
+                                    is_selected,
+                                    &theme,
+                                    move |_window, cx| {
+                                        entity.update(cx, |this, cx| {
+                                            this.optimization_strategy = strategy_value;
+                                            cx.notify();
+                                        });
+                                    },
+                                )
+                            }),
+                        )),
                 ),
             )
             .child(
@@ -87,8 +85,16 @@ impl OptimizationSection {
                             div()
                                 .flex()
                                 .gap_4()
-                                .child(param_field("Max Validators", &app.optimization_target_count.to_string(), &theme))
-                                .child(param_field("Max Commission (%)", &format!("{:.0}", app.optimization_max_commission * 100.0), &theme)),
+                                .child(param_field(
+                                    "Max Validators",
+                                    &app.optimization_target_count.to_string(),
+                                    &theme,
+                                ))
+                                .child(param_field(
+                                    "Max Commission (%)",
+                                    &format!("{:.0}", app.optimization_max_commission * 100.0),
+                                    &theme,
+                                )),
                         ),
                 ),
             )
@@ -110,7 +116,8 @@ impl OptimizationSection {
                                         strategy: this.optimization_strategy,
                                     };
                                     let result = optimize_selection(&this.validators, &criteria);
-                                    this.selected_validators = result.selected_indices.into_iter().collect();
+                                    this.selected_validators =
+                                        result.selected_indices.into_iter().collect();
                                     this.optimization_result = Some(result.estimated_apy_avg);
                                     cx.notify();
                                 });
@@ -125,13 +132,12 @@ impl OptimizationSection {
                                 entity2.update(cx, |this, cx| {
                                     this.selected_validators.clear();
                                     this.optimization_result = None;
-                                    this.qr_payload = None;
                                     cx.notify();
                                 });
                             }),
                     )
                     .child(
-                        Button::new("btn-generate-qr", "Generate QR Code")
+                        Button::new("btn-generate-qr", "Nominate Validators")
                             .variant(ButtonVariant::Primary)
                             .size(ButtonSize::Lg)
                             .disabled(selected_count == 0)
@@ -140,33 +146,23 @@ impl OptimizationSection {
                                 move |_window, cx| {
                                     entity3.update(cx, |this, cx| {
                                         // Get selected validator addresses
-                                        let targets: Vec<String> = this.selected_validators
+                                        let targets: Vec<String> = this
+                                            .selected_validators
                                             .iter()
                                             .filter_map(|&idx| this.validators.get(idx))
                                             .map(|v| v.address.clone())
                                             .collect();
-                                        
+
                                         if !targets.is_empty() {
-                                            // Build nominate transaction
-                                            let tx = crate::transactions::build_nominate_tx(
-                                                &targets,
-                                                0, // nonce (would come from chain)
-                                                "0x91b171bb158e2d3848fa23a9f1c25182fb8e20313b2c1eb49219da7a70ce90c3", // Polkadot genesis
-                                                "0x91b171bb158e2d3848fa23a9f1c25182fb8e20313b2c1eb49219da7a70ce90c3", // block hash
-                                                1000000, // spec_version
-                                                1, // tx_version
-                                            );
-                                            let qr = crate::transactions::QrPayload::for_signing(&tx);
-                                            this.qr_payload = Some(qr.to_hex());
+                                            // Generate real nominate transaction via chain worker
+                                            this.generate_nominate_qr(targets, cx);
                                         }
-                                        cx.notify();
                                     });
                                 }
                             }),
                     ),
             )
             .child(Self::render_results(app, &theme))
-            .child(Self::render_qr_section(app, &theme))
     }
 
     fn render_results(app: &StkoptApp, theme: &gpui_ui_kit::theme::Theme) -> AnyElement {
@@ -196,31 +192,53 @@ impl OptimizationSection {
                 .bg(theme.surface)
                 .border_b_1()
                 .border_color(theme.border)
-                .child(div().w(px(40.0)).child(Text::new("#").size(TextSize::Sm).weight(TextWeight::Semibold)))
                 .child(
-                    div()
-                        .flex_1()
-                        .child(Text::new("Selected Validator").size(TextSize::Sm).weight(TextWeight::Semibold)),
+                    div().w(px(40.0)).child(
+                        Text::new("#")
+                            .size(TextSize::Sm)
+                            .weight(TextWeight::Semibold),
+                    ),
                 )
                 .child(
-                    div()
-                        .w(px(100.0))
-                        .child(Text::new("Commission").size(TextSize::Sm).weight(TextWeight::Semibold)),
+                    div().flex_1().child(
+                        Text::new("Selected Validator")
+                            .size(TextSize::Sm)
+                            .weight(TextWeight::Semibold),
+                    ),
                 )
                 .child(
-                    div()
-                        .w(px(80.0))
-                        .child(Text::new("APY").size(TextSize::Sm).weight(TextWeight::Semibold)),
+                    div().w(px(100.0)).child(
+                        Text::new("Commission")
+                            .size(TextSize::Sm)
+                            .weight(TextWeight::Semibold),
+                    ),
+                )
+                .child(
+                    div().w(px(80.0)).child(
+                        Text::new("APY")
+                            .size(TextSize::Sm)
+                            .weight(TextWeight::Semibold),
+                    ),
                 ),
         );
 
         // Selected validator rows
         for (i, &idx) in app.selected_validators.iter().enumerate() {
             if let Some(validator) = app.validators.get(idx) {
-                let name = validator.name.clone().unwrap_or_else(|| validator.address[..8].to_string());
+                let name = validator
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| validator.address[..8].to_string());
                 let commission_str = format!("{:.1}%", validator.commission * 100.0);
-                let apy_str = validator.apy.map(|a| format!("{:.1}%", a)).unwrap_or_else(|| "-".to_string());
-                let row_bg = if i % 2 == 0 { theme.background } else { theme.surface };
+                let apy_str = validator
+                    .apy
+                    .map(|a| format!("{:.1}%", a))
+                    .unwrap_or_else(|| "-".to_string());
+                let row_bg = if i % 2 == 0 {
+                    theme.background
+                } else {
+                    theme.surface
+                };
 
                 list = list.child(
                     div()
@@ -232,15 +250,13 @@ impl OptimizationSection {
                         .border_b_1()
                         .border_color(theme.border)
                         .child(
-                            div()
-                                .w(px(40.0))
-                                .child(Text::new(format!("{}", i + 1)).size(TextSize::Sm).color(theme.text_secondary)),
+                            div().w(px(40.0)).child(
+                                Text::new(format!("{}", i + 1))
+                                    .size(TextSize::Sm)
+                                    .color(theme.text_secondary),
+                            ),
                         )
-                        .child(
-                            div()
-                                .flex_1()
-                                .child(Text::new(name).size(TextSize::Sm)),
-                        )
+                        .child(div().flex_1().child(Text::new(name).size(TextSize::Sm)))
                         .child(
                             div()
                                 .w(px(100.0))
@@ -266,9 +282,12 @@ impl OptimizationSection {
                     .items_center()
                     .justify_between()
                     .child(
-                        Text::new(format!("{} validators selected", app.selected_validators.len()))
-                            .size(TextSize::Sm)
-                            .weight(TextWeight::Semibold),
+                        Text::new(format!(
+                            "{} validators selected",
+                            app.selected_validators.len()
+                        ))
+                        .size(TextSize::Sm)
+                        .weight(TextWeight::Semibold),
                     )
                     .child(
                         Text::new(format!("Estimated avg APY: {:.1}%", avg_apy))
@@ -280,71 +299,6 @@ impl OptimizationSection {
         }
 
         Card::new().content(list).into_any_element()
-    }
-
-    fn render_qr_section(app: &StkoptApp, theme: &gpui_ui_kit::theme::Theme) -> AnyElement {
-        if let Some(ref payload) = app.qr_payload {
-            Card::new()
-                .content(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_4()
-                        .child(Heading::h3("Transaction QR Code"))
-                        .child(
-                            Text::new("Scan with Polkadot Vault to sign the nominate transaction")
-                                .size(TextSize::Sm)
-                                .color(theme.text_secondary),
-                        )
-                        .child(
-                            div()
-                                .p_4()
-                                .bg(theme.surface)
-                                .rounded_md()
-                                .border_1()
-                                .border_color(theme.border)
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_2()
-                                        .child(
-                                            Text::new("QR Payload (hex):")
-                                                .size(TextSize::Xs)
-                                                .color(theme.text_secondary),
-                                        )
-                                        .child(
-                                            div()
-                                                .p_2()
-                                                .bg(theme.background)
-                                                .rounded_sm()
-                                                .overflow_hidden()
-                                                .child(
-                                                    Text::new(if payload.len() > 64 {
-                                                        format!("{}...", &payload[..64])
-                                                    } else {
-                                                        payload.clone()
-                                                    })
-                                                    .size(TextSize::Xs),
-                                                ),
-                                        )
-                                        .child(
-                                            Text::new(format!("Payload size: {} bytes", payload.len() / 2))
-                                                .size(TextSize::Xs)
-                                                .color(theme.text_secondary),
-                                        ),
-                                ),
-                        )
-                        .child(
-                            Text::new("Note: QR code rendering requires gpui-px integration")
-                                .size(TextSize::Xs)
-                                .color(theme.text_secondary),
-                        ),
-                )
-                .into_any_element()
-        } else {
-            div().into_any_element()
-        }
     }
 }
 
@@ -359,7 +313,11 @@ where
     F: Fn(&mut Window, &mut App) + 'static,
 {
     let border = if selected { theme.accent } else { theme.border };
-    let bg = if selected { theme.surface_hover } else { theme.surface };
+    let bg = if selected {
+        theme.surface_hover
+    } else {
+        theme.surface
+    };
 
     div()
         .id(SharedString::from(format!("strategy-{}", title)))
@@ -399,7 +357,11 @@ where
                 .flex()
                 .flex_col()
                 .gap_1()
-                .child(Text::new(title).size(TextSize::Sm).weight(TextWeight::Medium))
+                .child(
+                    Text::new(title)
+                        .size(TextSize::Sm)
+                        .weight(TextWeight::Medium),
+                )
                 .child(
                     Text::new(description)
                         .size(TextSize::Xs)

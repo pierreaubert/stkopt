@@ -296,10 +296,22 @@ fn render_account_changes(frame: &mut Frame, app: &App, area: Rect) {
     // List of operations
     let ops = vec![
         ("b", "Bond Funds", "Stake more funds (generates QR)"),
-        ("u", "Unbond Funds", "Start unbonding process (generates QR)"),
+        (
+            "u",
+            "Unbond Funds",
+            "Start unbonding process (generates QR)",
+        ),
         ("+", "Bond Extra", "Bond additional funds to existing stash"),
-        ("r", "Set Payee", "Change reward destination (Staked, Stash, Controller, None)"),
-        ("w", "Withdraw Unbonded", "Withdraw unbonded funds that are ready"),
+        (
+            "r",
+            "Set Payee",
+            "Change reward destination (Staked, Stash, Controller, None)",
+        ),
+        (
+            "w",
+            "Withdraw Unbonded",
+            "Withdraw unbonded funds that are ready",
+        ),
         ("x", "Chill", "Stop nominating (chill)"),
     ];
 
@@ -314,7 +326,10 @@ fn render_account_changes(frame: &mut Frame, app: &App, area: Rect) {
     for (key, name, desc) in ops {
         lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled(format!("[{}]", key), Style::default().fg(pal.highlight).bold()),
+            Span::styled(
+                format!("[{}]", key),
+                Style::default().fg(pal.highlight).bold(),
+            ),
             Span::styled(format!(" {:<20}", name), Style::default().bold()),
             Span::styled(desc, Style::default().fg(pal.muted)),
         ]));
@@ -545,7 +560,7 @@ fn render_pools(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Determine layout: Status (optional) -> Search (optional) -> Table
     let mut constraints = Vec::new();
-    
+
     // 1. Status Panel (only if account is watched)
     if app.watched_account.is_some() {
         constraints.push(Constraint::Length(8));
@@ -736,7 +751,9 @@ fn render_pool_status(frame: &mut Frame, app: &App, area: Rect) {
     if let Some(status) = &app.account_status {
         if let Some(membership) = &status.pool_membership {
             // Find pool name
-            let pool_name = app.pools.iter()
+            let pool_name = app
+                .pools
+                .iter()
                 .find(|p| p.id == membership.pool_id)
                 .map(|p| p.name.as_str())
                 .unwrap_or("Unknown");
@@ -744,13 +761,19 @@ fn render_pool_status(frame: &mut Frame, app: &App, area: Rect) {
             // Line 1: Membership Info
             lines.push(Line::from(vec![
                 Span::styled("Member of: ", Style::default().fg(pal.fg_dim)),
-                Span::styled(format!("Pool {} ({})", membership.pool_id, pool_name), Style::default().bold()),
+                Span::styled(
+                    format!("Pool {} ({})", membership.pool_id, pool_name),
+                    Style::default().bold(),
+                ),
             ]));
 
             // Line 2: Stake & Rewards
             lines.push(Line::from(vec![
                 Span::styled("Active Stake: ", Style::default().fg(pal.fg_dim)),
-                Span::styled(format!("{} {}", format_balance(membership.points, decimals), symbol), Style::default().fg(pal.primary).bold()),
+                Span::styled(
+                    format!("{} {}", format_balance(membership.points, decimals), symbol),
+                    Style::default().fg(pal.primary).bold(),
+                ),
                 Span::raw("    "),
                 Span::styled("Rewards: ", Style::default().fg(pal.fg_dim)),
                 Span::styled("Claimable ", Style::default().fg(pal.success)),
@@ -759,14 +782,18 @@ fn render_pool_status(frame: &mut Frame, app: &App, area: Rect) {
 
             // Line 3: Unbonding
             if !membership.unbonding_eras.is_empty() {
-                let total_unbonding: u128 = membership.unbonding_eras.iter().map(|(_, val)| val).sum();
+                let total_unbonding: u128 =
+                    membership.unbonding_eras.iter().map(|(_, val)| val).sum();
                 lines.push(Line::from(vec![
                     Span::styled("Unbonding: ", Style::default().fg(pal.fg_dim)),
-                    Span::styled(format!("{} {}", format_balance(total_unbonding, decimals), symbol), Style::default().fg(pal.warning)),
+                    Span::styled(
+                        format!("{} {}", format_balance(total_unbonding, decimals), symbol),
+                        Style::default().fg(pal.warning),
+                    ),
                     Span::raw(format!(" ({} chunks)", membership.unbonding_eras.len())),
                 ]));
             } else {
-                 lines.push(Line::from(vec![
+                lines.push(Line::from(vec![
                     Span::styled("Unbonding: ", Style::default().fg(pal.fg_dim)),
                     Span::raw("None"),
                 ]));
@@ -785,13 +812,13 @@ fn render_pool_status(frame: &mut Frame, app: &App, area: Rect) {
                 Span::styled("W", Style::default().fg(pal.highlight).bold()),
                 Span::raw(":Withdraw"),
             ]));
-
         } else {
             // Not in a pool
             lines.push(Line::from(""));
-            lines.push(Line::from(vec![
-                Span::styled("You are not currently a member of any nomination pool.", Style::default().fg(pal.warning)),
-            ]));
+            lines.push(Line::from(vec![Span::styled(
+                "You are not currently a member of any nomination pool.",
+                Style::default().fg(pal.warning),
+            )]));
             lines.push(Line::from(""));
             lines.push(Line::from(vec![
                 Span::raw("To join a pool: "),
@@ -1479,7 +1506,8 @@ fn render_reward_bar_chart(frame: &mut Frame, app: &App, area: Rect) {
     // Get reward values (in token units for display)
     let divisor = 10u128.pow(decimals as u32);
     let rewards: Vec<f64> = app
-        .history.points
+        .history
+        .points
         .iter()
         .map(|p| p.reward as f64 / divisor as f64)
         .collect();
@@ -1653,7 +1681,8 @@ fn render_history_table(frame: &mut Frame, app: &App, area: Rect) {
 
     // Build table rows (most recent first)
     let rows: Vec<Row> = app
-        .history.points
+        .history
+        .points
         .iter()
         .rev()
         .map(|p| {
@@ -1699,10 +1728,7 @@ fn render_history_table(frame: &mut Frame, app: &App, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(pal.border))
-                .title(format!(
-                    " Era History ({} eras) ",
-                    app.history.points.len()
-                )),
+                .title(format!(" Era History ({} eras) ", app.history.points.len())),
         )
         .row_highlight_style(
             Style::default()
@@ -2616,7 +2642,10 @@ fn render_multipart_qr(
             lines.push(Line::from(""));
             lines.push(Line::from(vec![
                 Span::raw("Ensure Vault network is "),
-                Span::styled(network_name.to_string(), Style::default().fg(pal.accent).bold()),
+                Span::styled(
+                    network_name.to_string(),
+                    Style::default().fg(pal.accent).bold(),
+                ),
             ]));
             lines.push(Line::from(Span::styled(
                 "Scan with Polkadot Vault",
@@ -3195,11 +3224,9 @@ fn render_staking_modal(frame: &mut Frame, app: &App) {
 
             let options = [
                 (RewardDestination::Staked, "Staked (Compounding)"),
+                (RewardDestination::Stash, "Stash Account"),
                 (RewardDestination::Controller, "Controller Account"),
-                (
-                    RewardDestination::Account(subxt::utils::AccountId32::from([0u8; 32])),
-                    "Custom Account",
-                ),
+                (RewardDestination::Account(String::new()), "Custom Account"),
                 (RewardDestination::None, "None (Burned)"),
             ];
 

@@ -4,12 +4,13 @@
 
 pub mod account;
 pub mod actions;
+pub mod app;
 pub mod chain;
 pub mod db_service;
 pub mod errors;
-pub mod log;
 pub mod gpui_tokio;
 pub mod history;
+pub mod log;
 pub mod optimization;
 pub mod persistence;
 pub mod qr_reader;
@@ -18,7 +19,6 @@ pub mod tcc;
 pub mod transactions;
 pub mod validators;
 pub mod views;
-pub mod app;
 
 #[cfg(test)]
 mod tests {
@@ -99,7 +99,11 @@ mod tests {
     #[test]
     fn test_connection_mode_description() {
         assert!(ConnectionMode::Rpc.description().contains("RPC"));
-        assert!(ConnectionMode::LightClient.description().contains("light client"));
+        assert!(
+            ConnectionMode::LightClient
+                .description()
+                .contains("light client")
+        );
     }
 
     #[test]

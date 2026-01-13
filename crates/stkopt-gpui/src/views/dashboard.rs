@@ -5,7 +5,7 @@ use gpui::*;
 use gpui_ui_kit::theme::ThemeExt;
 use gpui_ui_kit::*;
 
-use crate::app::{StkoptApp, StakingOperation};
+use crate::app::{StakingOperation, StkoptApp};
 
 pub struct DashboardSection;
 
@@ -13,15 +13,16 @@ impl DashboardSection {
     pub fn render(app: &StkoptApp, cx: &Context<StkoptApp>) -> impl IntoElement {
         tracing::debug!("[DASHBOARD] render called");
         let theme = cx.theme();
-        let symbol = app.network.symbol();
+        let symbol = app.token_symbol();
+        let decimals = app.token_decimals();
         let entity = app.entity.clone();
 
         let (total_balance, bonded, unbonding, rewards) = if let Some(ref info) = app.staking_info {
             (
-                format_balance(info.total_balance, symbol),
-                format_balance(info.bonded, symbol),
-                format_balance(info.unbonding, symbol),
-                format_balance(info.rewards_pending, symbol),
+                format_balance(info.total_balance, symbol, decimals),
+                format_balance(info.bonded, symbol, decimals),
+                format_balance(info.unbonding, symbol, decimals),
+                format_balance(info.rewards_pending, symbol, decimals),
             )
         } else {
             (
@@ -80,7 +81,10 @@ impl DashboardSection {
                                         let entity = entity.clone();
                                         move |_window, cx| {
                                             entity.update(cx, |this, cx| {
-                                                this.open_staking_modal(StakingOperation::Unbond, cx);
+                                                this.open_staking_modal(
+                                                    StakingOperation::Unbond,
+                                                    cx,
+                                                );
                                             });
                                         }
                                     }),
@@ -92,7 +96,10 @@ impl DashboardSection {
                                         let entity = entity.clone();
                                         move |_window, cx| {
                                             entity.update(cx, |this, cx| {
-                                                this.open_staking_modal(StakingOperation::ClaimRewards, cx);
+                                                this.open_staking_modal(
+                                                    StakingOperation::ClaimRewards,
+                                                    cx,
+                                                );
                                             });
                                         }
                                     }),
@@ -104,7 +111,10 @@ impl DashboardSection {
                                         let entity = entity.clone();
                                         move |_window, cx| {
                                             entity.update(cx, |this, cx| {
-                                                this.open_staking_modal(StakingOperation::Nominate, cx);
+                                                this.open_staking_modal(
+                                                    StakingOperation::Nominate,
+                                                    cx,
+                                                );
                                             });
                                         }
                                     }),
@@ -138,17 +148,14 @@ fn stat_card(
                             .color(theme.text_secondary),
                     ),
             )
-            .child(
-                Text::new(value)
-                    .size(TextSize::Xl)
-                    .weight(TextWeight::Bold),
-            ),
+            .child(Text::new(value).size(TextSize::Xl).weight(TextWeight::Bold)),
     )
 }
 
-fn format_balance(amount: u128, symbol: &str) -> String {
-    let decimals = 10u128.pow(10);
-    let whole = amount / decimals;
-    let frac = (amount % decimals) / 10u128.pow(6);
+fn format_balance(amount: u128, symbol: &str, decimals: u8) -> String {
+    let divisor = 10u128.pow(decimals as u32);
+    let frac_divisor = 10u128.pow(decimals.saturating_sub(4) as u32);
+    let whole = amount / divisor;
+    let frac = (amount % divisor) / frac_divisor;
     format!("{}.{:04} {}", whole, frac, symbol)
 }

@@ -79,10 +79,11 @@ pub fn compute_stats(history: &[HistoryPoint]) -> HistoryStats {
     }
 
     let total_rewards: u128 = history.iter().map(|h| h.reward).sum();
-    let (min_apy, max_apy, sum_apy) = history.iter().fold(
-        (f64::MAX, f64::MIN, 0.0),
-        |(min, max, sum), h| (min.min(h.apy), max.max(h.apy), sum + h.apy),
-    );
+    let (min_apy, max_apy, sum_apy) = history
+        .iter()
+        .fold((f64::MAX, f64::MIN, 0.0), |(min, max, sum), h| {
+            (min.min(h.apy), max.max(h.apy), sum + h.apy)
+        });
 
     let era_count = history.len();
     let avg_apy = sum_apy / era_count as f64;
@@ -106,7 +107,14 @@ pub fn filter_by_range(history: &[HistoryPoint], range: HistoryRange) -> Vec<&Hi
     if count >= history.len() {
         history.iter().collect()
     } else {
-        history.iter().rev().take(count).collect::<Vec<_>>().into_iter().rev().collect()
+        history
+            .iter()
+            .rev()
+            .take(count)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
     }
 }
 
@@ -121,7 +129,7 @@ pub fn generate_mock_history(era_count: usize, starting_era: u32) -> Vec<History
             // Add some variation
             let stake_variation = (i as f64 * 0.01).sin() * 0.1 + 1.0;
             let apy_variation = (i as f64 * 0.05).cos() * 2.0;
-            
+
             let bonded = (base_stake as f64 * stake_variation) as u128;
             let apy = (base_apy + apy_variation).max(0.0);
             let reward = (bonded as f64 * apy / 100.0 / 365.0) as u128;
@@ -173,13 +181,13 @@ pub fn moving_average_apy(history: &[HistoryPoint], window: usize) -> Vec<(u32, 
     }
 
     let mut result = Vec::with_capacity(history.len());
-    
+
     // First window-1 points use available data
     for i in 0..window.min(history.len()) {
         let sum: f64 = history[..=i].iter().map(|h| h.apy).sum();
         result.push((history[i].era, sum / (i + 1) as f64));
     }
-    
+
     // Remaining points use full window
     for i in window..history.len() {
         let sum: f64 = history[i + 1 - window..=i].iter().map(|h| h.apy).sum();
@@ -195,11 +203,41 @@ mod tests {
 
     fn sample_history() -> Vec<HistoryPoint> {
         vec![
-            HistoryPoint { era: 100, date: None, bonded: 1000, reward: 10, apy: 10.0 },
-            HistoryPoint { era: 101, date: None, bonded: 1100, reward: 12, apy: 11.0 },
-            HistoryPoint { era: 102, date: None, bonded: 1200, reward: 15, apy: 12.5 },
-            HistoryPoint { era: 103, date: None, bonded: 1300, reward: 14, apy: 10.8 },
-            HistoryPoint { era: 104, date: None, bonded: 1400, reward: 18, apy: 12.9 },
+            HistoryPoint {
+                era: 100,
+                date: None,
+                bonded: 1000,
+                reward: 10,
+                apy: 10.0,
+            },
+            HistoryPoint {
+                era: 101,
+                date: None,
+                bonded: 1100,
+                reward: 12,
+                apy: 11.0,
+            },
+            HistoryPoint {
+                era: 102,
+                date: None,
+                bonded: 1200,
+                reward: 15,
+                apy: 12.5,
+            },
+            HistoryPoint {
+                era: 103,
+                date: None,
+                bonded: 1300,
+                reward: 14,
+                apy: 10.8,
+            },
+            HistoryPoint {
+                era: 104,
+                date: None,
+                bonded: 1400,
+                reward: 18,
+                apy: 12.9,
+            },
         ]
     }
 
@@ -341,7 +379,7 @@ mod proptest_tests {
         fn test_cumulative_is_monotonic(era_count in 1usize..50) {
             let history = generate_mock_history(era_count, 1000);
             let cumulative = cumulative_rewards(&history);
-            
+
             for i in 1..cumulative.len() {
                 prop_assert!(cumulative[i].1 >= cumulative[i - 1].1);
             }

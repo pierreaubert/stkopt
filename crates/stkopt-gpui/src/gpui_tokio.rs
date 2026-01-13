@@ -128,8 +128,8 @@ mod tests {
 
     #[test]
     fn test_defer_runs_on_drop() {
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
 
         let called = Arc::new(AtomicBool::new(false));
         let called_clone = called.clone();

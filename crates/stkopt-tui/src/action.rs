@@ -8,9 +8,7 @@ use stkopt_core::{ConnectionStatus, EraIndex, EraInfo, Network, OptimizationResu
 use subxt::utils::AccountId32;
 
 // Re-export display types from stkopt-core
-pub use stkopt_core::display::{
-    DisplayPool, DisplayValidator, StakingHistoryPoint,
-};
+pub use stkopt_core::display::{DisplayPool, DisplayValidator, StakingHistoryPoint};
 
 /// Input mode for staking operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

@@ -7,7 +7,7 @@ use gpui_ui_kit::*;
 
 use crate::app::StkoptApp;
 use crate::persistence::{ConnectionModeConfig, NetworkConfig, ThemeConfig};
-use crate::shortcuts::{shortcuts_by_category, Shortcut};
+use crate::shortcuts::{Shortcut, shortcuts_by_category};
 
 /// Settings section component.
 pub struct SettingsSection;
@@ -147,15 +147,11 @@ impl SettingsSection {
             .child(Heading::h3("Keyboard Shortcuts").into_any_element());
 
         for (category, shortcuts) in grouped {
-            let mut category_div = div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(
-                    Text::new(category.label())
-                        .size(TextSize::Sm)
-                        .color(theme.text_secondary),
-                );
+            let mut category_div = div().flex().flex_col().gap_2().child(
+                Text::new(category.label())
+                    .size(TextSize::Sm)
+                    .color(theme.text_secondary),
+            );
 
             for shortcut in shortcuts {
                 category_div = category_div.child(Self::render_shortcut_row(shortcut, cx));
@@ -228,34 +224,37 @@ impl SettingsSection {
             .flex()
             .gap_1()
             .child(
-                Self::render_option_button("System", current == ThemeConfig::System, cx)
-                    .on_click(move |_event, _window, cx| {
+                Self::render_option_button("System", current == ThemeConfig::System, cx).on_click(
+                    move |_event, _window, cx| {
                         entity.update(cx, |this, cx| {
                             this.settings_theme = ThemeConfig::System;
                             this.save_config();
                             cx.notify();
                         });
-                    }),
+                    },
+                ),
             )
             .child(
-                Self::render_option_button("Light", current == ThemeConfig::Light, cx)
-                    .on_click(move |_event, _window, cx| {
+                Self::render_option_button("Light", current == ThemeConfig::Light, cx).on_click(
+                    move |_event, _window, cx| {
                         entity2.update(cx, |this, cx| {
                             this.settings_theme = ThemeConfig::Light;
                             this.save_config();
                             cx.notify();
                         });
-                    }),
+                    },
+                ),
             )
             .child(
-                Self::render_option_button("Dark", current == ThemeConfig::Dark, cx)
-                    .on_click(move |_event, _window, cx| {
+                Self::render_option_button("Dark", current == ThemeConfig::Dark, cx).on_click(
+                    move |_event, _window, cx| {
                         entity3.update(cx, |this, cx| {
                             this.settings_theme = ThemeConfig::Dark;
                             this.save_config();
                             cx.notify();
                         });
-                    }),
+                    },
+                ),
             )
     }
 
@@ -289,7 +288,10 @@ impl SettingsSection {
             )
     }
 
-    fn render_connection_mode_selector(app: &StkoptApp, cx: &Context<StkoptApp>) -> impl IntoElement {
+    fn render_connection_mode_selector(
+        app: &StkoptApp,
+        cx: &Context<StkoptApp>,
+    ) -> impl IntoElement {
         let current = app.settings_connection_mode;
         let entity = app.entity.clone();
         let entity2 = app.entity.clone();

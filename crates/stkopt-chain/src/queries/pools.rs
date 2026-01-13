@@ -32,6 +32,8 @@ pub struct PoolInfo {
     pub points: Balance,
     pub member_count: u32,
     pub roles: PoolRoles,
+    /// Pool commission rate (0.0 - 1.0), if configured.
+    pub commission: Option<f64>,
 }
 
 /// Pool roles (depositor, root, nominator, bouncer).
@@ -181,6 +183,19 @@ impl ChainClient {
                         }
                     };
 
+                    // Parse commission (stored as Option<CommissionClaimPermission> in older runtimes
+                    // or Commission struct in newer runtimes)
+                    let commission = decoded.at("commission").and_then(|c| {
+                        // Try to get current commission rate
+                        // Commission struct has: { current: Option<(Perbill, AccountId)>, ... }
+                        c.at("current")
+                            .and_then(|current| {
+                                // current is Option<(Perbill, AccountId)>
+                                current.at(0).and_then(|perbill| perbill.as_u128())
+                            })
+                            .map(|perbill| perbill as f64 / 1_000_000_000.0)
+                    });
+
                     pools_map.insert(
                         id,
                         PoolInfo {
@@ -189,6 +204,7 @@ impl ChainClient {
                             points,
                             member_count,
                             roles,
+                            commission,
                         },
                     );
                 }

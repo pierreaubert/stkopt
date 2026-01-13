@@ -1,6 +1,5 @@
 //! Keyboard shortcuts and key binding utilities.
 
-
 /// Application keyboard shortcuts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shortcut {
@@ -132,7 +131,9 @@ impl Shortcut {
     /// Get the category for this shortcut.
     pub fn category(&self) -> ShortcutCategory {
         match self {
-            Shortcut::OpenSettings | Shortcut::Refresh | Shortcut::Close => ShortcutCategory::General,
+            Shortcut::OpenSettings | Shortcut::Refresh | Shortcut::Close => {
+                ShortcutCategory::General
+            }
             _ => ShortcutCategory::Navigation,
         }
     }
@@ -198,7 +199,7 @@ mod tests {
     fn test_shortcuts_by_category() {
         let grouped = shortcuts_by_category();
         assert_eq!(grouped.len(), 2);
-        
+
         let total: usize = grouped.iter().map(|(_, v)| v.len()).sum();
         assert_eq!(total, Shortcut::all().len());
     }
