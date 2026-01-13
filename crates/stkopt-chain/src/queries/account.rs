@@ -51,6 +51,8 @@ pub struct PoolMembership {
     pub pool_id: u32,
     pub points: Balance,
     pub unbonding_eras: Vec<(EraIndex, Balance)>,
+    /// Last recorded reward counter for this member (used to calculate pending rewards).
+    pub last_recorded_reward_counter: u128,
 }
 
 impl ChainClient {
@@ -288,6 +290,12 @@ impl ChainClient {
             .and_then(|v: &Value<u32>| v.as_u128())
             .unwrap_or(0);
 
+        // Parse last_recorded_reward_counter (U256 stored as a composite type)
+        let last_recorded_reward_counter = decoded
+            .at("last_recorded_reward_counter")
+            .and_then(|v: &Value<u32>| v.as_u128())
+            .unwrap_or(0);
+
         // Parse unbonding eras (BTreeMap<EraIndex, Balance>)
         let mut unbonding_eras = Vec::new();
         if let Some(unbonding_val) = decoded.at("unbonding_eras") {
@@ -315,6 +323,7 @@ impl ChainClient {
             pool_id,
             points,
             unbonding_eras,
+            last_recorded_reward_counter,
         }))
     }
 }

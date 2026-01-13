@@ -92,6 +92,8 @@ pub struct StkoptApp {
     pub validator_sort_asc: bool,
     /// Validator search query
     pub validator_search: String,
+    /// Whether validators are currently loading
+    pub validators_loading: bool,
     /// Staking history data points
     pub staking_history: Vec<HistoryPoint>,
     /// Whether history is currently loading
@@ -450,7 +452,11 @@ impl StkoptApp {
                     }
                     // Notify the view to process updates in the next frame
                     // We use process_pending_updates in render() to pick these up
-                    let _ = this.update(&mut async_cx, |_, cx: &mut Context<Self>| cx.notify());
+                    if let Err(e) =
+                        this.update(&mut async_cx, |_, cx: &mut Context<Self>| cx.notify())
+                    {
+                        tracing::warn!("Failed to notify UI of chain update: {:?}", e);
+                    }
                 }
             },
         )
@@ -486,6 +492,7 @@ impl StkoptApp {
             validator_sort: crate::actions::ValidatorSortColumn::default(),
             validator_sort_asc: false,
             validator_search: String::new(),
+            validators_loading: false,
             staking_history: Vec::new(),
             history_loading: false,
             pools: Vec::new(),
@@ -556,7 +563,11 @@ impl StkoptApp {
                         queue.extend(updates);
                     }
                     // Notify the view to process updates
-                    let _ = this.update(&mut async_cx, |_, cx: &mut Context<Self>| cx.notify());
+                    if let Err(e) =
+                        this.update(&mut async_cx, |_, cx: &mut Context<Self>| cx.notify())
+                    {
+                        tracing::warn!("Failed to notify UI of DB update: {:?}", e);
+                    }
                 }
             },
         )
@@ -605,6 +616,7 @@ impl StkoptApp {
             }
             ChainUpdate::ValidatorsLoaded(validators) => {
                 self.validators = validators;
+                self.validators_loading = false;
                 tracing::info!("Loaded {} validators from chain", self.validators.len());
             }
             ChainUpdate::PoolsLoaded(pools) => {
@@ -618,14 +630,15 @@ impl StkoptApp {
                     transferable: account_data.free_balance,
                     bonded: account_data.staked_balance.unwrap_or(0),
                     unbonding: account_data.unbonding_balance,
-                    rewards_pending: 0, // Rewards are auto-compounded or claimed, no "pending" in modern staking
+                    rewards_pending: account_data.pool_pending_rewards,
                     is_nominating: account_data.is_nominating,
                     nomination_count: account_data.nominations.len(),
                 });
                 tracing::info!(
-                    "Account data loaded: balance={}, unbonding={}",
+                    "Account data loaded: balance={}, unbonding={}, pool_pending_rewards={}",
                     account_data.free_balance,
-                    account_data.unbonding_balance
+                    account_data.unbonding_balance,
+                    account_data.pool_pending_rewards
                 );
             }
             ChainUpdate::HistoryLoaded(history) => {
@@ -793,19 +806,30 @@ impl StkoptApp {
 
                 match result {
                     Ok(payload) => {
-                        let _ = this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
-                            this.pending_tx_payload = Some(payload);
-                            this.show_staking_modal = false;
-                            this.show_qr_modal = true;
-                            this.qr_modal_tab = QrModalTab::QrCode;
-                            cx.notify();
-                        });
+                        if let Err(e) =
+                            this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
+                                this.pending_tx_payload = Some(payload);
+                                this.show_staking_modal = false;
+                                this.show_qr_modal = true;
+                                this.qr_modal_tab = QrModalTab::QrCode;
+                                cx.notify();
+                            })
+                        {
+                            tracing::error!("Failed to update UI with staking payload: {:?}", e);
+                        }
                     }
                     Err(e) => {
-                        let _ = this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
-                            this.connection_error = Some(e);
-                            cx.notify();
-                        });
+                        if let Err(update_err) =
+                            this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
+                                this.connection_error = Some(e);
+                                cx.notify();
+                            })
+                        {
+                            tracing::error!(
+                                "Failed to update UI with staking error: {:?}",
+                                update_err
+                            );
+                        }
                     }
                 }
             },
@@ -866,18 +890,29 @@ impl StkoptApp {
 
                 match result {
                     Ok(payload) => {
-                        let _ = this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
-                            this.pending_tx_payload = Some(payload);
-                            this.show_qr_modal = true;
-                            this.qr_modal_tab = QrModalTab::QrCode;
-                            cx.notify();
-                        });
+                        if let Err(e) =
+                            this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
+                                this.pending_tx_payload = Some(payload);
+                                this.show_qr_modal = true;
+                                this.qr_modal_tab = QrModalTab::QrCode;
+                                cx.notify();
+                            })
+                        {
+                            tracing::error!("Failed to update UI with nominate payload: {:?}", e);
+                        }
                     }
                     Err(e) => {
-                        let _ = this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
-                            this.connection_error = Some(e);
-                            cx.notify();
-                        });
+                        if let Err(update_err) =
+                            this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
+                                this.connection_error = Some(e);
+                                cx.notify();
+                            })
+                        {
+                            tracing::error!(
+                                "Failed to update UI with nominate error: {:?}",
+                                update_err
+                            );
+                        }
                     }
                 }
             },
@@ -965,19 +1000,30 @@ impl StkoptApp {
 
                 match result {
                     Ok(payload) => {
-                        let _ = this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
-                            this.pending_tx_payload = Some(payload);
-                            this.show_pool_modal = false;
-                            this.show_qr_modal = true;
-                            this.qr_modal_tab = QrModalTab::QrCode;
-                            cx.notify();
-                        });
+                        if let Err(e) =
+                            this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
+                                this.pending_tx_payload = Some(payload);
+                                this.show_pool_modal = false;
+                                this.show_qr_modal = true;
+                                this.qr_modal_tab = QrModalTab::QrCode;
+                                cx.notify();
+                            })
+                        {
+                            tracing::error!("Failed to update UI with pool payload: {:?}", e);
+                        }
                     }
                     Err(e) => {
-                        let _ = this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
-                            this.connection_error = Some(e);
-                            cx.notify();
-                        });
+                        if let Err(update_err) =
+                            this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
+                                this.connection_error = Some(e);
+                                cx.notify();
+                            })
+                        {
+                            tracing::error!(
+                                "Failed to update UI with pool error: {:?}",
+                                update_err
+                            );
+                        }
                     }
                 }
             },
@@ -1007,7 +1053,7 @@ impl StkoptApp {
         cx.spawn(
             move |this: gpui::WeakEntity<Self>, _cx: &mut gpui::AsyncApp| async move {
                 let result = chain_handle.fetch_history(address, num_eras).await;
-                let _ = this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
+                if let Err(e) = this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
                     this.history_loading = false;
                     match result {
                         Ok(history) => {
@@ -1020,7 +1066,9 @@ impl StkoptApp {
                         }
                     }
                     cx.notify();
-                });
+                }) {
+                    tracing::error!("Failed to update UI with history: {:?}", e);
+                }
             },
         )
         .detach();

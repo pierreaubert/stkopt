@@ -159,6 +159,8 @@ pub struct AccountData {
     pub is_nominating: bool,
     pub nominations: Vec<String>,
     pub pool_id: Option<u32>,
+    /// Pending rewards from nomination pool (if member of a pool).
+    pub pool_pending_rewards: u128,
 }
 
 /// Transaction payload ready for QR encoding.
@@ -201,11 +203,20 @@ async fn enrich_validators(
             return basic_validator_conversion(validators);
         }
     };
-    let era_index = era.index;
     let era_duration_ms = era.duration_ms;
 
+    // Use the previous completed era for APY calculations.
+    // The current era doesn't have rewards yet (only paid after era ends),
+    // and points are still accumulating. The previous era has complete data.
+    let query_era = era.index.saturating_sub(1);
+    tracing::info!(
+        "Enriching validators using era {} (current era: {})",
+        query_era,
+        era.index
+    );
+
     // Get era stakers overview (stake data)
-    let exposures = match client.get_era_stakers_overview(era_index).await {
+    let exposures = match client.get_era_stakers_overview(query_era).await {
         Ok(exp) => exp,
         Err(e) => {
             tracing::warn!(
@@ -222,7 +233,7 @@ async fn enrich_validators(
     tracing::info!("Got {} era stakers exposures", exposure_map.len());
 
     // Get era reward points
-    let (total_points, points_vec) = match client.get_era_reward_points(era_index).await {
+    let (total_points, points_vec) = match client.get_era_reward_points(query_era).await {
         Ok(result) => result,
         Err(e) => {
             tracing::warn!("Failed to get era reward points: {}", e);
@@ -240,13 +251,13 @@ async fn enrich_validators(
     );
 
     // Get era validator reward for APY calculation
-    let era_reward = match client
-        .get_era_validator_reward(era_index.saturating_sub(1))
-        .await
-    {
-        Ok(Some(reward)) => reward,
+    let era_reward = match client.get_era_validator_reward(query_era).await {
+        Ok(Some(reward)) => {
+            tracing::info!("Era {} reward: {}", query_era, reward);
+            reward
+        }
         Ok(None) => {
-            tracing::debug!("No era reward for era {}", era_index.saturating_sub(1));
+            tracing::debug!("No era reward for era {}", query_era);
             0
         }
         Err(e) => {
@@ -276,10 +287,19 @@ async fn enrich_validators(
         HashMap::new()
     };
 
+    // Log diagnostic info for APY calculation
+    tracing::info!(
+        "APY calculation inputs: era_reward={}, total_points={}, era_duration_ms={}, exposure_count={}",
+        era_reward,
+        total_points,
+        era_duration_ms,
+        exposure_map.len()
+    );
+
     // Build enriched validators
     let mut enriched: Vec<ValidatorInfo> = validators
         .iter()
-        .filter_map(|v| {
+        .map(|v| {
             let addr_bytes: [u8; 32] = *v.address.as_ref();
 
             // Get exposure data (skip validators not active in this era)
@@ -308,7 +328,7 @@ async fn enrich_validators(
             let address_str = v.address.to_string();
             let name = identity_map.get(&address_str).cloned();
 
-            Some(ValidatorInfo {
+            ValidatorInfo {
                 address: address_str,
                 name,
                 commission: v.preferences.commission,
@@ -318,7 +338,7 @@ async fn enrich_validators(
                 nominator_count,
                 points,
                 apy,
-            })
+            }
         })
         .collect();
 
@@ -930,7 +950,39 @@ impl ChainWorker {
                                 .flatten()
                                 .map(|n| n.targets.iter().map(|t| t.to_string()).collect())
                                 .unwrap_or_default();
-                            let pool_id = pool.ok().flatten().map(|p| p.pool_id);
+
+                            // Get pool membership and calculate pending rewards
+                            let pool_membership = pool.ok().flatten();
+                            let pool_id = pool_membership.as_ref().map(|p| p.pool_id);
+                            let pool_pending_rewards = if let Some(ref membership) = pool_membership
+                            {
+                                match client
+                                    .get_pool_pending_rewards(
+                                        membership.pool_id,
+                                        membership.points,
+                                        membership.last_recorded_reward_counter,
+                                    )
+                                    .await
+                                {
+                                    Ok(pending) => {
+                                        tracing::info!(
+                                            "Pool {} pending rewards: {}",
+                                            membership.pool_id,
+                                            pending
+                                        );
+                                        pending
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "Failed to calculate pool pending rewards: {}",
+                                            e
+                                        );
+                                        0
+                                    }
+                                }
+                            } else {
+                                0
+                            };
 
                             let account_data = AccountData {
                                 free_balance: bal.free,
@@ -940,6 +992,7 @@ impl ChainWorker {
                                 is_nominating: !noms.is_empty(),
                                 nominations: noms.clone(),
                                 pool_id,
+                                pool_pending_rewards,
                             };
 
                             // Persist to DB
@@ -1029,28 +1082,61 @@ impl ChainWorker {
         let result = if let Some(ref client) = self.client {
             match client.get_nomination_pools().await {
                 Ok(pools) => {
+                    // Fetch pool metadata (names)
+                    let metadata_map: HashMap<u32, String> = match client.get_pool_metadata().await
+                    {
+                        Ok(metadata) => {
+                            tracing::info!("Fetched {} pool names", metadata.len());
+                            metadata.into_iter().map(|m| (m.id, m.name)).collect()
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to fetch pool metadata: {}", e);
+                            HashMap::new()
+                        }
+                    };
+
+                    // Calculate network average APY for pool estimation
+                    let network_apy = self.calculate_network_apy(client).await;
+                    tracing::info!("Network average APY for pools: {:?}", network_apy);
+
                     let enriched: Vec<PoolInfo> = pools
                         .iter()
-                        .map(|p| PoolInfo {
-                            id: p.id,
-                            name: format!("Pool #{}", p.id),
-                            state: match p.state {
-                                ChainPoolState::Open => PoolState::Open,
-                                ChainPoolState::Blocked => PoolState::Blocked,
-                                ChainPoolState::Destroying => PoolState::Destroying,
-                            },
-                            member_count: p.member_count,
-                            total_bonded: p.points,
-                            commission: p.commission,
-                            apy: None, // Pool APY requires tracking rewards over time
+                        .map(|p| {
+                            // Pool APY = network APY * (1 - pool commission)
+                            let pool_apy = network_apy.map(|apy| {
+                                let commission = p.commission.unwrap_or(0.0);
+                                let after_commission = apy * (1.0 - commission);
+                                // Cap at realistic maximum
+                                after_commission.min(MAX_REALISTIC_APY)
+                            });
+
+                            // Use metadata name if available, otherwise default
+                            let name = metadata_map
+                                .get(&p.id)
+                                .cloned()
+                                .unwrap_or_else(|| format!("Pool #{}", p.id));
+
+                            PoolInfo {
+                                id: p.id,
+                                name,
+                                state: match p.state {
+                                    ChainPoolState::Open => PoolState::Open,
+                                    ChainPoolState::Blocked => PoolState::Blocked,
+                                    ChainPoolState::Destroying => PoolState::Destroying,
+                                },
+                                member_count: p.member_count,
+                                total_bonded: p.points,
+                                commission: p.commission,
+                                apy: pool_apy,
+                            }
                         })
                         .collect();
 
                     // Persist to DB
-                    if let Some(ref db) = self.db {
-                        if let Err(e) = db.set_cached_pools(network, enriched.clone()).await {
-                            tracing::warn!("Failed to cache pools: {}", e);
-                        }
+                    if let Some(ref db) = self.db
+                        && let Err(e) = db.set_cached_pools(network, enriched.clone()).await
+                    {
+                        tracing::warn!("Failed to cache pools: {}", e);
                     }
 
                     Ok(enriched)
@@ -1061,6 +1147,66 @@ impl ChainWorker {
             Err("Not connected".to_string())
         };
         let _ = reply.send(result);
+    }
+
+    // === Helper Methods ===
+
+    /// Calculate network average APY based on era rewards and total staked.
+    async fn calculate_network_apy(&self, client: &ChainClient) -> Option<f64> {
+        // Get era info for duration
+        let era = match client.get_active_era().await {
+            Ok(Some(era)) => era,
+            _ => {
+                tracing::debug!("No active era for network APY calculation");
+                return None;
+            }
+        };
+        let query_era = era.index.saturating_sub(1);
+        let era_duration_ms = era.duration_ms;
+
+        // Get era reward
+        let era_reward = match client.get_era_validator_reward(query_era).await {
+            Ok(Some(reward)) => reward,
+            _ => {
+                tracing::debug!("No era reward for network APY calculation");
+                return None;
+            }
+        };
+
+        // Get total staked from era exposures
+        let exposures = match client.get_era_stakers_overview(query_era).await {
+            Ok(exp) => exp,
+            Err(e) => {
+                tracing::debug!("Failed to get era stakers for APY: {}", e);
+                return None;
+            }
+        };
+
+        let total_staked: u128 = exposures.iter().map(|e| e.total).sum();
+        if total_staked == 0 {
+            tracing::debug!("Total staked is 0, cannot calculate APY");
+            return None;
+        }
+
+        let apy = get_era_apy(era_reward, total_staked, era_duration_ms);
+        tracing::debug!(
+            "Network APY: {:.2}% (reward={}, staked={}, era_duration={}ms)",
+            apy * 100.0,
+            era_reward,
+            total_staked,
+            era_duration_ms
+        );
+
+        // Sanity check
+        if apy > MAX_REALISTIC_APY {
+            tracing::warn!(
+                "Network APY {:.2}% exceeds realistic maximum, data may be incomplete",
+                apy * 100.0
+            );
+            return None;
+        }
+
+        Some(apy)
     }
 
     // === Transaction Payload Handlers ===
@@ -1676,6 +1822,7 @@ mod tests {
             is_nominating: true,
             nominations: vec!["validator1".to_string()],
             pool_id: None,
+            pool_pending_rewards: 0,
         };
         assert_eq!(data.free_balance, 1000);
         assert_eq!(data.unbonding_balance, 200);

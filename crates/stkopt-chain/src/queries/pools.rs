@@ -420,6 +420,112 @@ impl ChainClient {
             targets,
         }))
     }
+
+    /// Get the reward pool state for a pool.
+    /// Returns the current reward counter needed to calculate pending rewards.
+    pub async fn get_reward_pool(&self, pool_id: u32) -> Result<Option<RewardPool>, ChainError> {
+        let storage_query = subxt::dynamic::storage(
+            "NominationPools",
+            "RewardPools",
+            vec![Value::u128(pool_id as u128)],
+        );
+
+        let result: Option<DecodedValueThunk> = self
+            .client()
+            .storage()
+            .at_latest()
+            .await?
+            .fetch(&storage_query)
+            .await?;
+
+        let Some(value) = result else {
+            return Ok(None);
+        };
+
+        let decoded = value.to_value()?;
+
+        // RewardPool = { last_recorded_reward_counter, last_recorded_total_payouts, total_rewards_claimed, total_commission_pending, total_commission_claimed }
+        let last_recorded_reward_counter = decoded
+            .at("last_recorded_reward_counter")
+            .and_then(|v: &Value<u32>| v.as_u128())
+            .unwrap_or(0);
+
+        let last_recorded_total_payouts = decoded
+            .at("last_recorded_total_payouts")
+            .and_then(|v: &Value<u32>| v.as_u128())
+            .unwrap_or(0);
+
+        let total_rewards_claimed = decoded
+            .at("total_rewards_claimed")
+            .and_then(|v: &Value<u32>| v.as_u128())
+            .unwrap_or(0);
+
+        Ok(Some(RewardPool {
+            pool_id,
+            last_recorded_reward_counter,
+            last_recorded_total_payouts,
+            total_rewards_claimed,
+        }))
+    }
+
+    /// Calculate pending rewards for a pool member.
+    /// Formula: pending = member_points * (pool_counter - member_counter) / points_to_balance_ratio
+    /// Note: This is a simplified calculation; the actual on-chain calculation may differ slightly.
+    pub async fn get_pool_pending_rewards(
+        &self,
+        pool_id: u32,
+        member_points: u128,
+        member_last_recorded_counter: u128,
+    ) -> Result<Balance, ChainError> {
+        let reward_pool = self.get_reward_pool(pool_id).await?;
+
+        let Some(reward_pool) = reward_pool else {
+            return Ok(0);
+        };
+
+        // If member's counter is already at or ahead of pool's counter, no pending rewards
+        if member_last_recorded_counter >= reward_pool.last_recorded_reward_counter {
+            return Ok(0);
+        }
+
+        // Calculate pending rewards
+        // The counter difference represents rewards per point since last claim
+        let counter_diff = reward_pool.last_recorded_reward_counter - member_last_recorded_counter;
+
+        // pending = member_points * counter_diff / 10^18 (counter is scaled by 10^18)
+        // Use u128 arithmetic carefully to avoid overflow
+        let pending = if counter_diff > 0 && member_points > 0 {
+            // Scale down: counter is in 10^18 precision
+            member_points
+                .saturating_mul(counter_diff)
+                .checked_div(1_000_000_000_000_000_000) // 10^18
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        tracing::debug!(
+            "Pool {} pending rewards: member_points={}, counter_diff={}, pending={}",
+            pool_id,
+            member_points,
+            counter_diff,
+            pending
+        );
+
+        Ok(pending)
+    }
+}
+
+/// Reward pool state (for calculating pending rewards).
+#[derive(Debug, Clone)]
+pub struct RewardPool {
+    pub pool_id: u32,
+    /// Current reward counter (scaled by 10^18).
+    pub last_recorded_reward_counter: u128,
+    /// Total payouts recorded.
+    pub last_recorded_total_payouts: Balance,
+    /// Total rewards claimed by members.
+    pub total_rewards_claimed: Balance,
 }
 
 /// Parse an AccountId from a dynamic Value.

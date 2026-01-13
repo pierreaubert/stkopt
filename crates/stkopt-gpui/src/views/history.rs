@@ -68,8 +68,30 @@ impl HistorySection {
                     .child(stat_card_success("Average APY", avg_apy, &theme))
                     .child(stat_card("Eras Tracked", eras_count, &theme)),
             )
-            .child(Self::render_apy_chart(app, &theme))
-            .child(Self::render_history_table(app, &theme))
+            .child(if is_loading {
+                // Show loading indicator
+                div()
+                    .p_8()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .child(Text::new("⏳").size(TextSize::Xl))
+                    .child(
+                        Text::new("Loading staking history...")
+                            .size(TextSize::Md)
+                            .color(theme.text_secondary),
+                    )
+                    .into_any_element()
+            } else {
+                Self::render_apy_chart(app, &theme)
+            })
+            .child(if is_loading {
+                div().into_any_element()
+            } else {
+                Self::render_history_table(app, &theme)
+            })
     }
 
     fn render_apy_chart(app: &StkoptApp, theme: &gpui_ui_kit::theme::Theme) -> AnyElement {

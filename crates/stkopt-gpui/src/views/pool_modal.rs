@@ -89,9 +89,36 @@ impl PoolModal {
 
     fn render_body(app: &StkoptApp, cx: &Context<StkoptApp>) -> impl IntoElement {
         let theme = cx.theme();
+        let entity = app.entity.clone();
         let operation = app.pool_operation;
         let symbol = app.token_symbol();
         let decimals = app.token_decimals();
+
+        // Get available balance for validation
+        let available_balance = app
+            .staking_info
+            .as_ref()
+            .map(|i| i.transferable)
+            .unwrap_or(0);
+        let divisor = 10u128.pow(decimals as u32);
+
+        // Validate amount
+        let amount_error = if operation.requires_amount() && !app.pool_amount_input.is_empty() {
+            match app.pool_amount_input.parse::<f64>() {
+                Ok(val) if val <= 0.0 => Some("Amount must be greater than 0"),
+                Ok(val) => {
+                    let amount_planck = (val * divisor as f64) as u128;
+                    if amount_planck > available_balance {
+                        Some("Insufficient balance")
+                    } else {
+                        None
+                    }
+                }
+                Err(_) => Some("Invalid amount format"),
+            }
+        } else {
+            None
+        };
 
         let mut body = div().flex().flex_col().gap_4().p_4();
 
@@ -113,35 +140,36 @@ impl PoolModal {
         }
 
         // Show selected pool info for Join operation
-        if operation == PoolOperation::Join {
-            if let Some(pool_id) = app.selected_pool_id {
-                if let Some(pool) = app.pools.iter().find(|p| p.id == pool_id) {
-                    body = body.child(
+        if operation == PoolOperation::Join
+            && let Some(pool_id) = app.selected_pool_id
+            && let Some(pool) = app.pools.iter().find(|p| p.id == pool_id)
+        {
+            body = body.child(
+                div()
+                    .p_3()
+                    .rounded_md()
+                    .bg(theme.background)
+                    .border_1()
+                    .border_color(theme.border)
+                    .child(
                         div()
-                            .p_3()
-                            .rounded_md()
-                            .bg(theme.background)
-                            .border_1()
-                            .border_color(theme.border)
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(Text::new(pool.name.clone()).size(TextSize::Md))
                             .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .child(Text::new(pool.name.clone()).size(TextSize::Md))
-                                    .child(
-                                        Text::new(format!("{} members", pool.member_count))
-                                            .size(TextSize::Sm)
-                                            .color(theme.text_secondary),
-                                    ),
+                                Text::new(format!("{} members", pool.member_count))
+                                    .size(TextSize::Sm)
+                                    .color(theme.text_secondary),
                             ),
-                    );
-                }
-            }
+                    ),
+            );
         }
 
         // Amount input for operations that require it
         if operation.requires_amount() {
+            let error_color = theme.error;
+
             body = body.child(
                 div()
                     .flex()
@@ -158,32 +186,25 @@ impl PoolModal {
                             .items_center()
                             .gap_2()
                             .child(
-                                div()
-                                    .flex_1()
-                                    .px_3()
-                                    .py_2()
-                                    .rounded_md()
-                                    .bg(theme.background)
-                                    .border_1()
-                                    .border_color(theme.border)
-                                    .child(
-                                        Text::new(if app.pool_amount_input.is_empty() {
-                                            "0.0".to_string()
-                                        } else {
-                                            app.pool_amount_input.clone()
-                                        })
-                                        .size(TextSize::Md)
-                                        .color(
-                                            if app.pool_amount_input.is_empty() {
-                                                theme.text_secondary
-                                            } else {
-                                                theme.text_primary
-                                            },
-                                        ),
-                                    ),
+                                Input::new("pool-amount-input")
+                                    .placeholder("0.0")
+                                    .size(InputSize::Md)
+                                    .value(app.pool_amount_input.clone())
+                                    .on_text_change({
+                                        let entity = entity.clone();
+                                        move |value: String, _window, cx| {
+                                            entity.update(cx, |this, cx| {
+                                                this.pool_amount_input = value;
+                                                cx.notify();
+                                            });
+                                        }
+                                    }),
                             )
                             .child(Text::new(symbol).size(TextSize::Md)),
-                    ),
+                    )
+                    .when_some(amount_error, |div, error| {
+                        div.child(Text::new(error).size(TextSize::Sm).color(error_color))
+                    }),
             );
         }
 

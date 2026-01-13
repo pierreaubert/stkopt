@@ -14,6 +14,7 @@ pub struct ValidatorsSection;
 impl ValidatorsSection {
     pub fn render(app: &StkoptApp, cx: &Context<StkoptApp>) -> impl IntoElement {
         let entity = app.entity.clone();
+        let is_loading = app.validators_loading;
 
         // Filter validators based on search query
         let filtered = filter_validators(&app.validators, &app.validator_search);
@@ -52,24 +53,35 @@ impl ValidatorsSection {
                                     }),
                             )
                             .child(
-                                Button::new("btn-refresh", "Refresh")
-                                    .variant(ButtonVariant::Secondary)
-                                    .size(ButtonSize::Sm)
-                                    .on_click({
-                                        let entity = entity.clone();
-                                        move |_window, cx| {
-                                            entity.update(cx, |this, cx| {
-                                                if let Some(ref handle) = this.chain_handle {
-                                                    let handle = handle.clone();
-                                                    crate::gpui_tokio::Tokio::spawn(cx, async move {
-                                                        if let Err(e) = handle.fetch_validators().await {
-                                                            tracing::error!("Failed to refresh validators: {}", e);
-                                                        }
-                                                    }).detach();
-                                                }
-                                            });
-                                        }
-                                    }),
+                                Button::new(
+                                    "btn-refresh",
+                                    if is_loading { "Loading..." } else { "Refresh" },
+                                )
+                                .variant(ButtonVariant::Secondary)
+                                .size(ButtonSize::Sm)
+                                .disabled(is_loading)
+                                .on_click({
+                                    let entity = entity.clone();
+                                    move |_window, cx| {
+                                        entity.update(cx, |this, cx| {
+                                            if let Some(ref handle) = this.chain_handle {
+                                                this.validators_loading = true;
+                                                cx.notify();
+                                                let handle = handle.clone();
+                                                crate::gpui_tokio::Tokio::spawn(cx, async move {
+                                                    if let Err(e) = handle.fetch_validators().await
+                                                    {
+                                                        tracing::error!(
+                                                            "Failed to refresh validators: {}",
+                                                            e
+                                                        );
+                                                    }
+                                                })
+                                                .detach();
+                                            }
+                                        });
+                                    }
+                                }),
                             ),
                     ),
             )
@@ -86,12 +98,11 @@ impl ValidatorsSection {
                             .variant(BadgeVariant::Default)
                     })
                     .child(
-                        Badge::new(format!("{} selected", selected))
-                            .variant(if selected > 0 {
-                                BadgeVariant::Success
-                            } else {
-                                BadgeVariant::Default
-                            }),
+                        Badge::new(format!("{} selected", selected)).variant(if selected > 0 {
+                            BadgeVariant::Success
+                        } else {
+                            BadgeVariant::Default
+                        }),
                     ),
             )
             .child(Self::render_validator_list(app, cx, &filtered))
@@ -106,6 +117,30 @@ impl ValidatorsSection {
         let entity = app.entity.clone();
         let sort_column = app.validator_sort;
         let sort_asc = app.validator_sort_asc;
+        let is_loading = app.validators_loading;
+
+        // Show loading indicator when loading and no validators yet
+        if is_loading && app.validators.is_empty() {
+            return div()
+                .p_8()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .child(Text::new("⏳").size(TextSize::Xl))
+                .child(
+                    Text::new("Loading validators...")
+                        .size(TextSize::Md)
+                        .color(theme.text_secondary),
+                )
+                .child(
+                    Text::new("This may take a moment with light client")
+                        .size(TextSize::Sm)
+                        .color(theme.text_secondary),
+                )
+                .into_any_element();
+        }
 
         if filtered.is_empty() {
             return div()
