@@ -10,7 +10,7 @@ path = "src/main.rs"
 [dependencies]
 # Internal crates
 stkopt-chain.workspace = true
-stkopt-core.workspace = true
+stkopt-core = { workspace = true, features = ["persistence"] }
 subxt.workspace = true
 
 # GPUI framework (from zed git)
@@ -47,6 +47,7 @@ rusqlite = { workspace = true, features = ["bundled"] }
 nokhwa = { version = "0.10.10", features = ["input-native"] }
 image = { version = "0.25.9", default-features = false, features = ["jpeg", "png"] }
 rqrr = "0.10.0"
+qrcode = "0.14"
 chrono = "0.4.42"
 
 [dev-dependencies]

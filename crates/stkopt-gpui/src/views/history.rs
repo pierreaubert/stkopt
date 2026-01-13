@@ -11,11 +11,14 @@ use crate::app::StkoptApp;
 pub struct HistorySection;
 
 impl HistorySection {
-    pub fn render(app: &StkoptApp, cx: &Context<StkoptApp>) -> impl IntoElement {
+    pub fn render(app: &mut StkoptApp, cx: &mut Context<StkoptApp>) -> impl IntoElement {
         let theme = cx.theme();
+        let entity = app.entity.clone();
+        let is_loading = app.history_loading;
+        let has_account = app.watched_account.is_some();
 
         let (total_rewards, avg_apy, eras_count) = if !app.staking_history.is_empty() {
-            let total: u128 = app.staking_history.iter().map(|h| h.rewards).sum();
+            let total: u128 = app.staking_history.iter().map(|h| h.reward).sum();
             let avg_apy: f64 =
                 app.staking_history.iter().map(|h| h.apy).sum::<f64>() / app.staking_history.len() as f64;
             (
@@ -27,6 +30,22 @@ impl HistorySection {
             ("-- DOT".to_string(), "--%".to_string(), "0".to_string())
         };
 
+        let refresh_button = Button::new(
+            "btn-refresh-history",
+            if is_loading { "Loading..." } else { "Refresh" },
+        )
+        .variant(ButtonVariant::Secondary)
+        .size(ButtonSize::Sm)
+        .disabled(!has_account || is_loading)
+        .on_click({
+            let entity = entity.clone();
+            move |_window, cx| {
+                entity.update(cx, |this, cx| {
+                    this.load_history(cx);
+                });
+            }
+        });
+
         div()
             .flex()
             .flex_col()
@@ -37,11 +56,7 @@ impl HistorySection {
                     .items_center()
                     .justify_between()
                     .child(Heading::h1("Staking History"))
-                    .child(
-                        Button::new("btn-refresh-history", "Refresh")
-                            .variant(ButtonVariant::Secondary)
-                            .size(ButtonSize::Sm),
-                    ),
+                    .child(refresh_button),
             )
             .child(
                 div()
@@ -149,8 +164,8 @@ impl HistorySection {
 
         // History rows (show last 15 eras)
         for (i, point) in app.staking_history.iter().rev().take(15).enumerate() {
-            let staked_str = format_balance(point.staked);
-            let rewards_str = format_balance(point.rewards);
+            let staked_str = format_balance(point.bonded);
+            let rewards_str = format_balance(point.reward);
             let apy_str = format!("{:.2}%", point.apy * 100.0);
             let row_bg = if i % 2 == 0 { theme.background } else { theme.surface };
             let apy_color = if point.apy > 0.15 { theme.success } else { theme.text_primary };

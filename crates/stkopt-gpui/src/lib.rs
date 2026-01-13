@@ -4,9 +4,7 @@
 
 pub mod account;
 pub mod actions;
-pub mod app;
 pub mod chain;
-pub mod db;
 pub mod db_service;
 pub mod errors;
 pub mod log;
@@ -14,10 +12,13 @@ pub mod gpui_tokio;
 pub mod history;
 pub mod optimization;
 pub mod persistence;
+pub mod qr_reader;
 pub mod shortcuts;
+pub mod tcc;
 pub mod transactions;
 pub mod validators;
 pub mod views;
+pub mod app;
 
 #[cfg(test)]
 mod tests {

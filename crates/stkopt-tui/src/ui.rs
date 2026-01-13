@@ -12,8 +12,8 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Tabs},
 };
-use stkopt_chain::{PoolState, RewardDestination};
-use stkopt_core::ConnectionStatus;
+use stkopt_chain::RewardDestination;
+use stkopt_core::{ConnectionStatus, PoolState};
 
 /// Safely truncate a string to a maximum number of characters (not bytes).
 /// Handles multi-byte Unicode characters correctly.
@@ -45,7 +45,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     render_logs(frame, app, chunks[3]);
 
     // Render QR modal overlay if showing
-    if app.showing_qr {
+    if app.qr.showing {
         render_qr_modal(frame, app);
     }
 
@@ -75,7 +75,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
 
     // Render loading spinner overlay if chain is connecting and no cached data
-    if app.loading_chain && app.validators.is_empty() {
+    if app.loading.chain && app.validators.is_empty() {
         render_loading_spinner(frame, app);
     }
 }
@@ -101,13 +101,13 @@ fn render_loading_spinner(frame: &mut Frame, app: &App) {
 
     // Build progress bar
     let progress_width = 30usize;
-    let filled = (app.loading_progress * progress_width as f32) as usize;
+    let filled = (app.loading.progress * progress_width as f32) as usize;
     let bar: String = "█".repeat(filled) + &"░".repeat(progress_width - filled);
 
     // ETA or bandwidth info
     let eta_text = if let Some(eta) = app.format_eta() {
         format!("ETA: {}", eta)
-    } else if let Some(bw) = app.estimated_bandwidth {
+    } else if let Some(bw) = app.loading.bandwidth {
         format!("Speed: {:.1} KB/s", bw / 1024.0)
     } else {
         "Light client syncing, please wait".to_string()
@@ -117,7 +117,7 @@ fn render_loading_spinner(frame: &mut Frame, app: &App) {
         Line::from(message).style(Style::default().fg(p.accent).bold()),
         Line::from(""),
         Line::from(Span::styled(
-            format!("[{}] {:.0}%", bar, app.loading_progress * 100.0),
+            format!("[{}] {:.0}%", bar, app.loading.progress * 100.0),
             Style::default().fg(p.success),
         )),
         Line::from(""),
@@ -367,8 +367,8 @@ fn render_validators(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     if app.validators.is_empty() {
-        let loading_text = if app.loading_validators {
-            format!("Loading validators... {:.0}%", app.loading_progress * 100.0)
+        let loading_text = if app.loading.validators {
+            format!("Loading validators... {:.0}%", app.loading.progress * 100.0)
         } else if app.connection_status == ConnectionStatus::Connected {
             "Fetching validators...".to_string()
         } else {
@@ -419,7 +419,7 @@ fn render_validators(frame: &mut Frame, app: &mut App, area: Rect) {
             let stake_str = format_balance(v.total_stake, decimals);
             let own_str = format_balance(v.own_stake, decimals);
             let points_str = v.points.to_string();
-            let apy_str = format!("{:.2}%", v.apy * 100.0);
+            let apy_str = format!("{:.2}%", v.apy.unwrap_or(0.0) * 100.0);
             let blocked_str = if v.blocked { "Yes" } else { "No" };
 
             Row::new(vec![
@@ -541,7 +541,7 @@ fn render_validators(frame: &mut Frame, app: &mut App, area: Rect) {
 fn render_pools(frame: &mut Frame, app: &mut App, area: Rect) {
     let pal = &app.palette;
     let decimals = app.network.token_decimals();
-    let symbol = app.network.token_symbol();
+    let _symbol = app.network.token_symbol();
 
     // Determine layout: Status (optional) -> Search (optional) -> Table
     let mut constraints = Vec::new();
@@ -631,7 +631,7 @@ fn render_pools(frame: &mut Frame, app: &mut App, area: Rect) {
                 PoolState::Blocked => Style::default().fg(pal.warning),
                 PoolState::Destroying => Style::default().fg(pal.error),
             };
-            let points_str = format_balance(p.points, decimals);
+            let points_str = format_balance(p.total_bonded, decimals);
             let name_display = if p.name.is_empty() {
                 format!("Pool #{}", p.id)
             } else {
@@ -914,7 +914,7 @@ fn render_nominate(frame: &mut Frame, app: &mut App, area: Rect) {
             let name_display = truncate_str(v.name.as_deref().unwrap_or("-"), 16);
             let commission_str = format!("{:.1}%", v.commission * 100.0);
             let stake_str = format_balance(v.total_stake, decimals);
-            let apy_str = format!("{:.2}%", v.apy * 100.0);
+            let apy_str = format!("{:.2}%", v.apy.unwrap_or(0.0) * 100.0);
             let blocked_str = if v.blocked { "Yes" } else { "No" };
 
             Row::new(vec![
@@ -1305,17 +1305,17 @@ fn render_account_history(frame: &mut Frame, app: &App, area: Rect) {
             "Set account in Account tab (press 5, then 'a')",
             Style::default().fg(pal.warning),
         )));
-    } else if app.loading_history {
+    } else if app.history.loading {
         // Loading state
-        let progress = app.staking_history.len() as f64 / app.history_total_eras as f64;
+        let progress = app.history.points.len() as f64 / app.history.total_eras as f64;
         let bar_width = 20;
         let filled = (progress * bar_width as f64) as usize;
         let bar = format!(
             "[{}{}] {}/{}",
             "█".repeat(filled),
             "░".repeat(bar_width - filled),
-            app.staking_history.len(),
-            app.history_total_eras
+            app.history.points.len(),
+            app.history.total_eras
         );
         title_lines.push(Line::from(vec![
             Span::raw("Loading: "),
@@ -1326,7 +1326,7 @@ fn render_account_history(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled("c", Style::default().fg(pal.warning).bold()),
             Span::raw(" to cancel"),
         ]));
-    } else if app.staking_history.is_empty() {
+    } else if app.history.points.is_empty() {
         // Not loading, no data
         title_lines.push(Line::from(vec![
             Span::raw("Press "),
@@ -1337,7 +1337,7 @@ fn render_account_history(frame: &mut Frame, app: &App, area: Rect) {
         // Have data, not loading
         title_lines.push(Line::from(format!(
             "Loaded {} eras",
-            app.staking_history.len()
+            app.history.points.len()
         )));
         title_lines.push(Line::from(vec![
             Span::raw("Press "),
@@ -1357,7 +1357,7 @@ fn render_account_history(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(title_para, chunks[0]);
 
     // Main content: split horizontally into bar chart (top) and table (bottom)
-    if app.staking_history.is_empty() && !app.loading_history {
+    if app.history.points.is_empty() && !app.history.loading {
         let msg = if app.watched_account.is_none() {
             "No account set"
         } else {
@@ -1373,7 +1373,7 @@ fn render_account_history(frame: &mut Frame, app: &App, area: Rect) {
                     .title(" Era History "),
             );
         frame.render_widget(paragraph, chunks[1]);
-    } else if app.staking_history.is_empty() && app.loading_history {
+    } else if app.history.points.is_empty() && app.history.loading {
         let paragraph = Paragraph::new("Loading first data points...")
             .style(Style::default().fg(pal.warning))
             .alignment(Alignment::Center)
@@ -1460,7 +1460,7 @@ fn render_reward_bar_chart(frame: &mut Frame, app: &App, area: Rect) {
     let inner_area = block.inner(area);
     frame.render_widget(block, area);
 
-    if app.staking_history.is_empty() || inner_area.height < 4 {
+    if app.history.points.is_empty() || inner_area.height < 4 {
         return;
     }
 
@@ -1479,7 +1479,7 @@ fn render_reward_bar_chart(frame: &mut Frame, app: &App, area: Rect) {
     // Get reward values (in token units for display)
     let divisor = 10u128.pow(decimals as u32);
     let rewards: Vec<f64> = app
-        .staking_history
+        .history.points
         .iter()
         .map(|p| p.reward as f64 / divisor as f64)
         .collect();
@@ -1627,10 +1627,13 @@ fn render_reward_bar_chart(frame: &mut Frame, app: &App, area: Rect) {
     )));
 
     // Era range label with dates
-    if let (Some(first), Some(last)) = (app.staking_history.first(), app.staking_history.last()) {
+    if let (Some(first), Some(last)) = (app.history.points.first(), app.history.points.last()) {
         let era_label = format!(
             "        Era {} ({})  ───  Era {} ({})",
-            first.era, first.date, last.era, last.date
+            first.era,
+            first.date.as_deref().unwrap_or("-"),
+            last.era,
+            last.date.as_deref().unwrap_or("-")
         );
         lines.push(Line::from(Span::styled(
             era_label,
@@ -1650,7 +1653,7 @@ fn render_history_table(frame: &mut Frame, app: &App, area: Rect) {
 
     // Build table rows (most recent first)
     let rows: Vec<Row> = app
-        .staking_history
+        .history.points
         .iter()
         .rev()
         .map(|p| {
@@ -1668,7 +1671,7 @@ fn render_history_table(frame: &mut Frame, app: &App, area: Rect) {
 
             Row::new(vec![
                 Cell::from(p.era.to_string()),
-                Cell::from(p.date.clone()),
+                Cell::from(p.date.clone().unwrap_or_default()),
                 Cell::from(reward_str),
                 Cell::from(apy_str).style(apy_style),
             ])
@@ -1698,7 +1701,7 @@ fn render_history_table(frame: &mut Frame, app: &App, area: Rect) {
                 .border_style(Style::default().fg(pal.border))
                 .title(format!(
                     " Era History ({} eras) ",
-                    app.staking_history.len()
+                    app.history.points.len()
                 )),
         )
         .row_highlight_style(
@@ -1722,7 +1725,7 @@ fn render_apy_graph(frame: &mut Frame, app: &App, area: Rect) {
     let inner_area = inner.inner(area);
     frame.render_widget(inner, area);
 
-    if app.staking_history.is_empty() || inner_area.height < 3 {
+    if app.history.points.is_empty() || inner_area.height < 3 {
         return;
     }
 
@@ -1730,7 +1733,7 @@ fn render_apy_graph(frame: &mut Frame, app: &App, area: Rect) {
     let graph_width = inner_area.width.saturating_sub(6) as usize; // Leave room for y-axis labels
 
     // Get APY values
-    let apys: Vec<f64> = app.staking_history.iter().map(|p| p.apy * 100.0).collect();
+    let apys: Vec<f64> = app.history.points.iter().map(|p| p.apy * 100.0).collect();
 
     if apys.is_empty() {
         return;
@@ -1802,7 +1805,7 @@ fn render_apy_graph(frame: &mut Frame, app: &App, area: Rect) {
     )));
 
     // Era labels
-    if let (Some(first), Some(last)) = (app.staking_history.first(), app.staking_history.last()) {
+    if let (Some(first), Some(last)) = (app.history.points.first(), app.history.points.last()) {
         let era_label = format!(
             "     Era {:<10} {:>width$}",
             first.era,
@@ -1824,11 +1827,11 @@ fn render_history_stats(frame: &mut Frame, app: &App, area: Rect) {
     let pal = &app.palette;
     let mut lines = Vec::new();
 
-    if app.staking_history.is_empty() {
+    if app.history.points.is_empty() {
         lines.push(Line::from("  No history data available"));
     } else {
-        let apys: Vec<f64> = app.staking_history.iter().map(|p| p.apy * 100.0).collect();
-        let rewards: Vec<u128> = app.staking_history.iter().map(|p| p.reward).collect();
+        let apys: Vec<f64> = app.history.points.iter().map(|p| p.apy * 100.0).collect();
+        let rewards: Vec<u128> = app.history.points.iter().map(|p| p.reward).collect();
 
         let avg_apy = apys.iter().sum::<f64>() / apys.len() as f64;
         let min_apy = apys.iter().cloned().fold(f64::INFINITY, f64::min);
@@ -1857,12 +1860,12 @@ fn render_history_stats(frame: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(pal.primary).bold(),
             ),
             Span::styled(
-                format!(" over {} eras", app.staking_history.len()),
+                format!(" over {} eras", app.history.points.len()),
                 Style::default().fg(pal.muted),
             ),
         ]));
 
-        if let Some(last) = app.staking_history.last() {
+        if let Some(last) = app.history.points.last() {
             lines.push(Line::from(vec![
                 Span::styled("  Latest Era: ", Style::default().fg(pal.fg_dim)),
                 Span::styled(format!("{}", last.era), Style::default().fg(pal.fg)),
@@ -1920,14 +1923,14 @@ fn render_qr_modal(frame: &mut Frame, app: &App) {
     .split(inner_area);
 
     // Tabs - show Scan tab if we have pending unsigned tx, Submit tab if we have signed tx
-    let titles = if app.pending_tx.is_some() {
+    let titles = if app.qr.pending_signed.is_some() {
         vec![
             Line::from(" QR Code "),
             Line::from(" Extrinsic "),
             Line::from(" Scan "),
             Line::from(" Submit "),
         ]
-    } else if app.pending_unsigned_tx.is_some() {
+    } else if app.qr.pending_unsigned.is_some() {
         vec![
             Line::from(" QR Code "),
             Line::from(" Extrinsic "),
@@ -1937,12 +1940,12 @@ fn render_qr_modal(frame: &mut Frame, app: &App) {
         vec![Line::from(" QR Code "), Line::from(" Extrinsic ")]
     };
     let tabs = Tabs::new(titles)
-        .select(app.qr_modal_tab)
+        .select(app.qr.modal_tab)
         .style(Style::default().fg(pal.muted))
         .highlight_style(Style::default().fg(pal.highlight).bold());
     frame.render_widget(tabs, chunks[0]);
 
-    match app.qr_modal_tab {
+    match app.qr.modal_tab {
         0 => render_qr_content(frame, app, chunks[1]),
         1 => render_qr_details(frame, app, chunks[1]),
         2 => render_scan_camera(frame, app, chunks[1]),
@@ -1951,9 +1954,9 @@ fn render_qr_modal(frame: &mut Frame, app: &App) {
     }
 
     // Footer
-    let footer = if app.pending_tx.is_some() {
+    let footer = if app.qr.pending_signed.is_some() {
         "Tab:View  Enter:Submit  Esc:Close"
-    } else if app.pending_unsigned_tx.is_some() {
+    } else if app.qr.pending_unsigned.is_some() {
         "Tab:View  s:Scan  Esc:Close"
     } else {
         "Tab:View  Esc:Close"
@@ -2000,7 +2003,7 @@ fn render_qr_content(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(pal.muted),
         )));
     } else {
-        match &app.qr_data {
+        match &app.qr.data {
             Some(data) => {
                 // Always use multipart format (UOS headers) to ensure Vault recognizes it as binary
                 // and not text (which causes "invalid utf-8" errors starting with 'S' 0x53).
@@ -2012,7 +2015,7 @@ fn render_qr_content(frame: &mut Frame, app: &App, area: Rect) {
                     data,
                     max_qr_height,
                     max_qr_width,
-                    app.qr_frame,
+                    app.qr.frame,
                     pal,
                     dark_theme,
                     &network_name,
@@ -2037,7 +2040,7 @@ fn render_qr_details(frame: &mut Frame, app: &App, area: Rect) {
     )]));
     lines.push(Line::from(""));
 
-    if let Some(tx_info) = &app.qr_tx_info {
+    if let Some(tx_info) = &app.qr.tx_info {
         // Call info
         lines.push(Line::from(vec![
             Span::styled("Call: ", Style::default().fg(pal.fg_dim)),
@@ -2119,10 +2122,10 @@ fn render_qr_details(frame: &mut Frame, app: &App, area: Rect) {
             )));
         }
 
-        if let Some(data) = &app.qr_data {
+        if let Some(data) = &app.qr.data {
             lines.push(Line::from(format!("  QR Payload: {} bytes", data.len())));
         }
-    } else if let Some(data) = &app.qr_data {
+    } else if let Some(data) = &app.qr.data {
         // Fallback if no tx_info
         lines.push(Line::from(format!("Payload Size: {} bytes", data.len())));
         if let Some(account) = &app.watched_account {
@@ -2244,8 +2247,8 @@ fn render_scan_camera(frame: &mut Frame, app: &App, area: Rect) {
     lines.push(Line::from(""));
 
     // Determine status and colors based on camera_scan_status
-    let frames = app.camera_frames_captured;
-    let (status_text, status_style) = match app.camera_scan_status {
+    let frames = app.camera.frames_captured;
+    let (status_text, status_style) = match app.camera.status {
         None | Some(CameraScanStatus::Initializing) => (
             "Initializing camera...".to_string(),
             Style::default().fg(pal.muted),
@@ -2268,7 +2271,7 @@ fn render_scan_camera(frame: &mut Frame, app: &App, area: Rect) {
         ),
     };
 
-    let border_color = match app.camera_scan_status {
+    let border_color = match app.camera.status {
         None | Some(CameraScanStatus::Initializing) | Some(CameraScanStatus::Scanning) => {
             pal.border
         }
@@ -2278,8 +2281,8 @@ fn render_scan_camera(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     // Render camera preview or placeholder
-    if let Some(ref pixels) = app.camera_preview {
-        let (width, height) = app.camera_preview_size;
+    if let Some(ref pixels) = app.camera.preview {
+        let (width, height) = app.camera.preview_size;
         if width > 0 && height > 0 {
             // Convert grayscale to braille
             let braille_lines = grayscale_to_braille(pixels, width, height, 128);
@@ -2309,7 +2312,7 @@ fn render_scan_camera(frame: &mut Frame, app: &App, area: Rect) {
             )));
 
             // Show QR bounds indicator if detected
-            if app.qr_bounds.is_some() {
+            if app.camera.qr_bounds.is_some() {
                 lines.push(Line::from(Span::styled(
                     "▶ QR code in view ◀",
                     Style::default().fg(pal.success).bold(),
@@ -2331,7 +2334,7 @@ fn render_scan_camera(frame: &mut Frame, app: &App, area: Rect) {
 
         for i in 0..frame_height {
             if i == frame_height / 2 {
-                let indicator = match app.camera_scan_status {
+                let indicator = match app.camera.status {
                     Some(CameraScanStatus::Initializing) | None => app.spinner_char(),
                     Some(CameraScanStatus::Scanning) => '◯',
                     Some(CameraScanStatus::Detected) => '◉',
@@ -2366,14 +2369,14 @@ fn render_scan_camera(frame: &mut Frame, app: &App, area: Rect) {
 
     // Help text
     if matches!(
-        app.camera_scan_status,
+        app.camera.status,
         Some(CameraScanStatus::Scanning) | Some(CameraScanStatus::Detected)
     ) {
         lines.push(Line::from(Span::styled(
             "Hold Vault QR code in front of camera",
             Style::default().fg(pal.muted),
         )));
-    } else if matches!(app.camera_scan_status, Some(CameraScanStatus::Error)) {
+    } else if matches!(app.camera.status, Some(CameraScanStatus::Error)) {
         lines.push(Line::from(Span::styled(
             "Grant camera access in System Preferences > Privacy",
             Style::default().fg(pal.muted),
@@ -2400,7 +2403,7 @@ fn render_submit_tab(frame: &mut Frame, app: &App, area: Rect) {
     )));
     lines.push(Line::from(""));
 
-    if let Some(ref tx) = app.pending_tx {
+    if let Some(ref tx) = app.qr.pending_signed {
         // Show transaction hash
         lines.push(Line::from(vec![
             Span::styled("Tx Hash: ", Style::default().fg(pal.muted)),
@@ -2925,7 +2928,7 @@ fn render_logs(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     // Format bandwidth if available
-    let bandwidth_text = if let Some(bw) = app.estimated_bandwidth {
+    let bandwidth_text = if let Some(bw) = app.loading.bandwidth {
         if bw >= 1_000_000.0 {
             format!(" │ ↓ {:.1} MB/s", bw / 1_000_000.0)
         } else {

@@ -14,6 +14,16 @@ pub enum PoolState {
     Destroying,
 }
 
+impl From<PoolState> for stkopt_core::PoolState {
+    fn from(state: PoolState) -> Self {
+        match state {
+            PoolState::Open => stkopt_core::PoolState::Open,
+            PoolState::Blocked => stkopt_core::PoolState::Blocked,
+            PoolState::Destroying => stkopt_core::PoolState::Destroying,
+        }
+    }
+}
+
 /// Nomination pool information.
 #[derive(Debug, Clone)]
 pub struct PoolInfo {

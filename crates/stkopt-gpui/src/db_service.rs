@@ -1,6 +1,6 @@
 use crate::app::{HistoryPoint, PoolInfo, ValidatorInfo};
-use crate::db::{CachedAccountStatus, CachedChainMetadata, Db};
 use crate::persistence::get_data_dir;
+use stkopt_core::db::{CachedAccountStatus, CachedChainMetadata, StakingDb};
 use anyhow::{Context, Result};
 use std::sync::{Arc, Mutex};
 use stkopt_core::Network;
@@ -8,7 +8,7 @@ use stkopt_core::Network;
 /// Service for asynchronous database access.
 #[derive(Clone)]
 pub struct DbService {
-    db: Arc<Mutex<Db>>,
+    db: Arc<Mutex<StakingDb>>,
     handle: tokio::runtime::Handle,
 }
 
@@ -20,7 +20,7 @@ impl DbService {
             std::fs::create_dir_all(&data_dir).context("Failed to create data directory")?;
         }
         let db_path = data_dir.join("history.db");
-        let db = Db::open(&db_path).context("Failed to open database")?;
+        let db = StakingDb::open(&db_path).context("Failed to open database")?;
         Ok(Self {
             db: Arc::new(Mutex::new(db)),
             handle,
@@ -29,7 +29,7 @@ impl DbService {
 
     /// Open an in-memory database for testing.
     pub fn new_memory(handle: tokio::runtime::Handle) -> Result<Self> {
-        let db = Db::open_memory().context("Failed to open in-memory database")?;
+        let db = StakingDb::open_memory().context("Failed to open in-memory database")?;
         Ok(Self {
             db: Arc::new(Mutex::new(db)),
             handle,

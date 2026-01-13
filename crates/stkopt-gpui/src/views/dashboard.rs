@@ -5,14 +5,16 @@ use gpui::*;
 use gpui_ui_kit::theme::ThemeExt;
 use gpui_ui_kit::*;
 
-use crate::app::StkoptApp;
+use crate::app::{StkoptApp, StakingOperation};
 
 pub struct DashboardSection;
 
 impl DashboardSection {
     pub fn render(app: &StkoptApp, cx: &Context<StkoptApp>) -> impl IntoElement {
+        tracing::debug!("[DASHBOARD] render called");
         let theme = cx.theme();
         let symbol = app.network.symbol();
+        let entity = app.entity.clone();
 
         let (total_balance, bonded, unbonding, rewards) = if let Some(ref info) = app.staking_info {
             (
@@ -31,9 +33,13 @@ impl DashboardSection {
         };
 
         div()
+            .id("dashboard-section-root")
             .flex()
             .flex_col()
             .gap_6()
+            .on_mouse_down(MouseButton::Left, |_event, _window, _cx| {
+                tracing::info!("[DASHBOARD] Section root clicked!");
+            })
             .child(Heading::h1("Dashboard"))
             .child(Text::new("Overview of your staking activity").size(TextSize::Md))
             .child(
@@ -55,10 +61,54 @@ impl DashboardSection {
                         div()
                             .flex()
                             .gap_3()
-                            .child(Button::new("btn-bond", "Bond").variant(ButtonVariant::Primary))
-                            .child(Button::new("btn-unbond", "Unbond").variant(ButtonVariant::Secondary))
-                            .child(Button::new("btn-claim", "Claim Rewards").variant(ButtonVariant::Secondary))
-                            .child(Button::new("btn-nominate", "Nominate").variant(ButtonVariant::Secondary)),
+                            .child(
+                                Button::new("btn-bond", "Bond")
+                                    .variant(ButtonVariant::Primary)
+                                    .on_click({
+                                        let entity = entity.clone();
+                                        move |_window, cx| {
+                                            entity.update(cx, |this, cx| {
+                                                this.open_staking_modal(StakingOperation::Bond, cx);
+                                            });
+                                        }
+                                    }),
+                            )
+                            .child(
+                                Button::new("btn-unbond", "Unbond")
+                                    .variant(ButtonVariant::Secondary)
+                                    .on_click({
+                                        let entity = entity.clone();
+                                        move |_window, cx| {
+                                            entity.update(cx, |this, cx| {
+                                                this.open_staking_modal(StakingOperation::Unbond, cx);
+                                            });
+                                        }
+                                    }),
+                            )
+                            .child(
+                                Button::new("btn-claim", "Claim Rewards")
+                                    .variant(ButtonVariant::Secondary)
+                                    .on_click({
+                                        let entity = entity.clone();
+                                        move |_window, cx| {
+                                            entity.update(cx, |this, cx| {
+                                                this.open_staking_modal(StakingOperation::ClaimRewards, cx);
+                                            });
+                                        }
+                                    }),
+                            )
+                            .child(
+                                Button::new("btn-nominate", "Nominate")
+                                    .variant(ButtonVariant::Secondary)
+                                    .on_click({
+                                        let entity = entity.clone();
+                                        move |_window, cx| {
+                                            entity.update(cx, |this, cx| {
+                                                this.open_staking_modal(StakingOperation::Nominate, cx);
+                                            });
+                                        }
+                                    }),
+                            ),
                     ),
             )
     }

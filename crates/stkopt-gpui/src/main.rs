@@ -2,22 +2,23 @@
 
 //! Staking Optimizer Desktop - A GPUI desktop application for Polkadot staking optimization.
 
-mod account;
-mod actions;
-mod app;
-mod chain;
-mod db;
-mod db_service;
-mod errors;
-mod gpui_tokio;
-mod history;
-mod log;
-mod optimization;
-mod persistence;
-mod shortcuts;
-mod transactions;
-mod validators;
-mod views;
+pub mod account;
+pub mod actions;
+pub mod chain;
+pub mod db_service;
+pub mod errors;
+pub mod gpui_tokio;
+pub mod history;
+pub mod log;
+pub mod optimization;
+pub mod persistence;
+pub mod qr_reader;
+pub mod shortcuts;
+pub mod tcc;
+pub mod transactions;
+pub mod validators;
+pub mod views;
+pub mod app;
 mod tests;
 
 
@@ -30,7 +31,7 @@ use tracing_subscriber::prelude::*;
 fn main() {
     // Initialize logging
     let log_buffer = std::sync::Arc::new(crate::log::LogBuffer::new());
-    let log_layer = crate::log::LogBufferLayer::new((*log_buffer).clone()); // LogBuffer is Clone, but we want shared Arc for app
+    let _log_layer = crate::log::LogBufferLayer::new((*log_buffer).clone()); // LogBuffer is Clone, but we want shared Arc for app
     // Wait, LogBufferLayer takes LogBuffer struct, which wraps Arc.
     // So log_buffer (Arc) is for App.
     // log_layer needs a LogBuffer instance. 

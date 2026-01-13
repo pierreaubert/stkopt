@@ -5,7 +5,7 @@ use gpui::*;
 use gpui_ui_kit::theme::ThemeExt;
 use gpui_ui_kit::*;
 
-use crate::app::StkoptApp;
+use crate::app::{PoolOperation, StkoptApp};
 use crate::gpui_tokio::Tokio;
 
 pub struct PoolsSection;
@@ -51,12 +51,13 @@ impl PoolsSection {
                     .size(TextSize::Md)
                     .color(theme.text_secondary),
             )
-            .child(Self::render_pool_list(app, &theme))
+            .child(Self::render_pool_list(app, &theme, &entity))
     }
 
     fn render_pool_list(
         app: &StkoptApp,
         theme: &gpui_ui_kit::theme::Theme,
+        entity: &Entity<StkoptApp>,
     ) -> AnyElement {
         if app.pools.is_empty() {
             return div()
@@ -112,6 +113,11 @@ impl PoolsSection {
                     div()
                         .w(px(80.0))
                         .child(Text::new("State").size(TextSize::Sm).weight(TextWeight::Semibold)),
+                )
+                .child(
+                    div()
+                        .w(px(70.0))
+                        .child(Text::new("").size(TextSize::Sm)), // Actions column header
                 ),
         );
 
@@ -129,6 +135,8 @@ impl PoolsSection {
                 crate::app::PoolState::Destroying => theme.error,
             };
             let row_bg = if i % 2 == 0 { theme.background } else { theme.surface };
+            let pool_id = pool.id;
+            let is_open = pool.state == crate::app::PoolState::Open;
 
             list = list.child(
                 div()
@@ -163,6 +171,24 @@ impl PoolsSection {
                         div()
                             .w(px(80.0))
                             .child(Text::new(state_str).size(TextSize::Sm).color(state_color)),
+                    )
+                    .child(
+                        div()
+                            .w(px(70.0))
+                            .child(
+                                Button::new(SharedString::from(format!("btn-join-pool-{}", pool_id)), "Join")
+                                    .size(ButtonSize::Xs)
+                                    .variant(ButtonVariant::Primary)
+                                    .disabled(!is_open)
+                                    .on_click({
+                                        let entity = entity.clone();
+                                        move |_window, cx| {
+                                            entity.update(cx, |this, cx| {
+                                                this.open_pool_modal(PoolOperation::Join, Some(pool_id), cx);
+                                            });
+                                        }
+                                    }),
+                            ),
                     ),
             );
         }

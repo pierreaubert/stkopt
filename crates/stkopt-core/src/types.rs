@@ -1,10 +1,12 @@
 //! Core domain types for staking optimization.
 
+use serde::{Deserialize, Serialize};
+
 pub type Balance = u128;
 pub type EraIndex = u32;
 
 /// Supported networks - exhaustive match required (no default case).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Network {
     Polkadot,
     Kusama,
@@ -116,7 +118,7 @@ pub struct NominationPool {
 }
 
 /// Pool state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PoolState {
     Open,
     Blocked,

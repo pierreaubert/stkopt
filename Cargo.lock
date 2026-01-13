@@ -7201,6 +7201,12 @@ name = "stkopt-core"
 version = "0.1.1"
 dependencies = [
  "approx",
+ "chrono",
+ "directories",
+ "proptest",
+ "rusqlite",
+ "serde",
+ "serde_json",
  "thiserror 2.0.17",
 ]
 
@@ -7222,6 +7228,7 @@ dependencies = [
  "nokhwa",
  "pretty_assertions",
  "proptest",
+ "qrcode",
  "rqrr 0.10.0",
  "rusqlite",
  "serde",

@@ -9,9 +9,8 @@ use crate::log_buffer::LogBuffer;
 use crate::theme::{Palette, Theme};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::TableState;
-use ratatui_image::picker::Picker;
 use std::collections::HashSet;
-use stkopt_chain::{ChainInfo, RewardDestination, UnlockChunkInfo};
+use stkopt_chain::{ChainInfo, RewardDestination};
 use stkopt_core::{ConnectionStatus, Network, OptimizationResult};
 use subxt::utils::AccountId32;
 
@@ -220,15 +219,95 @@ impl View {
     }
 }
 
+// === Grouped State Structs ===
+
+/// Camera scanning state for QR code reading.
+#[derive(Debug, Default)]
+pub struct CameraState {
+    /// Whether currently scanning for signature QR code.
+    pub scanning: bool,
+    /// Camera scan status for visual feedback.
+    pub status: Option<CameraScanStatus>,
+    /// Number of frames captured since scanning started.
+    pub frames_captured: u32,
+    /// Camera preview pixels for braille rendering (grayscale, downsampled).
+    pub preview: Option<Vec<u8>>,
+    /// Camera preview dimensions (width, height).
+    pub preview_size: (usize, usize),
+    /// QR code bounding box in normalized coordinates (0.0-1.0).
+    pub qr_bounds: Option<[(f32, f32); 4]>,
+}
+
+/// QR code display and transaction state.
+#[derive(Debug, Default)]
+pub struct QrState {
+    /// QR code data to display (if any).
+    pub data: Option<Vec<u8>>,
+    /// Transaction info for QR code display.
+    pub tx_info: Option<TransactionInfo>,
+    /// Current QR frame for animated multipart display.
+    pub frame: usize,
+    /// Whether showing QR code modal.
+    pub showing: bool,
+    /// Current tab in QR modal (0=QR, 1=Details, 2=Scan).
+    pub modal_tab: usize,
+    /// Pending unsigned transaction (waiting for signature from Vault).
+    pub pending_unsigned: Option<PendingUnsignedTx>,
+    /// Pending signed transaction (ready for/in-progress submission).
+    pub pending_signed: Option<PendingTransaction>,
+}
+
+/// Staking history state.
+#[derive(Debug, Default)]
+pub struct HistoryState {
+    /// Staking history for the watched account.
+    pub points: Vec<StakingHistoryPoint>,
+    /// Whether staking history is currently loading.
+    pub loading: bool,
+    /// Total eras to load for history.
+    pub total_eras: u32,
+    /// Account for which history was loaded (to detect account changes).
+    pub loaded_for: Option<String>,
+}
+
+impl HistoryState {
+    fn new() -> Self {
+        Self {
+            total_eras: 30,
+            ..Default::default()
+        }
+    }
+}
+
+/// Loading progress and bandwidth state.
+#[derive(Debug, Default)]
+pub struct LoadingState {
+    /// Loading progress (0.0 - 1.0).
+    pub progress: f32,
+    /// Whether validators are loading.
+    pub validators: bool,
+    /// Whether the chain is still connecting/syncing.
+    pub chain: bool,
+    /// Whether data was loaded from cache (validators, etc).
+    pub using_cache: bool,
+    /// Bytes loaded so far (for bandwidth estimation).
+    pub bytes_loaded: u64,
+    /// Load start time (for bandwidth calculation).
+    pub start_time: Option<std::time::Instant>,
+    /// Estimated bandwidth in bytes per second.
+    pub bandwidth: Option<f64>,
+    /// Tick counter for loading spinner animation.
+    pub spinner_tick: usize,
+}
+
 /// Application state.
 pub struct App {
+    // === Core State ===
     /// Current theme.
     #[allow(dead_code)]
     pub theme: Theme,
     /// Color palette for rendering.
     pub palette: Palette,
-    /// Image picker for terminal graphics protocol detection.
-    pub image_picker: Picker,
     /// Current network.
     pub network: Network,
     /// Connection status.
@@ -237,48 +316,8 @@ pub struct App {
     pub chain_info: Option<ChainInfo>,
     /// Current view/tab.
     pub current_view: View,
-    /// Current era index.
-    pub current_era: Option<u32>,
-    /// Era completion percentage.
-    pub era_pct_complete: f64,
-    /// Era duration in milliseconds.
-    pub era_duration_ms: u64,
-    /// Display validators (aggregated data).
-    pub validators: Vec<DisplayValidator>,
-    /// Validators table state.
-    pub validators_table_state: TableState,
-    /// Display nomination pools (aggregated data).
-    pub pools: Vec<DisplayPool>,
-    /// Pools table state.
-    pub pools_table_state: TableState,
-    /// Loading progress (0.0 - 1.0).
-    pub loading_progress: f32,
-    /// Whether validators are loading.
-    pub loading_validators: bool,
     /// Current input mode.
     pub input_mode: InputMode,
-    /// Input buffer for entering account address.
-    pub account_input: String,
-    /// Watched account address.
-    pub watched_account: Option<AccountId32>,
-    /// Account status (balance, staking, nominations).
-    pub account_status: Option<AccountStatus>,
-    /// Nomination optimization result.
-    pub optimization_result: Option<OptimizationResult>,
-    /// Manually selected validators (indices into validators list).
-    pub selected_validators: HashSet<usize>,
-    /// Nominate table state.
-    pub nominate_table_state: TableState,
-    /// QR code data to display (if any).
-    pub qr_data: Option<Vec<u8>>,
-    /// Transaction info for QR code display.
-    pub qr_tx_info: Option<TransactionInfo>,
-    /// Current QR frame for animated multipart display.
-    pub qr_frame: usize,
-    /// Whether showing QR code modal.
-    pub showing_qr: bool,
-    /// Current tab in QR modal (0=QR, 1=Details, 2=Scan).
-    pub qr_modal_tab: usize,
     /// Whether showing help overlay.
     pub showing_help: bool,
     /// Whether the app should quit.
@@ -289,14 +328,24 @@ pub struct App {
     pub log_buffer: LogBuffer,
     /// Log scroll offset (0 = bottom/most recent).
     pub log_scroll: usize,
-    /// Staking history for the watched account (last 30 eras).
-    pub staking_history: Vec<StakingHistoryPoint>,
-    /// Whether staking history is currently loading.
-    pub loading_history: bool,
-    /// Total eras to load for history.
-    pub history_total_eras: u32,
-    /// Account for which history was loaded (to detect account changes).
-    pub history_loaded_for: Option<String>,
+
+    // === Era State ===
+    /// Current era index.
+    pub current_era: Option<u32>,
+    /// Era completion percentage.
+    pub era_pct_complete: f64,
+    /// Era duration in milliseconds.
+    pub era_duration_ms: u64,
+
+    // === Validators State ===
+    /// Display validators (aggregated data).
+    pub validators: Vec<DisplayValidator>,
+    /// Validators table state.
+    pub validators_table_state: TableState,
+    /// Manually selected validators (indices into validators list).
+    pub selected_validators: HashSet<usize>,
+    /// Nominate table state.
+    pub nominate_table_state: TableState,
     /// Search query for filtering.
     pub search_query: String,
     /// Whether to show blocked validators.
@@ -305,50 +354,46 @@ pub struct App {
     pub validator_sort: ValidatorSortField,
     /// Validator sort ascending (false = descending).
     pub validator_sort_asc: bool,
+    /// Nomination optimization result.
+    pub optimization_result: Option<OptimizationResult>,
+    /// Optimization strategy selection index.
+    pub strategy_index: usize,
+
+    // === Pools State ===
+    /// Display nomination pools (aggregated data).
+    pub pools: Vec<DisplayPool>,
+    /// Pools table state.
+    pub pools_table_state: TableState,
     /// Pool sort field.
     pub pool_sort: PoolSortField,
     /// Pool sort ascending (false = descending).
     pub pool_sort_asc: bool,
+
+    // === Account State ===
+    /// Watched account address.
+    pub watched_account: Option<AccountId32>,
+    /// Account status (balance, staking, nominations).
+    pub account_status: Option<AccountStatus>,
+    /// Input buffer for entering account address.
+    pub account_input: String,
     /// Currently focused panel in account view (0 = status, 1 = address book).
     pub account_panel_focus: usize,
     /// Address book table state.
     pub address_book_state: TableState,
-    /// Optimization strategy selection index.
-    pub strategy_index: usize,
-    /// Pending unsigned transaction (waiting for signature from Vault).
-    pub pending_unsigned_tx: Option<PendingUnsignedTx>,
-    /// Pending signed transaction (ready for/in-progress submission).
-    pub pending_tx: Option<PendingTransaction>,
-    /// Whether currently scanning for signature QR code.
-    pub scanning_signature: bool,
-    /// Camera scan status for visual feedback (None=not scanning, Some=latest status).
-    pub camera_scan_status: Option<CameraScanStatus>,
-    /// Number of frames captured since scanning started (for activity feedback).
-    pub camera_frames_captured: u32,
-    /// Camera preview pixels for braille rendering (grayscale, downsampled).
-    pub camera_preview: Option<Vec<u8>>,
-    /// Camera preview dimensions (width, height).
-    pub camera_preview_size: (usize, usize),
-    /// QR code bounding box in normalized coordinates (0.0-1.0), if detected.
-    pub qr_bounds: Option<[(f32, f32); 4]>,
-    /// Whether the chain is still connecting/syncing.
-    pub loading_chain: bool,
     /// Whether to show the account input prompt popup.
     pub show_account_prompt: bool,
-    /// Tick counter for loading spinner animation.
-    pub spinner_tick: usize,
-    /// Whether data was loaded from cache (validators, etc).
-    pub using_cached_data: bool,
-    /// Bytes loaded so far (for bandwidth estimation).
-    pub bytes_loaded: u64,
-    /// Estimated total bytes to load.
-    pub estimated_total_bytes: Option<u64>,
-    /// Load start time (for bandwidth calculation).
-    pub load_start_time: Option<std::time::Instant>,
-    /// Estimated bandwidth in bytes per second (computed from actual bytes transferred).
-    pub estimated_bandwidth: Option<f64>,
-    /// Validation error message for account input (None if valid or not validating).
+    /// Validation error message for account input.
     pub validation_error: Option<String>,
+
+    // === Grouped State ===
+    /// QR code display and transaction state.
+    pub qr: QrState,
+    /// Camera scanning state.
+    pub camera: CameraState,
+    /// Staking history state.
+    pub history: HistoryState,
+    /// Loading progress state.
+    pub loading: LoadingState,
 
     // === Staking Operations State ===
     /// Current staking input mode.
@@ -357,8 +402,6 @@ pub struct App {
     pub staking_input_amount: String,
     /// Selected rewards destination.
     pub rewards_destination: RewardDestination,
-    /// Custom payee address input.
-    pub custom_payee_address: String,
 
     // === Pool Operations State ===
     /// Current pool operation.
@@ -367,93 +410,76 @@ pub struct App {
     pub pool_input_amount: String,
     /// Selected pool for join operation.
     pub selected_pool_for_join: Option<usize>,
-
-    // === Pending Unlock Info ===
-    /// Pending unlock chunks info.
-    pub pending_unlocks: Vec<UnlockChunkInfo>,
 }
 
 impl App {
     /// Create a new application instance.
     pub fn new(network: Network, log_buffer: LogBuffer, theme: Theme) -> Self {
         let palette = theme.palette();
-        // Use font-size-based picker to avoid querying terminal before raw mode
-        // (querying via stdio can print spurious characters like "Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA")
-        let image_picker = Picker::from_fontsize((8, 16));
         Self {
+            // Core state
             theme,
             palette,
-            image_picker,
             network,
             connection_status: ConnectionStatus::Disconnected,
             chain_info: None,
             current_view: View::default(),
-            current_era: None,
-            era_pct_complete: 0.0,
-            era_duration_ms: 0,
-            validators: Vec::new(),
-            validators_table_state: TableState::default(),
-            pools: Vec::new(),
-            pools_table_state: TableState::default(),
-            loading_progress: 0.0,
-            loading_validators: false,
             input_mode: InputMode::default(),
-            account_input: String::new(),
-            watched_account: None,
-            account_status: None,
-            optimization_result: None,
-            selected_validators: HashSet::new(),
-            nominate_table_state: TableState::default(),
-            qr_data: None,
-            qr_tx_info: None,
-            qr_frame: 0,
-            showing_qr: false,
-            qr_modal_tab: 0,
             showing_help: false,
             should_quit: false,
             tick_count: 0,
             log_buffer,
             log_scroll: 0,
-            staking_history: Vec::new(),
-            loading_history: false,
-            history_total_eras: 30,
-            history_loaded_for: None,
+
+            // Era state
+            current_era: None,
+            era_pct_complete: 0.0,
+            era_duration_ms: 0,
+
+            // Validators state
+            validators: Vec::new(),
+            validators_table_state: TableState::default(),
+            selected_validators: HashSet::new(),
+            nominate_table_state: TableState::default(),
             search_query: String::new(),
             show_blocked: true,
             validator_sort: ValidatorSortField::default(),
             validator_sort_asc: false, // Default descending (highest APY first)
+            optimization_result: None,
+            strategy_index: 0,
+
+            // Pools state
+            pools: Vec::new(),
+            pools_table_state: TableState::default(),
             pool_sort: PoolSortField::default(),
             pool_sort_asc: false,
+
+            // Account state
+            watched_account: None,
+            account_status: None,
+            account_input: String::new(),
             account_panel_focus: 0,
             address_book_state: TableState::default(),
-            strategy_index: 0,
-            pending_unsigned_tx: None,
-            pending_tx: None,
-            scanning_signature: false,
-            camera_scan_status: None,
-            camera_frames_captured: 0,
-            camera_preview: None,
-            camera_preview_size: (0, 0),
-            qr_bounds: None,
-            loading_chain: true, // Start in loading state
             show_account_prompt: false,
-            spinner_tick: 0,
-            using_cached_data: false,
-            bytes_loaded: 0,
-            estimated_total_bytes: None,
-            load_start_time: Some(std::time::Instant::now()),
-            estimated_bandwidth: None,
             validation_error: None,
 
-            // New fields initialization
+            // Grouped state
+            qr: QrState::default(),
+            camera: CameraState::default(),
+            history: HistoryState::new(),
+            loading: LoadingState {
+                chain: true, // Start in loading state
+                start_time: Some(std::time::Instant::now()),
+                ..Default::default()
+            },
+
+            // Staking operation fields
             staking_input_mode: StakingInputMode::default(),
             staking_input_amount: String::new(),
             rewards_destination: RewardDestination::Staked,
-            custom_payee_address: String::new(),
             pool_operation: PoolOperation::default(),
             pool_input_amount: String::new(),
             selected_pool_for_join: None,
-            pending_unlocks: Vec::new(),
         }
     }
 
@@ -480,13 +506,13 @@ impl App {
         self.tick_count = self.tick_count.wrapping_add(1);
 
         // Advance QR animation frame every tick (~100ms) for fast multipart display
-        if self.showing_qr {
-            self.qr_frame = self.qr_frame.wrapping_add(1);
+        if self.qr.showing {
+            self.qr.frame = self.qr.frame.wrapping_add(1);
         }
 
         // Advance spinner for loading animation
-        if self.loading_chain || self.loading_validators {
-            self.spinner_tick = self.spinner_tick.wrapping_add(1);
+        if self.loading.chain || self.loading.validators {
+            self.loading.spinner_tick = self.loading.spinner_tick.wrapping_add(1);
         }
 
         // Bandwidth is now computed from actual bytes in SetLoadingProgress handler
@@ -495,19 +521,19 @@ impl App {
     /// Get the current spinner character for loading animation.
     pub fn spinner_char(&self) -> char {
         const SPINNER_CHARS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-        SPINNER_CHARS[self.spinner_tick % SPINNER_CHARS.len()]
+        SPINNER_CHARS[self.loading.spinner_tick % SPINNER_CHARS.len()]
     }
 
     /// Estimate remaining time in seconds based on progress rate.
     pub fn estimated_remaining_secs(&self) -> Option<f64> {
-        let bw = self.estimated_bandwidth?;
+        let bw = self.loading.bandwidth?;
         if bw <= 0.0 {
             return None;
         }
 
         // bw is progress rate * 10MB, so reverse to get progress rate
         let progress_rate = bw / 10_000_000.0;
-        let remaining_progress = 1.0 - self.loading_progress as f64;
+        let remaining_progress = 1.0 - self.loading.progress as f64;
         if progress_rate > 0.0 {
             Some(remaining_progress / progress_rate)
         } else {
@@ -539,102 +565,78 @@ impl App {
         }
     }
 
-    /// Handle keyboard input in normal mode.
-    fn handle_normal_key(&mut self, key: KeyEvent) -> Option<Action> {
-        // Close QR modal if showing
-        if self.showing_qr {
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => {
-                    self.showing_qr = false;
-                    self.qr_data = None;
-                    self.qr_tx_info = None;
-                    self.qr_frame = 0;
-                    self.qr_modal_tab = 0;
-                    self.camera_scan_status = None;
-                    self.camera_preview = None;
-                    self.qr_bounds = None;
-                    self.pending_unsigned_tx = None;
-                    self.pending_tx = None;
-                    // Stop scanning if active
-                    if self.scanning_signature {
-                        return Some(Action::StopSignatureScan);
-                    }
+    /// Handle keyboard input when QR modal is showing.
+    fn handle_qr_modal_key(&mut self, key: KeyEvent) -> Option<Action> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.qr.showing = false;
+                self.qr.data = None;
+                self.qr.tx_info = None;
+                self.qr.frame = 0;
+                self.qr.modal_tab = 0;
+                self.camera.status = None;
+                self.camera.preview = None;
+                self.camera.qr_bounds = None;
+                self.qr.pending_unsigned = None;
+                self.qr.pending_signed = None;
+                if self.camera.scanning {
+                    return Some(Action::StopSignatureScan);
                 }
-                KeyCode::Tab | KeyCode::Right => {
-                    // Cycle through tabs: QR -> Details -> Scan -> (Submit if present) -> QR
-                    let max_tab = if self.pending_tx.is_some() { 4 } else { 3 };
-                    self.qr_modal_tab = (self.qr_modal_tab + 1) % max_tab;
-                    // Start scanning when entering Scan tab
-                    if self.qr_modal_tab == 2
-                        && self.pending_unsigned_tx.is_some()
-                        && !self.scanning_signature
-                    {
-                        self.camera_scan_status = Some(CameraScanStatus::Initializing);
-                        self.camera_frames_captured = 0;
-                        return Some(Action::StartSignatureScan);
-                    }
-                    // Stop scanning when leaving Scan tab
-                    if self.qr_modal_tab != 2 && self.scanning_signature {
-                        self.camera_scan_status = None;
-                        self.camera_preview = None;
-                        self.qr_bounds = None;
-                        return Some(Action::StopSignatureScan);
-                    }
-                }
-                KeyCode::BackTab | KeyCode::Left => {
-                    // Cycle backwards: QR <- Details <- Scan <- (Submit if present) <- QR
-                    let max_tab = if self.pending_tx.is_some() { 3 } else { 2 };
-                    self.qr_modal_tab = if self.qr_modal_tab == 0 {
-                        max_tab
-                    } else {
-                        self.qr_modal_tab - 1
-                    };
-                    // Start scanning when entering Scan tab
-                    if self.qr_modal_tab == 2
-                        && self.pending_unsigned_tx.is_some()
-                        && !self.scanning_signature
-                    {
-                        self.camera_scan_status = Some(CameraScanStatus::Initializing);
-                        self.camera_frames_captured = 0;
-                        return Some(Action::StartSignatureScan);
-                    }
-                    // Stop scanning when leaving Scan tab
-                    if self.qr_modal_tab != 2 && self.scanning_signature {
-                        self.camera_scan_status = None;
-                        self.camera_preview = None;
-                        self.qr_bounds = None;
-                        return Some(Action::StopSignatureScan);
-                    }
-                }
-                // 's' to start scanning for signature (after Vault has signed) - shortcut to scan tab
-                KeyCode::Char('s') if self.pending_unsigned_tx.is_some() && self.pending_tx.is_none() => {
-                    self.qr_modal_tab = 2;
-                    self.camera_scan_status = Some(CameraScanStatus::Initializing);
-                    self.camera_frames_captured = 0;
-                    return Some(Action::StartSignatureScan);
-                }
-                // 's' or Enter to submit the signed transaction (on Submit tab)
-                KeyCode::Char('s') | KeyCode::Enter
-                    if self.pending_tx.is_some() && self.qr_modal_tab == 3 =>
-                {
-                    if let Some(ref tx) = self.pending_tx {
-                        if matches!(tx.status, TxSubmissionStatus::ReadyToSubmit) {
-                            return Some(Action::SubmitTransaction);
-                        }
-                    }
-                }
-                _ => {}
             }
-            return None;
+            KeyCode::Tab | KeyCode::Right => {
+                let max_tab = if self.qr.pending_signed.is_some() { 4 } else { 3 };
+                self.qr.modal_tab = (self.qr.modal_tab + 1) % max_tab;
+                return self.handle_qr_tab_change();
+            }
+            KeyCode::BackTab | KeyCode::Left => {
+                let max_tab = if self.qr.pending_signed.is_some() { 3 } else { 2 };
+                self.qr.modal_tab = if self.qr.modal_tab == 0 { max_tab } else { self.qr.modal_tab - 1 };
+                return self.handle_qr_tab_change();
+            }
+            KeyCode::Char('s') if self.qr.pending_unsigned.is_some() && self.qr.pending_signed.is_none() => {
+                self.qr.modal_tab = 2;
+                self.camera.status = Some(CameraScanStatus::Initializing);
+                self.camera.frames_captured = 0;
+                return Some(Action::StartSignatureScan);
+            }
+            KeyCode::Char('s') | KeyCode::Enter if self.qr.pending_signed.is_some() && self.qr.modal_tab == 3 => {
+                if let Some(ref tx) = self.qr.pending_signed {
+                    if matches!(tx.status, TxSubmissionStatus::ReadyToSubmit) {
+                        return Some(Action::SubmitTransaction);
+                    }
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// Handle tab changes in QR modal (start/stop camera scanning).
+    fn handle_qr_tab_change(&mut self) -> Option<Action> {
+        if self.qr.modal_tab == 2 && self.qr.pending_unsigned.is_some() && !self.camera.scanning {
+            self.camera.status = Some(CameraScanStatus::Initializing);
+            self.camera.frames_captured = 0;
+            return Some(Action::StartSignatureScan);
+        }
+        if self.qr.modal_tab != 2 && self.camera.scanning {
+            self.camera.status = None;
+            self.camera.preview = None;
+            self.camera.qr_bounds = None;
+            return Some(Action::StopSignatureScan);
+        }
+        None
+    }
+
+    fn handle_normal_key(&mut self, key: KeyEvent) -> Option<Action> {
+        // Handle QR modal
+        if self.qr.showing {
+            return self.handle_qr_modal_key(key);
         }
 
         // Handle help overlay
         if self.showing_help {
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('?') | KeyCode::Enter => {
-                    self.showing_help = false;
-                }
-                _ => {}
+            if matches!(key.code, KeyCode::Esc | KeyCode::Char('?') | KeyCode::Enter) {
+                self.showing_help = false;
             }
             return None;
         }
@@ -756,12 +758,12 @@ impl App {
             }
             // History view keys
             KeyCode::Char('l') if self.current_view == View::AccountHistory => {
-                if !self.loading_history && self.watched_account.is_some() {
+                if !self.history.loading && self.watched_account.is_some() {
                     return Some(Action::LoadStakingHistory);
                 }
             }
             KeyCode::Char('c') if self.current_view == View::AccountHistory => {
-                if self.loading_history {
+                if self.history.loading {
                     return Some(Action::CancelLoadingHistory);
                 }
             }
@@ -1191,13 +1193,13 @@ impl App {
         // - Either no history loaded, or loaded for different account
         if let Some(account) = &self.watched_account {
             let account_str = account.to_string();
-            let should_load = !self.loading_history
-                && (self.staking_history.is_empty()
-                    || self.history_loaded_for.as_ref() != Some(&account_str));
+            let should_load = !self.history.loading
+                && (self.history.points.is_empty()
+                    || self.history.loaded_for.as_ref() != Some(&account_str));
             if should_load {
-                self.staking_history.clear();
-                self.loading_history = true;
-                self.history_loaded_for = Some(account_str);
+                self.history.points.clear();
+                self.history.loading = true;
+                self.history.loaded_for = Some(account_str);
                 return Some(Action::LoadStakingHistory);
             }
         }
@@ -1229,7 +1231,7 @@ impl App {
             }
             Action::SetChainInfo(info) => {
                 self.chain_info = Some(info);
-                self.loading_chain = false;
+                self.loading.chain = false;
             }
             Action::SetActiveEra(era_info) => {
                 self.current_era = Some(era_info.index);
@@ -1240,7 +1242,7 @@ impl App {
             }
             Action::SetValidators(_validators) => {
                 // Raw validators - will be processed with exposures
-                self.loading_validators = true;
+                self.loading.validators = true;
             }
             Action::SetEraExposures(_era, _exposures) => {
                 // Will be combined with validators to compute APY
@@ -1250,7 +1252,7 @@ impl App {
             }
             Action::SetDisplayValidators(validators) => {
                 self.validators = validators;
-                self.loading_validators = false;
+                self.loading.validators = false;
                 // Select first row if we have validators
                 if !self.validators.is_empty() && self.validators_table_state.selected().is_none() {
                     self.validators_table_state.select(Some(0));
@@ -1264,15 +1266,15 @@ impl App {
                 }
             }
             Action::SetLoadingProgress(progress, bytes_loaded, _estimated_total) => {
-                self.loading_progress = progress;
+                self.loading.progress = progress;
                 // Track actual bytes transferred
                 if let Some(bytes) = bytes_loaded {
-                    self.bytes_loaded = bytes;
+                    self.loading.bytes_loaded = bytes;
                     // Compute real bandwidth from actual bytes
-                    if let Some(start) = self.load_start_time {
+                    if let Some(start) = self.loading.start_time {
                         let elapsed = start.elapsed().as_secs_f64();
                         if elapsed > 0.5 {
-                            self.estimated_bandwidth = Some(self.bytes_loaded as f64 / elapsed);
+                            self.loading.bandwidth = Some(self.loading.bytes_loaded as f64 / elapsed);
                         }
                     }
                 }
@@ -1326,93 +1328,93 @@ impl App {
                 // Handled in main.rs
             }
             Action::SetQRData(data, tx_info) => {
-                self.qr_data = data;
-                self.qr_tx_info = tx_info;
-                self.qr_frame = 0; // Reset animation frame for new QR
-                self.qr_modal_tab = 0; // Reset to QR tab
-                self.showing_qr = self.qr_data.is_some();
+                self.qr.data = data;
+                self.qr.tx_info = tx_info;
+                self.qr.frame = 0; // Reset animation frame for new QR
+                self.qr.modal_tab = 0; // Reset to QR tab
+                self.qr.showing = self.qr.data.is_some();
             }
             Action::SetPendingUnsignedTx(pending) => {
-                self.pending_unsigned_tx = pending;
+                self.qr.pending_unsigned = pending;
             }
             Action::StartSignatureScan => {
-                self.scanning_signature = true;
+                self.camera.scanning = true;
             }
             Action::StopSignatureScan => {
-                self.scanning_signature = false;
+                self.camera.scanning = false;
             }
             Action::SignatureScanned(_) => {
                 // Handled in main.rs - processes the signature and creates pending_tx
             }
             Action::QrScanFailed(ref error) => {
                 tracing::error!("QR scan failed: {}", error);
-                self.scanning_signature = false;
-                self.camera_scan_status = Some(CameraScanStatus::Error);
+                self.camera.scanning = false;
+                self.camera.status = Some(CameraScanStatus::Error);
             }
             Action::UpdateScanStatus(status) => {
                 // Increment frame counter on each scan update (activity indicator)
                 if matches!(status, QrScanStatus::Scanning | QrScanStatus::Detected) {
-                    self.camera_frames_captured = self.camera_frames_captured.saturating_add(1);
+                    self.camera.frames_captured = self.camera.frames_captured.saturating_add(1);
                 }
-                self.camera_scan_status = Some(match status {
+                self.camera.status = Some(match status {
                     QrScanStatus::Scanning => CameraScanStatus::Scanning,
                     QrScanStatus::Detected => CameraScanStatus::Detected,
                     QrScanStatus::Success => CameraScanStatus::Success,
                 });
             }
             Action::UpdateCameraPreview(pixels, width, height, bounds) => {
-                self.camera_preview = Some(pixels);
-                self.camera_preview_size = (width, height);
-                self.qr_bounds = bounds;
+                self.camera.preview = Some(pixels);
+                self.camera.preview_size = (width, height);
+                self.camera.qr_bounds = bounds;
             }
             Action::SubmitTransaction => {
                 // Handled in main.rs - submits the pending_tx
             }
             Action::SetTxStatus(status) => {
-                if let Some(ref mut tx) = self.pending_tx {
+                if let Some(ref mut tx) = self.qr.pending_signed {
                     tx.status = status;
                 }
             }
             Action::ClearPendingTx => {
-                self.pending_tx = None;
-                self.pending_unsigned_tx = None;
-                self.scanning_signature = false;
+                self.qr.pending_signed = None;
+                self.qr.pending_unsigned = None;
+                self.camera.scanning = false;
             }
             Action::SetStakingHistory(history) => {
-                self.staking_history = history;
-                self.loading_history = false;
+                self.history.points = history;
+                self.history.loading = false;
             }
             Action::AddStakingHistoryPoint(point) => {
                 // Check if this era already exists (avoid duplicates)
-                if let Some(existing_pos) = self.staking_history.iter().position(|p| p.era == point.era) {
+                if let Some(existing_pos) = self.history.points.iter().position(|p| p.era == point.era) {
                     // Replace existing entry with new data
-                    self.staking_history[existing_pos] = point;
+                    self.history.points[existing_pos] = point;
                 } else {
                     // Insert in era order (oldest first)
                     let pos = self
-                        .staking_history
+                        .history.points
                         .iter()
                         .position(|p| p.era > point.era)
-                        .unwrap_or(self.staking_history.len());
-                    self.staking_history.insert(pos, point);
+                        .unwrap_or(self.history.points.len());
+                    self.history.points.insert(pos, point);
                 }
             }
             Action::LoadStakingHistory => {
                 // Manual load request (clear if needed and start loading)
-                if !self.loading_history {
-                    self.staking_history.clear();
-                    self.loading_history = true;
+                if !self.history.loading {
+                    self.history.points.clear();
+                    self.history.loading = true;
                     if let Some(account) = &self.watched_account {
-                        self.history_loaded_for = Some(account.to_string());
+                        self.history.loaded_for = Some(account.to_string());
                     }
                 }
                 // Actual loading is handled in main.rs
             }
             Action::CancelLoadingHistory => {
-                self.loading_history = false;
+                self.history.loading = false;
             }
             Action::HistoryLoadingComplete => {
-                self.loading_history = false;
+                self.history.loading = false;
             }
             Action::SwitchNetwork(network) => {
                 self.network = network;
@@ -1632,7 +1634,7 @@ impl App {
                 PoolSortField::Name => a.name.cmp(&b.name),
                 PoolSortField::State => format!("{:?}", a.state).cmp(&format!("{:?}", b.state)),
                 PoolSortField::Members => a.member_count.cmp(&b.member_count),
-                PoolSortField::Points => a.points.cmp(&b.points),
+                PoolSortField::Points => a.total_bonded.cmp(&b.total_bonded),
                 PoolSortField::Apy => {
                     let a_apy = a.apy.unwrap_or(0.0);
                     let b_apy = b.apy.unwrap_or(0.0);

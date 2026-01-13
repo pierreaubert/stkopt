@@ -17,6 +17,7 @@ impl OptimizationSection {
         let entity2 = app.entity.clone();
         let selected_count = app.selected_validators.len();
         let validator_count = app.validators.len();
+        let current_strategy = app.optimization_strategy;
 
         div()
             .flex()
@@ -54,10 +55,24 @@ impl OptimizationSection {
                                 .flex()
                                 .flex_col()
                                 .gap_3()
-                                .child(strategy_option("Top APY", "Select validators with highest estimated APY", true, &theme))
-                                .child(strategy_option("Random from Top", "Randomly select from top-performing validators", false, &theme))
-                                .child(strategy_option("Diversify by Stake", "Balance selection across different stake levels", false, &theme))
-                                .child(strategy_option("Min Commission", "Prioritize validators with lowest commission", false, &theme)),
+                                .children(SelectionStrategy::all().iter().map(|strategy| {
+                                    let strategy_value = *strategy;
+                                    let is_selected = strategy_value == current_strategy;
+                                    let entity = app.entity.clone();
+
+                                    strategy_option_clickable(
+                                        strategy.label(),
+                                        strategy.description(),
+                                        is_selected,
+                                        &theme,
+                                        move |_window, cx| {
+                                            entity.update(cx, |this, cx| {
+                                                this.optimization_strategy = strategy_value;
+                                                cx.notify();
+                                            });
+                                        }
+                                    )
+                                })),
                         ),
                 ),
             )
@@ -72,8 +87,8 @@ impl OptimizationSection {
                             div()
                                 .flex()
                                 .gap_4()
-                                .child(param_field("Max Validators", "16", &theme))
-                                .child(param_field("Max Commission (%)", "15", &theme)),
+                                .child(param_field("Max Validators", &app.optimization_target_count.to_string(), &theme))
+                                .child(param_field("Max Commission (%)", &format!("{:.0}", app.optimization_max_commission * 100.0), &theme)),
                         ),
                 ),
             )
@@ -89,10 +104,10 @@ impl OptimizationSection {
                             .on_click(move |_window, cx| {
                                 entity.update(cx, |this, cx| {
                                     let criteria = OptimizationCriteria {
-                                        max_commission: 0.15,
+                                        max_commission: this.optimization_max_commission,
                                         exclude_blocked: true,
-                                        target_count: 16,
-                                        strategy: SelectionStrategy::TopApy,
+                                        target_count: this.optimization_target_count,
+                                        strategy: this.optimization_strategy,
                                     };
                                     let result = optimize_selection(&this.validators, &criteria);
                                     this.selected_validators = result.selected_indices.into_iter().collect();
@@ -333,16 +348,21 @@ impl OptimizationSection {
     }
 }
 
-fn strategy_option(
+fn strategy_option_clickable<F>(
     title: &'static str,
     description: &'static str,
     selected: bool,
     theme: &gpui_ui_kit::theme::Theme,
-) -> impl IntoElement {
+    on_click: F,
+) -> Stateful<Div>
+where
+    F: Fn(&mut Window, &mut App) + 'static,
+{
     let border = if selected { theme.accent } else { theme.border };
     let bg = if selected { theme.surface_hover } else { theme.surface };
 
     div()
+        .id(SharedString::from(format!("strategy-{}", title)))
         .flex()
         .items_start()
         .gap_3()
@@ -352,6 +372,9 @@ fn strategy_option(
         .border_color(border)
         .bg(bg)
         .cursor_pointer()
+        .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+            on_click(window, cx);
+        })
         .child(
             div()
                 .mt(px(2.0))
@@ -387,9 +410,10 @@ fn strategy_option(
 
 fn param_field(
     label: &'static str,
-    value: &'static str,
+    value: &str,
     theme: &gpui_ui_kit::theme::Theme,
 ) -> impl IntoElement {
+    let value = SharedString::from(value.to_string());
     div()
         .flex()
         .flex_col()

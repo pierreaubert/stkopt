@@ -94,6 +94,8 @@ pub struct StkoptApp {
     pub validator_search: String,
     /// Staking history data points
     pub staking_history: Vec<HistoryPoint>,
+    /// Whether history is currently loading
+    pub history_loading: bool,
     /// Available nomination pools
     pub pools: Vec<PoolInfo>,
     /// Whether settings panel is visible
@@ -112,6 +114,12 @@ pub struct StkoptApp {
     pub show_help: bool,
     /// Optimization result (estimated avg APY)
     pub optimization_result: Option<f64>,
+    /// Selected optimization strategy
+    pub optimization_strategy: crate::optimization::SelectionStrategy,
+    /// Optimization max commission (0.0 - 1.0)
+    pub optimization_max_commission: f64,
+    /// Optimization target validator count
+    pub optimization_target_count: usize,
     /// QR payload hex string for signing
     pub qr_payload: Option<String>,
     /// Chain handle for async operations
@@ -128,6 +136,129 @@ pub struct StkoptApp {
     pub show_logs: bool,
     /// Saved accounts (address book)
     pub address_book: Vec<SavedAccount>,
+    /// Whether staking modal is visible
+    pub show_staking_modal: bool,
+    /// Current staking operation type
+    pub staking_operation: StakingOperation,
+    /// Amount input for staking operations
+    pub staking_amount_input: String,
+    /// Pending transaction payload (for QR display/signing)
+    pub pending_tx_payload: Option<crate::chain::TransactionPayload>,
+    /// Whether QR modal is visible
+    pub show_qr_modal: bool,
+    /// Current tab in QR modal
+    pub qr_modal_tab: QrModalTab,
+    /// Transaction submission status message
+    pub tx_status_message: Option<String>,
+    /// Whether pool operations modal is visible
+    pub show_pool_modal: bool,
+    /// Current pool operation type
+    pub pool_operation: PoolOperation,
+    /// Selected pool ID for operation
+    pub selected_pool_id: Option<u32>,
+    /// Amount input for pool operations
+    pub pool_amount_input: String,
+    /// Active QR reader (camera)
+    pub qr_reader: Option<crate::qr_reader::QrReader>,
+    /// Latest camera preview frame
+    pub camera_preview: Option<crate::qr_reader::CameraPreview>,
+    /// Scanned signature data (from Vault QR)
+    pub scanned_signature: Option<Vec<u8>>,
+}
+
+/// Type of pool operation being performed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PoolOperation {
+    #[default]
+    Join,
+    BondExtra,
+    ClaimPayout,
+    Unbond,
+    Withdraw,
+}
+
+impl PoolOperation {
+    pub fn label(&self) -> &'static str {
+        match self {
+            PoolOperation::Join => "Join Pool",
+            PoolOperation::BondExtra => "Bond Extra",
+            PoolOperation::ClaimPayout => "Claim Payout",
+            PoolOperation::Unbond => "Unbond",
+            PoolOperation::Withdraw => "Withdraw",
+        }
+    }
+
+    pub fn requires_amount(&self) -> bool {
+        match self {
+            PoolOperation::Join | PoolOperation::BondExtra | PoolOperation::Unbond => true,
+            PoolOperation::ClaimPayout | PoolOperation::Withdraw => false,
+        }
+    }
+}
+
+/// Type of staking operation being performed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StakingOperation {
+    #[default]
+    Bond,
+    Unbond,
+    BondExtra,
+    Rebond,
+    WithdrawUnbonded,
+    Nominate,
+    Chill,
+    ClaimRewards,
+}
+
+impl StakingOperation {
+    pub fn label(&self) -> &'static str {
+        match self {
+            StakingOperation::Bond => "Bond",
+            StakingOperation::Unbond => "Unbond",
+            StakingOperation::BondExtra => "Bond Extra",
+            StakingOperation::Rebond => "Rebond",
+            StakingOperation::WithdrawUnbonded => "Withdraw",
+            StakingOperation::Nominate => "Nominate",
+            StakingOperation::Chill => "Stop Nominating",
+            StakingOperation::ClaimRewards => "Claim Rewards",
+        }
+    }
+
+    pub fn requires_amount(&self) -> bool {
+        match self {
+            StakingOperation::Bond
+            | StakingOperation::Unbond
+            | StakingOperation::BondExtra
+            | StakingOperation::Rebond => true,
+            StakingOperation::WithdrawUnbonded
+            | StakingOperation::Nominate
+            | StakingOperation::Chill
+            | StakingOperation::ClaimRewards => false,
+        }
+    }
+}
+
+/// Tabs in the QR modal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QrModalTab {
+    #[default]
+    QrCode,
+    ScanSignature,
+    Submit,
+}
+
+impl QrModalTab {
+    pub fn all() -> &'static [QrModalTab] {
+        &[QrModalTab::QrCode, QrModalTab::ScanSignature, QrModalTab::Submit]
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            QrModalTab::QrCode => "QR Code",
+            QrModalTab::ScanSignature => "Scan Signature",
+            QrModalTab::Submit => "Submit",
+        }
+    }
 }
 
 /// A saved account in the address book.
@@ -214,63 +345,20 @@ impl Network {
     }
 }
 
-/// Staking information for an account
-#[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
-pub struct StakingInfo {
-    pub total_balance: u128,
-    pub transferable: u128,
-    pub bonded: u128,
-    pub unbonding: u128,
-    pub rewards_pending: u128,
-    pub is_nominating: bool,
-    pub nomination_count: usize,
-}
+/// Type alias for staking information (from stkopt-core).
+pub type StakingInfo = stkopt_core::display::StakingInfo;
 
-/// Validator information
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct ValidatorInfo {
-    pub address: String,
-    pub name: Option<String>,
-    pub commission: f64,
-    pub total_stake: u128,
-    pub own_stake: u128,
-    pub nominator_count: u32,
-    pub apy: Option<f64>,
-    pub blocked: bool,
-}
+/// Type alias for validator information (from stkopt-core).
+pub type ValidatorInfo = stkopt_core::display::DisplayValidator;
 
-/// Historical staking data point
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct HistoryPoint {
-    pub era: u32,
-    pub staked: u128,
-    pub rewards: u128,
-    pub apy: f64,
-}
+/// Type alias for historical staking data point (from stkopt-core).
+pub type HistoryPoint = stkopt_core::display::StakingHistoryPoint;
 
-/// Nomination pool information
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct PoolInfo {
-    pub id: u32,
-    pub name: String,
-    pub state: PoolState,
-    pub member_count: u32,
-    pub total_bonded: u128,
-    pub commission: Option<f64>,
-}
+/// Type alias for nomination pool information (from stkopt-core).
+pub type PoolInfo = stkopt_core::display::DisplayPool;
 
-/// Pool state
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
-pub enum PoolState {
-    Open,
-    Blocked,
-    Destroying,
-}
+/// Type alias for pool state (from stkopt-core).
+pub type PoolState = stkopt_core::PoolState;
 
 /// Generate mock pools for demo/testing
 pub fn generate_mock_pools(count: usize) -> Vec<PoolInfo> {
@@ -297,6 +385,7 @@ pub fn generate_mock_pools(count: usize) -> Vec<PoolInfo> {
                 member_count: 50 + (i * 17 % 500) as u32,
                 total_bonded: 100_000_000_000_000u128 + (i as u128 * 50_000_000_000_000),
                 commission: if i % 3 == 0 { Some(5.0 + (i % 10) as f64) } else { None },
+                apy: Some(12.0 + (i % 8) as f64 * 0.5), // Mock APY
             }
         })
         .collect()
@@ -312,6 +401,7 @@ impl StkoptApp {
             crate::persistence::NetworkConfig::Polkadot => Network::Polkadot,
             crate::persistence::NetworkConfig::Kusama => Network::Kusama,
             crate::persistence::NetworkConfig::Westend => Network::Westend,
+            crate::persistence::NetworkConfig::Paseo => Network::Westend, // Paseo not yet supported in GPUI
             crate::persistence::NetworkConfig::Custom => Network::Polkadot,
         };
         
@@ -373,6 +463,7 @@ impl StkoptApp {
             validator_sort_asc: false,
             validator_search: String::new(),
             staking_history: Vec::new(),
+            history_loading: false,
             pools: Vec::new(),
             show_settings: false,
             settings_theme: config.theme,
@@ -382,6 +473,9 @@ impl StkoptApp {
             settings_show_testnets: config.show_testnets,
             show_help: false,
             optimization_result: None,
+            optimization_strategy: crate::optimization::SelectionStrategy::default(),
+            optimization_max_commission: 0.15,
+            optimization_target_count: 16,
             qr_payload: None,
             chain_handle: Some(chain_handle),
             connection_error: None,
@@ -390,6 +484,20 @@ impl StkoptApp {
             log_buffer,
             show_logs: false,
             address_book: Vec::new(),
+            show_staking_modal: false,
+            staking_operation: StakingOperation::default(),
+            staking_amount_input: String::new(),
+            pending_tx_payload: None,
+            show_qr_modal: false,
+            qr_modal_tab: QrModalTab::default(),
+            tx_status_message: None,
+            show_pool_modal: false,
+            pool_operation: PoolOperation::default(),
+            selected_pool_id: None,
+            pool_amount_input: String::new(),
+            qr_reader: None,
+            camera_preview: None,
+            scanned_signature: None,
         };
         
         instance.load_cache(cx);
@@ -443,7 +551,7 @@ impl StkoptApp {
     }
     
     /// Apply a single chain update to the app state.
-    fn apply_chain_update(&mut self, update: crate::chain::ChainUpdate, cx: &mut Context<Self>) {
+    pub fn apply_chain_update(&mut self, update: crate::chain::ChainUpdate, cx: &mut Context<Self>) {
         use crate::chain::ChainUpdate;
         
         match update {
@@ -483,6 +591,27 @@ impl StkoptApp {
             ChainUpdate::HistoryLoaded(history) => {
                 self.staking_history = history;
             }
+            ChainUpdate::QrPayloadGenerated(payload) => {
+                // Store the generated QR payload for display
+                tracing::info!("QR payload generated: {}", payload.description);
+                // TODO: Store in app state for display in QR modal
+            }
+            ChainUpdate::TxSubmissionUpdate(result) => {
+                // Handle transaction submission result
+                use crate::chain::TxSubmissionResult;
+                match result {
+                    TxSubmissionResult::InBlock { block_hash } => {
+                        tracing::info!("Transaction in block: 0x{}", hex::encode(block_hash));
+                    }
+                    TxSubmissionResult::Finalized { block_hash } => {
+                        tracing::info!("Transaction finalized in block: 0x{}", hex::encode(block_hash));
+                    }
+                    TxSubmissionResult::Dropped(reason) => {
+                        tracing::warn!("Transaction dropped: {}", reason);
+                        self.connection_error = Some(format!("Transaction dropped: {}", reason));
+                    }
+                }
+            }
             ChainUpdate::Error(e) => {
                 tracing::error!("Chain error: {}", e);
                 self.connection_error = Some(e);
@@ -501,6 +630,7 @@ impl StkoptApp {
             theme: self.settings_theme,
             auto_connect: self.settings_auto_connect,
             show_testnets: self.settings_show_testnets,
+            accounts: Vec::new(), // Legacy TUI format, not used in GPUI
         };
 
         if let Err(e) = crate::persistence::save_config(&config) {
@@ -526,12 +656,312 @@ impl StkoptApp {
         self.address_book.retain(|a| a.address != address || a.network != self.network);
     }
 
+    /// Open the staking modal with a specific operation.
+    pub fn open_staking_modal(&mut self, operation: StakingOperation, cx: &mut Context<Self>) {
+        self.staking_operation = operation;
+        self.staking_amount_input.clear();
+        self.show_staking_modal = true;
+        cx.notify();
+    }
+
+    /// Generate QR payload for the current staking operation.
+    pub fn generate_staking_qr(&mut self, cx: &mut Context<Self>) {
+        let Some(ref chain_handle) = self.chain_handle else {
+            self.connection_error = Some("Not connected".to_string());
+            cx.notify();
+            return;
+        };
+
+        let Some(ref address) = self.watched_account else {
+            self.connection_error = Some("No account selected".to_string());
+            cx.notify();
+            return;
+        };
+
+        // Parse the account address
+        let signer = match address.parse::<subxt::utils::AccountId32>() {
+            Ok(id) => id,
+            Err(e) => {
+                self.connection_error = Some(format!("Invalid address: {}", e));
+                cx.notify();
+                return;
+            }
+        };
+
+        // Parse amount if needed
+        let amount = if self.staking_operation.requires_amount() {
+            let decimals = 10u128.pow(10); // DOT has 10 decimals
+            match self.staking_amount_input.parse::<f64>() {
+                Ok(val) => (val * decimals as f64) as u128,
+                Err(_) => {
+                    self.connection_error = Some("Invalid amount".to_string());
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            0
+        };
+
+        let handle = chain_handle.clone();
+        let operation = self.staking_operation;
+        let mut async_cx = cx.to_async();
+
+        cx.spawn(move |this: gpui::WeakEntity<Self>, _cx: &mut gpui::AsyncApp| async move {
+            let result = match operation {
+                StakingOperation::Bond => handle.create_bond_payload(signer, amount).await,
+                StakingOperation::Unbond => handle.create_unbond_payload(signer, amount).await,
+                StakingOperation::BondExtra => handle.create_bond_extra_payload(signer, amount).await,
+                StakingOperation::WithdrawUnbonded => handle.create_withdraw_unbonded_payload(signer).await,
+                StakingOperation::Chill => handle.create_chill_payload(signer).await,
+                StakingOperation::Rebond | StakingOperation::Nominate | StakingOperation::ClaimRewards => {
+                    Err("Not implemented yet".to_string())
+                }
+            };
+
+            match result {
+                Ok(payload) => {
+                    let _ = this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
+                        this.pending_tx_payload = Some(payload);
+                        this.show_staking_modal = false;
+                        this.show_qr_modal = true;
+                        this.qr_modal_tab = QrModalTab::QrCode;
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    let _ = this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
+                        this.connection_error = Some(e);
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Open the pool modal with a specific operation.
+    pub fn open_pool_modal(&mut self, operation: PoolOperation, pool_id: Option<u32>, cx: &mut Context<Self>) {
+        self.pool_operation = operation;
+        self.selected_pool_id = pool_id;
+        self.pool_amount_input.clear();
+        self.show_pool_modal = true;
+        cx.notify();
+    }
+
+    /// Generate QR payload for the current pool operation.
+    pub fn generate_pool_qr(&mut self, cx: &mut Context<Self>) {
+        let Some(ref chain_handle) = self.chain_handle else {
+            self.connection_error = Some("Not connected".to_string());
+            cx.notify();
+            return;
+        };
+
+        let Some(ref address) = self.watched_account else {
+            self.connection_error = Some("No account selected".to_string());
+            cx.notify();
+            return;
+        };
+
+        // Parse the account address
+        let signer = match address.parse::<subxt::utils::AccountId32>() {
+            Ok(id) => id,
+            Err(e) => {
+                self.connection_error = Some(format!("Invalid address: {}", e));
+                cx.notify();
+                return;
+            }
+        };
+
+        // Parse amount if needed
+        let amount = if self.pool_operation.requires_amount() {
+            let decimals = 10u128.pow(10);
+            match self.pool_amount_input.parse::<f64>() {
+                Ok(val) => (val * decimals as f64) as u128,
+                Err(_) => {
+                    self.connection_error = Some("Invalid amount".to_string());
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            0
+        };
+
+        let pool_id = self.selected_pool_id;
+        let handle = chain_handle.clone();
+        let operation = self.pool_operation;
+        let mut async_cx = cx.to_async();
+
+        cx.spawn(move |this: gpui::WeakEntity<Self>, _cx: &mut gpui::AsyncApp| async move {
+            let result = match operation {
+                PoolOperation::Join => {
+                    if let Some(id) = pool_id {
+                        handle.create_pool_join_payload(signer, id, amount).await
+                    } else {
+                        Err("No pool selected".to_string())
+                    }
+                }
+                PoolOperation::BondExtra => {
+                    handle.create_pool_bond_extra_payload(signer, amount).await
+                }
+                PoolOperation::ClaimPayout => {
+                    handle.create_pool_claim_payload(signer).await
+                }
+                PoolOperation::Unbond => {
+                    handle.create_pool_unbond_payload(signer, amount).await
+                }
+                PoolOperation::Withdraw => {
+                    handle.create_pool_withdraw_payload(signer).await
+                }
+            };
+
+            match result {
+                Ok(payload) => {
+                    let _ = this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
+                        this.pending_tx_payload = Some(payload);
+                        this.show_pool_modal = false;
+                        this.show_qr_modal = true;
+                        this.qr_modal_tab = QrModalTab::QrCode;
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    let _ = this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
+                        this.connection_error = Some(e);
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Load staking history for the current account.
+    pub fn load_history(&mut self, cx: &mut Context<Self>) {
+        let Some(ref address) = self.watched_account else {
+            tracing::warn!("No account to load history for");
+            return;
+        };
+        let Some(ref chain_handle) = self.chain_handle else {
+            tracing::warn!("Not connected to chain");
+            return;
+        };
+
+        self.history_loading = true;
+        cx.notify();
+
+        let address = address.clone();
+        let chain_handle = chain_handle.clone();
+        let num_eras = 30u32; // Load last 30 eras
+        let mut async_cx = cx.to_async();
+
+        cx.spawn(move |this: gpui::WeakEntity<Self>, _cx: &mut gpui::AsyncApp| async move {
+            let result = chain_handle.fetch_history(address, num_eras).await;
+            let _ = this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
+                this.history_loading = false;
+                match result {
+                    Ok(history) => {
+                        tracing::info!("History loaded: {} points", history.len());
+                        this.staking_history = history;
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to load history: {}", e);
+                        this.connection_error = Some(format!("Failed to load history: {}", e));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Start the camera for QR scanning.
+    pub fn start_camera(&mut self, cx: &mut Context<Self>) {
+        // Ensure camera permission on macOS
+        #[cfg(target_os = "macos")]
+        {
+            if let Err(e) = crate::tcc::ensure_camera_permission() {
+                tracing::error!("Camera permission denied: {}", e);
+                self.connection_error = Some(format!("Camera permission denied: {}", e));
+                cx.notify();
+                return;
+            }
+        }
+
+        // Start the QR reader
+        match crate::qr_reader::QrReader::new() {
+            Ok(reader) => {
+                self.qr_reader = Some(reader);
+                tracing::info!("Camera started for QR scanning");
+            }
+            Err(e) => {
+                tracing::error!("Failed to start camera: {}", e);
+                self.connection_error = Some(format!("Failed to start camera: {}", e));
+            }
+        }
+        cx.notify();
+    }
+
+    /// Stop the camera.
+    pub fn stop_camera(&mut self, cx: &mut Context<Self>) {
+        if let Some(mut reader) = self.qr_reader.take() {
+            reader.stop();
+            tracing::info!("Camera stopped");
+        }
+        self.camera_preview = None;
+        cx.notify();
+    }
+
+    /// Poll the camera for scan results (called from render loop).
+    pub fn poll_camera(&mut self, cx: &mut Context<Self>) {
+        // Collect results first, then process
+        let results: Vec<_> = if let Some(ref reader) = self.qr_reader {
+            std::iter::from_fn(|| reader.try_recv()).collect()
+        } else {
+            return;
+        };
+
+        for result in results {
+            match result {
+                crate::qr_reader::QrScanResult::Success(data, preview) => {
+                    tracing::info!("QR code scanned: {} bytes", data.len());
+                    self.camera_preview = Some(preview);
+                    self.scanned_signature = Some(data.clone());
+                    // Stop scanning after successful decode
+                    if let Some(mut reader) = self.qr_reader.take() {
+                        reader.stop();
+                    }
+                    // Move to submit tab
+                    self.qr_modal_tab = QrModalTab::Submit;
+                    self.tx_status_message = Some(format!("Signature scanned ({} bytes)", data.len()));
+                    cx.notify();
+                    return;
+                }
+                crate::qr_reader::QrScanResult::Scanning(preview) => {
+                    self.camera_preview = Some(preview);
+                }
+                crate::qr_reader::QrScanResult::Detected(preview) => {
+                    self.camera_preview = Some(preview);
+                }
+                crate::qr_reader::QrScanResult::Error(e) => {
+                    tracing::error!("Camera error: {}", e);
+                    self.connection_error = Some(e);
+                    if let Some(mut reader) = self.qr_reader.take() {
+                        reader.stop();
+                    }
+                }
+            }
+        }
+    }
+
     fn render_sidebar(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let entity = self.entity.clone();
         let current_section = self.current_section;
 
         let mut nav = div()
+            .id("sidebar-root")
             .flex()
             .flex_col()
             .w(px(220.0))
@@ -540,7 +970,10 @@ impl StkoptApp {
             .bg(theme.surface)
             .border_r_1()
             .border_color(theme.border)
-            .py_4();
+            .py_4()
+            .on_mouse_down(MouseButton::Left, |_event, _window, _cx| {
+                tracing::info!("[SIDEBAR] Root clicked!");
+            });
 
         // App title and network selector
         nav = nav.child(
@@ -679,17 +1112,25 @@ impl StkoptApp {
         };
 
         div()
+            .id("content-outer")
             .flex_1()
             .flex()
             .flex_col()
             .overflow_hidden()
             .bg(theme.background)
+            .on_mouse_down(MouseButton::Left, |_event, _window, _cx| {
+                tracing::info!("[CONTENT] Outer container clicked!");
+            })
             .child(
                 div()
                     .id("content-scroll")
                     .flex_1()
                     .overflow_y_scroll()
                     .p_6()
+                    .bg(gpui::rgba(0x00000000))  // Transparent but present for hit-testing
+                    .on_mouse_down(MouseButton::Left, |_event, _window, _cx| {
+                        tracing::info!("[CONTENT] Scroll container clicked!");
+                    })
                     .child(content),
             )
     }
@@ -699,6 +1140,9 @@ impl Render for StkoptApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Process any pending chain updates
         self.process_pending_updates(cx);
+
+        // Poll camera for QR scan results
+        self.poll_camera(cx);
         
         let theme = cx.theme();
         let entity = self.entity.clone();
@@ -710,7 +1154,10 @@ impl Render for StkoptApp {
             .h_full()
             .bg(theme.background)
             .text_color(theme.text_primary)
-            .flex();
+            .flex()
+            .on_mouse_down(MouseButton::Left, |_event, _window, _cx| {
+                tracing::info!("[ROOT] Root element clicked!");
+            });
 
         // Add keyboard handler for settings shortcut
         #[cfg(target_os = "macos")]
@@ -731,10 +1178,21 @@ impl Render for StkoptApp {
                             cx.notify();
                         });
                     }
-                    // Escape to close settings/help/logs
+                    // Escape to close modals/settings/help/logs
                     if event.keystroke.key == "escape" {
                         entity.update(cx, |this, cx| {
-                            if this.show_help {
+                            if this.show_qr_modal {
+                                this.show_qr_modal = false;
+                                this.pending_tx_payload = None;
+                                this.stop_camera(cx);
+                                cx.notify();
+                            } else if this.show_staking_modal {
+                                this.show_staking_modal = false;
+                                cx.notify();
+                            } else if this.show_pool_modal {
+                                this.show_pool_modal = false;
+                                cx.notify();
+                            } else if this.show_help {
                                 this.show_help = false;
                                 cx.notify();
                             } else if this.show_settings {
@@ -774,10 +1232,21 @@ impl Render for StkoptApp {
                             cx.notify();
                         });
                     }
-                    // Escape to close settings/help/logs
+                    // Escape to close modals/settings/help/logs
                     if event.keystroke.key == "escape" {
                         entity.update(cx, |this, cx| {
-                            if this.show_help {
+                            if this.show_qr_modal {
+                                this.show_qr_modal = false;
+                                this.pending_tx_payload = None;
+                                this.stop_camera(cx);
+                                cx.notify();
+                            } else if this.show_staking_modal {
+                                this.show_staking_modal = false;
+                                cx.notify();
+                            } else if this.show_pool_modal {
+                                this.show_pool_modal = false;
+                                cx.notify();
+                            } else if this.show_help {
                                 this.show_help = false;
                                 cx.notify();
                             } else if this.show_settings {
@@ -800,12 +1269,7 @@ impl Render for StkoptApp {
             });
         }
 
-        if self.show_help {
-            root = root
-                .child(self.render_sidebar(cx))
-                .child(self.render_content(cx))
-                .child(HelpOverlay::render(self, cx));
-        } else if self.show_settings {
+        if self.show_settings {
             root = root.child(
                 div()
                     .id("settings-scroll")
@@ -831,6 +1295,20 @@ impl Render for StkoptApp {
             root = root
                 .child(self.render_sidebar(cx))
                 .child(self.render_content(cx));
+        }
+
+        // Render overlays on top
+        if self.show_help {
+            root = root.child(HelpOverlay::render(self, cx));
+        }
+        if self.show_staking_modal {
+            root = root.child(crate::views::StakingModal::render(self, cx));
+        }
+        if self.show_pool_modal {
+            root = root.child(crate::views::PoolModal::render(self, cx));
+        }
+        if self.show_qr_modal {
+            root = root.child(crate::views::QrModal::render(self, cx));
         }
 
         root

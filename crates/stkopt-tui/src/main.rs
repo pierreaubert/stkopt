@@ -16,7 +16,6 @@ use action::{AccountStatus, Action, PendingTransaction, TxSubmissionStatus};
 use app::App;
 use clap::Parser;
 use color_eyre::Result;
-use config::AppConfig;
 use event::{Event, EventHandler};
 use log_buffer::{LogBuffer, LogBufferLayer};
 use ratatui::crossterm::event::KeyCode;
@@ -74,6 +73,29 @@ enum StakingOp {
     PoolWithdraw {
         signer: subxt::utils::AccountId32,
     },
+}
+
+/// Unified request type for all chain operations.
+/// Consolidates 5 separate channels into one.
+#[derive(Debug)]
+enum ChainRequest {
+    /// Fetch account data.
+    FetchAccount(subxt::utils::AccountId32),
+    /// Generate QR code for nomination.
+    GenerateNominationQR {
+        signer: subxt::utils::AccountId32,
+        targets: Vec<subxt::utils::AccountId32>,
+    },
+    /// Load staking history.
+    FetchHistory {
+        account: subxt::utils::AccountId32,
+        num_eras: u32,
+        cancel_rx: tokio::sync::watch::Receiver<bool>,
+    },
+    /// Execute a staking operation (generates QR).
+    ExecuteStakingOp(StakingOp),
+    /// Submit a signed transaction.
+    SubmitTransaction(Vec<u8>),
 }
 
 /// Staking Optimizer TUI - Terminal interface for Polkadot staking optimization.
@@ -194,35 +216,13 @@ async fn main() -> Result<()> {
         return run_update_mode(network, connection_config.clone(), args.address, args.eras).await;
     }
 
-    // Create action channel (bounded to prevent memory exhaustion from slow UI)
+    // Create action channel for responses from chain task to UI
     const ACTION_CHANNEL_CAPACITY: usize = 100;
     let (action_tx, mut action_rx) = mpsc::channel::<Action>(ACTION_CHANNEL_CAPACITY);
 
-    // Create account request channel (bounded, single account is typical)
-    const ACCOUNT_CHANNEL_CAPACITY: usize = 10;
-    let (account_tx, account_rx) =
-        mpsc::channel::<subxt::utils::AccountId32>(ACCOUNT_CHANNEL_CAPACITY);
-
-    // Create QR generation request channel (bounded, single QR at a time)
-    const QR_CHANNEL_CAPACITY: usize = 10;
-    let (qr_tx, qr_rx) = mpsc::channel::<(subxt::utils::AccountId32, Vec<subxt::utils::AccountId32>)>(
-        QR_CHANNEL_CAPACITY,
-    );
-
-    // Create history loading request channel (bounded, single history load at a time)
-    const HISTORY_CHANNEL_CAPACITY: usize = 5;
-    let (history_tx, history_rx) = mpsc::channel::<(
-        subxt::utils::AccountId32,
-        u32,
-        tokio::sync::watch::Receiver<bool>,
-    )>(HISTORY_CHANNEL_CAPACITY);
-
-    // Create staking operation channel
-    const STAKING_OP_CHANNEL_CAPACITY: usize = 10;
-    let (staking_op_tx, staking_op_rx) = mpsc::channel::<StakingOp>(STAKING_OP_CHANNEL_CAPACITY);
-
-    // Create transaction submission channel
-    let (tx_submit_tx, tx_submit_rx) = mpsc::channel::<Vec<u8>>(4);
+    // Create unified request channel for all chain operations
+    const REQUEST_CHANNEL_CAPACITY: usize = 50;
+    let (request_tx, request_rx) = mpsc::channel::<ChainRequest>(REQUEST_CHANNEL_CAPACITY);
 
     // Cancellation sender for history loading
     let (history_cancel_tx, history_cancel_rx) = tokio::sync::watch::channel(false);
@@ -231,7 +231,7 @@ async fn main() -> Result<()> {
     let theme = theme::Theme::detect();
 
     // Load configuration
-    let mut app_config = AppConfig::load();
+    let mut app_config = config::load_config().unwrap_or_default();
     tracing::info!("Loaded {} saved account(s)", app_config.accounts.len());
 
     // Create application state
@@ -246,12 +246,12 @@ async fn main() -> Result<()> {
         {
             tracing::info!("Loaded {} cached validators", cached_validators.len());
             app.validators = cached_validators;
-            app.using_cached_data = true;
+            app.loading.using_cache = true;
         }
     }
 
     // Load last saved account if available
-    let restored_account = if let Some(last_addr) = app_config.last_account()
+    let restored_account = if let Some(last_addr) = app_config.last_account.as_deref()
         && let Ok(account) = last_addr.parse::<subxt::utils::AccountId32>()
     {
         tracing::info!("Restoring last used account: {}", last_addr);
@@ -262,9 +262,11 @@ async fn main() -> Result<()> {
             && let Ok(cached_history) = db.get_history(network, last_addr, Some(30))
             && !cached_history.is_empty()
         {
-            tracing::info!("Loaded {} cached history points", cached_history.len());
-            app.staking_history = cached_history;
-            app.history_loaded_for = Some(last_addr.to_string());
+            // Filter out cached entries with unrealistic APY (likely bad data)
+            let filtered: Vec<_> = cached_history.into_iter().filter(|h| h.apy <= 0.50).collect();
+            tracing::info!("Loaded {} cached history points", filtered.len());
+            app.history.points = filtered;
+            app.history.loaded_for = Some(last_addr.to_string());
         }
 
         Some(account)
@@ -298,33 +300,13 @@ async fn main() -> Result<()> {
 
     // Spawn chain connection task
     let chain_action_tx = action_tx.clone();
-    let account_action_tx = action_tx.clone();
-    let qr_action_tx = action_tx.clone();
-    let history_action_tx = action_tx.clone();
-    let staking_op_action_tx = action_tx.clone();
-    let tx_submit_action_tx = action_tx.clone();
     tokio::spawn(async move {
-        chain_task(
-            network,
-            connection_config,
-            chain_action_tx,
-            account_rx,
-            account_action_tx,
-            qr_rx,
-            qr_action_tx,
-            history_rx,
-            history_action_tx,
-            staking_op_rx,
-            staking_op_action_tx,
-            tx_submit_rx,
-            tx_submit_action_tx,
-        )
-        .await;
+        chain_task(network, connection_config, chain_action_tx, request_rx).await;
     });
 
     // Send restored account request (will be processed once chain connects)
     if let Some(account) = restored_account {
-        let _ = account_tx.send(account).await;
+        let _ = request_tx.send(ChainRequest::FetchAccount(account)).await;
     }
 
     // Main loop
@@ -404,23 +386,23 @@ async fn main() -> Result<()> {
                 // Handle special actions
                 match &action {
                     Action::SetWatchedAccount(account, original_addr) => {
-                        let _ = account_tx.send(account.clone()).await;
+                        let _ = request_tx.send(ChainRequest::FetchAccount(account.clone())).await;
                         // Save account to config with original address string (preserves user's SS58 format)
                         app_config.add_account(
                             original_addr.clone(),
                             None,
                             Some(network.to_string()),
                         );
-                        if let Err(e) = app_config.save() {
+                        if let Err(e) = config::save_config(&app_config) {
                             tracing::warn!("Failed to save config: {}", e);
                         }
                         // Auto-load staking history in background
                         let _ = history_cancel_tx.send(false);
-                        let _ = history_tx.send((
-                            account.clone(),
-                            app.history_total_eras,
-                            history_cancel_rx.clone(),
-                        )).await;
+                        let _ = request_tx.send(ChainRequest::FetchHistory {
+                            account: account.clone(),
+                            num_eras: app.history.total_eras,
+                            cancel_rx: history_cancel_rx.clone(),
+                        }).await;
                         // Mark history as loading (will be handled by LoadStakingHistory action in app)
                         let _ = action_tx.send(Action::LoadStakingHistory).await;
                     }
@@ -431,7 +413,7 @@ async fn main() -> Result<()> {
                                 address: v.address.clone(),
                                 commission: v.commission,
                                 blocked: v.blocked,
-                                apy: v.apy,
+                                apy: v.apy.unwrap_or(0.0),
                                 total_stake: v.total_stake,
                                 nominator_count: v.nominator_count,
                             }
@@ -448,7 +430,7 @@ async fn main() -> Result<()> {
                                 address: v.address.clone(),
                                 commission: v.commission,
                                 blocked: v.blocked,
-                                apy: v.apy,
+                                apy: v.apy.unwrap_or(0.0),
                                 total_stake: v.total_stake,
                                 nominator_count: v.nominator_count,
                             }
@@ -470,108 +452,108 @@ async fn main() -> Result<()> {
                     }
                     Action::GenerateBondQR { value } => {
                         if let Some(account) = &app.watched_account {
-                            let _ = staking_op_tx
-                                .send(StakingOp::Bond {
+                            let _ = request_tx
+                                .send(ChainRequest::ExecuteStakingOp(StakingOp::Bond {
                                     signer: account.clone(),
                                     value: *value,
-                                })
+                                }))
                                 .await;
                         }
                     }
                     Action::GenerateUnbondQR { value } => {
                         if let Some(account) = &app.watched_account {
-                            let _ = staking_op_tx
-                                .send(StakingOp::Unbond {
+                            let _ = request_tx
+                                .send(ChainRequest::ExecuteStakingOp(StakingOp::Unbond {
                                     signer: account.clone(),
                                     value: *value,
-                                })
+                                }))
                                 .await;
                         }
                     }
                     Action::GenerateBondExtraQR { value } => {
                         if let Some(account) = &app.watched_account {
-                            let _ = staking_op_tx
-                                .send(StakingOp::BondExtra {
+                            let _ = request_tx
+                                .send(ChainRequest::ExecuteStakingOp(StakingOp::BondExtra {
                                     signer: account.clone(),
                                     value: *value,
-                                })
+                                }))
                                 .await;
                         }
                     }
                     Action::GenerateSetPayeeQR { destination } => {
                         if let Some(account) = &app.watched_account {
-                            let _ = staking_op_tx
-                                .send(StakingOp::SetPayee {
+                            let _ = request_tx
+                                .send(ChainRequest::ExecuteStakingOp(StakingOp::SetPayee {
                                     signer: account.clone(),
                                     destination: destination.clone(),
-                                })
+                                }))
                                 .await;
                         }
                     }
                     Action::GenerateWithdrawUnbondedQR => {
                         if let Some(account) = &app.watched_account {
-                            let _ = staking_op_tx
-                                .send(StakingOp::WithdrawUnbonded {
+                            let _ = request_tx
+                                .send(ChainRequest::ExecuteStakingOp(StakingOp::WithdrawUnbonded {
                                     signer: account.clone(),
-                                })
+                                }))
                                 .await;
                         }
                     }
                     Action::GenerateChillQR => {
                         if let Some(account) = &app.watched_account {
-                            let _ = staking_op_tx
-                                .send(StakingOp::Chill {
+                            let _ = request_tx
+                                .send(ChainRequest::ExecuteStakingOp(StakingOp::Chill {
                                     signer: account.clone(),
-                                })
+                                }))
                                 .await;
                         }
                     }
                     Action::GeneratePoolJoinQR { pool_id, amount } => {
                         if let Some(account) = &app.watched_account {
-                            let _ = staking_op_tx
-                                .send(StakingOp::PoolJoin {
+                            let _ = request_tx
+                                .send(ChainRequest::ExecuteStakingOp(StakingOp::PoolJoin {
                                     signer: account.clone(),
                                     pool_id: *pool_id,
                                     amount: *amount,
-                                })
+                                }))
                                 .await;
                         }
                     }
                     Action::GeneratePoolBondExtraQR { amount } => {
                         if let Some(account) = &app.watched_account {
-                            let _ = staking_op_tx
-                                .send(StakingOp::PoolBondExtra {
+                            let _ = request_tx
+                                .send(ChainRequest::ExecuteStakingOp(StakingOp::PoolBondExtra {
                                     signer: account.clone(),
                                     amount: *amount,
-                                })
+                                }))
                                 .await;
                         }
                     }
                     Action::GeneratePoolUnbondQR { amount } => {
                         if let Some(account) = &app.watched_account {
-                            let _ = staking_op_tx
-                                .send(StakingOp::PoolUnbond {
+                            let _ = request_tx
+                                .send(ChainRequest::ExecuteStakingOp(StakingOp::PoolUnbond {
                                     signer: account.clone(),
                                     amount: *amount,
-                                })
+                                }))
                                 .await;
                         }
                     }
                     Action::GeneratePoolClaimQR => {
                         if let Some(account) = &app.watched_account {
-                            let _ = staking_op_tx
-                                .send(StakingOp::PoolClaim {
+                            let _ = request_tx
+                                .send(ChainRequest::ExecuteStakingOp(StakingOp::PoolClaim {
                                     signer: account.clone(),
-                                })
+                                }))
                                 .await;
                         }
                     }
                     Action::GeneratePoolWithdrawQR => {
                         if let Some(account) = &app.watched_account {
-                            let _ = staking_op_tx
-                                .send(StakingOp::PoolWithdraw {
+                            let _ = request_tx
+                                .send(ChainRequest::ExecuteStakingOp(StakingOp::PoolWithdraw {
                                     signer: account.clone(),
-                                })
+                                }))
                                 .await;
                         }
                     }
@@ -590,9 +572,10 @@ async fn main() -> Result<()> {
                                 .collect();
 
                             if !targets.is_empty() {
-                                // Store signer for later use with signature
-                                let signer = account.clone();
-                                let _ = qr_tx.send((signer, targets)).await;
+                                let _ = request_tx.send(ChainRequest::GenerateNominationQR {
+                                    signer: account.clone(),
+                                    targets,
+                                }).await;
                             }
                         }
                     }
@@ -606,7 +589,7 @@ async fn main() -> Result<()> {
                         // Decode the signature from Vault's QR code
                         match stkopt_chain::decode_vault_signature(signature_data) {
                             Ok(decoded_sig) => {
-                                if let Some(ref pending) = app.pending_unsigned_tx {
+                                if let Some(ref pending) = app.qr.pending_unsigned {
                                     tracing::info!(
                                         "Decoded {:?} signature from Vault",
                                         decoded_sig.sig_type
@@ -626,7 +609,7 @@ async fn main() -> Result<()> {
                                     );
 
                                     // Store the pending transaction
-                                    app.pending_tx = Some(PendingTransaction {
+                                    app.qr.pending_signed = Some(PendingTransaction {
                                         description: signed.description.clone(),
                                         signed_extrinsic: signed.encoded,
                                         tx_hash: signed.hash,
@@ -638,13 +621,13 @@ async fn main() -> Result<()> {
                                         reader.stop();
                                     }
                                     qr_reader = None;
-                                    app.scanning_signature = false;
-                                    app.camera_scan_status = None;
-                                    app.camera_preview = None;
-                                    app.qr_bounds = None;
+                                    app.camera.scanning = false;
+                                    app.camera.status = None;
+                                    app.camera.preview = None;
+                                    app.camera.qr_bounds = None;
 
                                     // Switch to Submit tab (tab 3)
-                                    app.qr_modal_tab = 3;
+                                    app.qr.modal_tab = 3;
                                 } else {
                                     tracing::error!("Signature received but no pending unsigned tx");
                                 }
@@ -656,7 +639,7 @@ async fn main() -> Result<()> {
                     }
                     Action::SubmitTransaction => {
                         // Submit the signed transaction via chain task
-                        if let Some(ref pending_tx) = app.pending_tx {
+                        if let Some(ref pending_tx) = app.qr.pending_signed {
                             let extrinsic = pending_tx.signed_extrinsic.clone();
                             let _ = action_tx.send(Action::SetTxStatus(TxSubmissionStatus::Submitting)).await;
 
@@ -667,7 +650,7 @@ async fn main() -> Result<()> {
                             );
 
                             // Send to chain task for submission
-                            let _ = tx_submit_tx.send(extrinsic).await;
+                            let _ = request_tx.send(ChainRequest::SubmitTransaction(extrinsic)).await;
                         }
                     }
                     Action::StartSignatureScan => {
@@ -675,7 +658,7 @@ async fn main() -> Result<()> {
                         match qr_reader::QrReader::new() {
                             Ok(reader) => {
                                 qr_reader = Some(reader);
-                                app.scanning_signature = true;
+                                app.camera.scanning = true;
                                 tracing::info!("Started camera for signature QR scanning");
                             }
                             Err(e) => {
@@ -708,11 +691,11 @@ async fn main() -> Result<()> {
                         if let Some(account) = &app.watched_account {
                             // Reset cancellation flag (watch channel - sync send)
                             let _ = history_cancel_tx.send(false);
-                            let _ = history_tx.send((
-                                account.clone(),
-                                app.history_total_eras,
-                                history_cancel_rx.clone(),
-                            )).await;
+                            let _ = request_tx.send(ChainRequest::FetchHistory {
+                                account: account.clone(),
+                                num_eras: app.history.total_eras,
+                                cancel_rx: history_cancel_rx.clone(),
+                            }).await;
                         }
                     }
                     Action::CancelLoadingHistory => {
@@ -720,15 +703,10 @@ async fn main() -> Result<()> {
                         let _ = history_cancel_tx.send(true);
                     }
                     Action::SelectAddressBookEntry(idx) => {
-                        // Get address from address book
-                        let known_addresses = [
-                            "13UVJyLnbVp9RBZYFwCNuGnK87JYJ2nb7jMwaVe4vQ2UNCzN",
-                            "16SpacegeUTft9v3ts27CEC3tJaxgvE4uZeCctThFH3Vb24p",
-                            "13cKp89Nt7t1hZVWnqhKW9LY7Udhxk2BmLwKi3snVgUAjZGE",
-                        ];
+                        // Get address from saved accounts in config
+                        let idx = *idx;
 
                         // Determine the actual index (accounting for "My Account")
-                        let idx = *idx;
                         let actual_idx = if app.watched_account.is_some() {
                             if idx == 0 {
                                 // "My Account" selected - no action needed
@@ -739,17 +717,17 @@ async fn main() -> Result<()> {
                             idx
                         };
 
-                        if let Some(&addr_str) = known_addresses.get(actual_idx) {
+                        if let Some(saved_account) = app_config.accounts.get(actual_idx) {
                             use std::str::FromStr;
-                            if let Ok(account) = subxt::utils::AccountId32::from_str(addr_str) {
-                                let _ = action_tx.send(Action::SetWatchedAccount(account, addr_str.to_string())).await;
+                            if let Ok(account) = subxt::utils::AccountId32::from_str(&saved_account.address) {
+                                let _ = action_tx.send(Action::SetWatchedAccount(account, saved_account.address.clone())).await;
                             }
                         }
                     }
                     Action::RemoveAccount(address) => {
                         // Remove account from config
                         app_config.remove_account(address);
-                        if let Err(e) = app_config.save() {
+                        if let Err(e) = config::save_config(&app_config) {
                             tracing::warn!("Failed to save config after removing account: {}", e);
                         }
 
@@ -789,26 +767,53 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Build TransactionInfo from a payload for display purposes.
+fn build_tx_info(
+    payload: &stkopt_chain::UnsignedPayload,
+    signer: &subxt::utils::AccountId32,
+    targets: Vec<String>,
+) -> crate::action::TransactionInfo {
+    crate::action::TransactionInfo {
+        signer: signer.to_string(),
+        call: payload.description.clone(),
+        targets,
+        call_data_size: payload.call_data.len(),
+        spec_version: payload.spec_version,
+        tx_version: payload.tx_version,
+        nonce: payload.nonce,
+        include_metadata_hash: payload.include_metadata_hash,
+    }
+}
+
+/// Send QR data and pending transaction info to the UI.
+async fn send_staking_qr(
+    action_tx: &mpsc::Sender<Action>,
+    payload: stkopt_chain::UnsignedPayload,
+    signer: subxt::utils::AccountId32,
+    targets: Vec<String>,
+) {
+    let qr_data = stkopt_chain::encode_for_qr(&payload, &signer);
+    let tx_info = build_tx_info(&payload, &signer, targets);
+    let pending = crate::action::PendingUnsignedTx {
+        payload,
+        signer,
+    };
+    let _ = action_tx.send(Action::SetPendingUnsignedTx(Some(pending))).await;
+    let _ = action_tx.send(Action::SetQRData(Some(qr_data), Some(tx_info))).await;
+}
+
+/// Clear QR data and pending transaction info from the UI.
+async fn clear_staking_qr(action_tx: &mpsc::Sender<Action>) {
+    let _ = action_tx.send(Action::SetPendingUnsignedTx(None)).await;
+    let _ = action_tx.send(Action::SetQRData(None, None)).await;
+}
+
 /// Background task for chain operations.
-#[allow(clippy::too_many_arguments)]
 async fn chain_task(
     network: Network,
     config: ConnectionConfig,
     action_tx: mpsc::Sender<Action>,
-    mut account_rx: mpsc::Receiver<subxt::utils::AccountId32>,
-    account_action_tx: mpsc::Sender<Action>,
-    mut qr_rx: mpsc::Receiver<(subxt::utils::AccountId32, Vec<subxt::utils::AccountId32>)>,
-    qr_action_tx: mpsc::Sender<Action>,
-    mut history_rx: mpsc::Receiver<(
-        subxt::utils::AccountId32,
-        u32,
-        tokio::sync::watch::Receiver<bool>,
-    )>,
-    history_action_tx: mpsc::Sender<Action>,
-    mut staking_op_rx: mpsc::Receiver<StakingOp>,
-    staking_op_action_tx: mpsc::Sender<Action>,
-    mut tx_submit_rx: mpsc::Receiver<Vec<u8>>,
-    tx_submit_action_tx: mpsc::Sender<Action>,
+    mut request_rx: mpsc::Receiver<ChainRequest>,
 ) {
     use crate::action::{DisplayPool, DisplayValidator};
     use std::collections::HashMap;
@@ -1237,7 +1242,7 @@ async fn chain_task(
                 own_stake,
                 nominator_count,
                 points,
-                apy,
+                apy: Some(apy),
             })
         })
         .collect();
@@ -1245,14 +1250,15 @@ async fn chain_task(
     // Sort by APY descending
     display_validators.sort_by(|a, b| {
         b.apy
-            .partial_cmp(&a.apy)
+            .unwrap_or(0.0)
+            .partial_cmp(&a.apy.unwrap_or(0.0))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     // Build validator APY map for pool APY calculation (before sending)
     let validator_apy_map: HashMap<String, f64> = display_validators
         .iter()
-        .map(|v| (v.address.clone(), v.apy))
+        .filter_map(|v| v.apy.map(|apy| (v.address.clone(), apy)))
         .collect();
 
     tracing::info!(
@@ -1334,9 +1340,10 @@ async fn chain_task(
         display_pools.push(DisplayPool {
             id: p.id,
             name,
-            state: p.state,
+            state: p.state.into(),
             member_count: p.member_count,
-            points: p.points,
+            total_bonded: p.points,
+            commission: None,
             apy: None, // Will be filled in second pass
         });
     }
@@ -1467,10 +1474,10 @@ async fn chain_task(
 
     tracing::info!("Nomination pools loaded successfully");
 
-    // Listen for account fetch and QR generation requests
-    loop {
-        tokio::select! {
-            Some(account) = account_rx.recv() => {
+    // Listen for requests from the UI
+    while let Some(request) = request_rx.recv().await {
+        match request {
+            ChainRequest::FetchAccount(account) => {
                 tracing::info!("Fetching account status for {}", account);
 
                 // Fetch all account data
@@ -1519,50 +1526,25 @@ async fn chain_task(
                     pool_membership,
                 };
 
-                let _ = account_action_tx.send(Action::SetAccountStatus(Box::new(status))).await;
+                let _ = action_tx.send(Action::SetAccountStatus(Box::new(status))).await;
                 tracing::info!("Account status updated");
             }
-            Some((signer, targets)) = qr_rx.recv() => {
+            ChainRequest::GenerateNominationQR { signer, targets } => {
                 tracing::info!("Generating nomination QR for {} validators", targets.len());
+                let target_strings: Vec<String> = targets.iter().map(|t| t.to_string()).collect();
 
-                // Use mortal era by default (true) for replay protection
-                // TODO: Surface this as a user setting in the interface
-                let use_mortal_era = true;
-                match client.create_nominate_payload(&signer, &targets, use_mortal_era).await {
+                match client.create_nominate_payload(&signer, &targets, true).await {
                     Ok(payload) => {
-                        let qr_data = stkopt_chain::encode_for_qr(&payload, &signer);
-                        let qr_len = qr_data.len();
-
-                        // Build transaction info for display
-                        let tx_info = crate::action::TransactionInfo {
-                            signer: signer.to_string(),
-                            call: "Staking.nominate".to_string(),
-                            targets: targets.iter().map(|t| t.to_string()).collect(),
-                            call_data_size: payload.call_data.len(),
-                            spec_version: payload.spec_version,
-                            tx_version: payload.tx_version,
-                            nonce: payload.nonce,
-                            include_metadata_hash: payload.include_metadata_hash,
-                        };
-
-                        // Store the pending unsigned tx for later signature
-                        let pending = crate::action::PendingUnsignedTx {
-                            payload: payload.clone(),
-                            signer: signer.clone(),
-                        };
-                        let _ = qr_action_tx.send(Action::SetPendingUnsignedTx(Some(pending))).await;
-
-                        let _ = qr_action_tx.send(Action::SetQRData(Some(qr_data), Some(tx_info))).await;
-                        tracing::info!("QR data generated ({} bytes for Polkadot Vault)", qr_len);
+                        tracing::info!("QR data generated ({} bytes)", payload.call_data.len());
+                        send_staking_qr(&action_tx, payload, signer, target_strings).await;
                     }
                     Err(e) => {
                         tracing::error!("Failed to generate nomination payload: {}", e);
-                        let _ = qr_action_tx.send(Action::SetPendingUnsignedTx(None)).await;
-                        let _ = qr_action_tx.send(Action::SetQRData(None, None)).await;
+                        clear_staking_qr(&action_tx).await;
                     }
                 }
             }
-            Some((account, num_eras, cancel_rx)) = history_rx.recv() => {
+            ChainRequest::FetchHistory { account, num_eras, cancel_rx } => {
                 tracing::info!("Loading staking history for {} ({} eras)", account, num_eras);
 
                 let address = account.to_string();
@@ -1582,9 +1564,11 @@ async fn chain_task(
                     && let Ok(cached) = db.get_history(network, &address, Some(num_eras))
                     && !cached.is_empty()
                 {
-                    tracing::info!("Loaded {} cached history points", cached.len());
-                    for point in cached {
-                        let _ = history_action_tx.send(Action::AddStakingHistoryPoint(point)).await;
+                    // Filter out cached entries with unrealistic APY (likely bad data)
+                    let filtered: Vec<_> = cached.into_iter().filter(|h| h.apy <= 0.50).collect();
+                    tracing::info!("Loaded {} cached history points (filtered)", filtered.len());
+                    for point in filtered {
+                        let _ = action_tx.send(Action::AddStakingHistoryPoint(point)).await;
                     }
                 }
 
@@ -1593,12 +1577,12 @@ async fn chain_task(
                     Ok(Some(era)) => era,
                     Ok(None) => {
                         tracing::error!("No active era found");
-                        let _ = history_action_tx.send(Action::HistoryLoadingComplete).await;
+                        let _ = action_tx.send(Action::HistoryLoadingComplete).await;
                         continue;
                     }
                     Err(e) => {
                         tracing::error!("Failed to get active era: {}", e);
-                        let _ = history_action_tx.send(Action::HistoryLoadingComplete).await;
+                        let _ = action_tx.send(Action::HistoryLoadingComplete).await;
                         continue;
                     }
                 };
@@ -1631,7 +1615,7 @@ async fn chain_task(
 
                 if eras_to_fetch.is_empty() {
                     tracing::info!("All eras already cached");
-                    let _ = history_action_tx.send(Action::HistoryLoadingComplete).await;
+                    let _ = action_tx.send(Action::HistoryLoadingComplete).await;
                     continue;
                 }
 
@@ -1643,7 +1627,7 @@ async fn chain_task(
                     // Check for cancellation
                     if *cancel_rx.borrow() {
                         tracing::info!("History loading cancelled");
-                        let _ = history_action_tx.send(Action::HistoryLoadingComplete).await;
+                        let _ = action_tx.send(Action::HistoryLoadingComplete).await;
                         break;
                     }
 
@@ -1676,10 +1660,31 @@ async fn chain_task(
                     // Calculate network-wide APY based on total reward and total staked
                     let apy = get_era_apy(era_reward, total_staked, era_duration_ms);
 
+                    // Sanity check: skip eras with unrealistic APY (likely incomplete or corrupted data)
+                    if apy > 0.50 {
+                        tracing::warn!(
+                            "Era {} has unrealistic APY {:.2}% (reward={}, staked={}), skipping",
+                            era, apy * 100.0, era_reward, total_staked
+                        );
+                        continue;
+                    }
+
                     // Estimate user's reward proportional to their stake
+                    // NOTE: This is an estimate based on current stake, which may differ from actual historical stake
                     let user_reward = if user_bonded > 0 && total_staked > 0 {
-                        // User's share of the total reward
-                        (era_reward as f64 * user_bonded as f64 / total_staked as f64) as u128
+                        let estimated = (era_reward as f64 * user_bonded as f64 / total_staked as f64) as u128;
+
+                        // Sanity check: cap estimated reward to avoid unrealistic values
+                        let max_reasonable_reward = user_bonded / 200; // 0.5% of stake
+                        if estimated > max_reasonable_reward && max_reasonable_reward > 0 {
+                            tracing::warn!(
+                                "Era {} reward estimate {} exceeds bound {}, capping",
+                                era, estimated, max_reasonable_reward
+                            );
+                            max_reasonable_reward
+                        } else {
+                            estimated
+                        }
                     } else {
                         0
                     };
@@ -1689,14 +1694,14 @@ async fn chain_task(
 
                     let point = crate::action::StakingHistoryPoint {
                         era,
-                        date: era_date.clone(),
+                        date: Some(era_date.clone()),
                         reward: user_reward,
                         bonded: user_bonded,
                         apy,
                     };
 
                     new_points.push(point.clone());
-                    let _ = history_action_tx.send(Action::AddStakingHistoryPoint(point)).await;
+                    let _ = action_tx.send(Action::AddStakingHistoryPoint(point)).await;
                     tracing::debug!("Added history point for era {} (APY: {:.2}%)", era, apy * 100.0);
                 }
 
@@ -1713,11 +1718,11 @@ async fn chain_task(
 
                 // Check if we completed without cancellation
                 if !*cancel_rx.borrow() {
-                    let _ = history_action_tx.send(Action::HistoryLoadingComplete).await;
+                    let _ = action_tx.send(Action::HistoryLoadingComplete).await;
                     tracing::info!("Staking history loaded");
                 }
             }
-            Some(op) = staking_op_rx.recv() => {
+            ChainRequest::ExecuteStakingOp(op) => {
                 tracing::info!("Processing staking op: {:?}", op);
                 let use_mortal_era = true;
 
@@ -1789,44 +1794,16 @@ async fn chain_task(
 
                 match result {
                     Ok(payload) => {
-                        let qr_data = stkopt_chain::encode_for_qr(&payload, signer);
-                        let qr_len = qr_data.len();
-
-                        let tx_info = crate::action::TransactionInfo {
-                            signer: signer.to_string(),
-                            call: payload.description.clone(),
-                            targets: vec![],
-                            call_data_size: payload.call_data.len(),
-                            spec_version: payload.spec_version,
-                            tx_version: payload.tx_version,
-                            nonce: payload.nonce,
-                            include_metadata_hash: payload.include_metadata_hash,
-                        };
-
-                        let pending = crate::action::PendingUnsignedTx {
-                            payload: payload.clone(),
-                            signer: signer.clone(),
-                        };
-                        let _ = staking_op_action_tx
-                            .send(Action::SetPendingUnsignedTx(Some(pending)))
-                            .await;
-                        let _ = staking_op_action_tx
-                            .send(Action::SetQRData(Some(qr_data), Some(tx_info)))
-                            .await;
-                        tracing::info!("QR data generated ({} bytes)", qr_len);
+                        tracing::info!("QR data generated ({} bytes)", payload.call_data.len());
+                        send_staking_qr(&action_tx, payload, signer.clone(), vec![]).await;
                     }
                     Err(e) => {
                         tracing::error!("Failed to generate payload: {}", e);
-                        let _ = staking_op_action_tx
-                            .send(Action::SetPendingUnsignedTx(None))
-                            .await;
-                        let _ = staking_op_action_tx
-                            .send(Action::SetQRData(None, None))
-                            .await;
+                        clear_staking_qr(&action_tx).await;
                     }
                 }
             }
-            Some(extrinsic) = tx_submit_rx.recv() => {
+            ChainRequest::SubmitTransaction(extrinsic) => {
                 tracing::info!("Submitting signed extrinsic ({} bytes)", extrinsic.len());
 
                 match client.submit_signed_extrinsic(&extrinsic).await {
@@ -1840,7 +1817,7 @@ async fn chain_task(
                                     "Transaction finalized in block 0x{}",
                                     hex::encode(result.block_hash)
                                 );
-                                let _ = tx_submit_action_tx
+                                let _ = action_tx
                                     .send(Action::SetTxStatus(TxSubmissionStatus::Finalized {
                                         block_hash: result.block_hash,
                                     }))
@@ -1848,7 +1825,7 @@ async fn chain_task(
                             }
                             Err(e) => {
                                 tracing::error!("Transaction failed: {}", e);
-                                let _ = tx_submit_action_tx
+                                let _ = action_tx
                                     .send(Action::SetTxStatus(TxSubmissionStatus::Failed(
                                         e.to_string(),
                                     )))
@@ -1871,13 +1848,12 @@ async fn chain_task(
                             error_str
                         };
 
-                        let _ = tx_submit_action_tx
+                        let _ = action_tx
                             .send(Action::SetTxStatus(TxSubmissionStatus::Failed(user_message)))
                             .await;
                     }
                 }
             }
-            else => break,
         }
     }
 }
@@ -2022,7 +1998,7 @@ async fn run_update_mode(
 
         let point = action::StakingHistoryPoint {
             era,
-            date: era_date,
+            date: Some(era_date),
             reward: user_reward,
             bonded: user_bonded,
             apy,

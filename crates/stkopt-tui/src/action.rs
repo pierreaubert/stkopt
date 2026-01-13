@@ -1,11 +1,16 @@
 //! Actions for state updates.
 
 use stkopt_chain::{
-    AccountBalance, ChainInfo, NominatorInfo, PoolMembership, PoolState, RewardDestination,
-    StakingLedger, UnsignedPayload, ValidatorExposure, ValidatorInfo,
+    AccountBalance, ChainInfo, NominatorInfo, PoolMembership, RewardDestination, StakingLedger,
+    UnsignedPayload, ValidatorExposure, ValidatorInfo,
 };
 use stkopt_core::{ConnectionStatus, EraIndex, EraInfo, Network, OptimizationResult};
 use subxt::utils::AccountId32;
+
+// Re-export display types from stkopt-core
+pub use stkopt_core::display::{
+    DisplayPool, DisplayValidator, StakingHistoryPoint,
+};
 
 /// Input mode for staking operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -26,39 +31,6 @@ pub enum StakingInputMode {
 pub enum PoolOperation {
     #[default]
     None,
-    Join,
-    BondExtra,
-    Claim,
-    Unbond,
-    Withdraw,
-}
-
-/// Aggregated validator data for display.
-#[derive(Debug, Clone)]
-pub struct DisplayValidator {
-    pub address: String,
-    /// Display name from identity (if available).
-    pub name: Option<String>,
-    pub commission: f64,
-    pub blocked: bool,
-    pub total_stake: u128,
-    pub own_stake: u128,
-    pub nominator_count: u32,
-    #[allow(dead_code)]
-    pub points: u32,
-    pub apy: f64,
-}
-
-/// Nomination pool data for display.
-#[derive(Debug, Clone)]
-pub struct DisplayPool {
-    pub id: u32,
-    pub name: String,
-    pub state: PoolState,
-    pub member_count: u32,
-    pub points: u128,
-    /// Estimated APY based on nominated validators
-    pub apy: Option<f64>,
 }
 
 /// Account status information for display.
@@ -69,21 +41,6 @@ pub struct AccountStatus {
     pub staking_ledger: Option<StakingLedger>,
     pub nominations: Option<NominatorInfo>,
     pub pool_membership: Option<PoolMembership>,
-}
-
-/// A single point in staking history.
-#[derive(Debug, Clone)]
-pub struct StakingHistoryPoint {
-    /// Era index.
-    pub era: u32,
-    /// Estimated date string (YYYYMMDD format).
-    pub date: String,
-    /// Reward earned in this era (in planck).
-    pub reward: u128,
-    /// Total bonded amount at start of era.
-    pub bonded: u128,
-    /// APY for this era (as a ratio, e.g., 0.15 for 15%).
-    pub apy: f64,
 }
 
 /// Transaction info for QR code display.

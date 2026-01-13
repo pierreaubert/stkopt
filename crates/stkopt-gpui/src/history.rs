@@ -78,7 +78,7 @@ pub fn compute_stats(history: &[HistoryPoint]) -> HistoryStats {
         return HistoryStats::default();
     }
 
-    let total_rewards: u128 = history.iter().map(|h| h.rewards).sum();
+    let total_rewards: u128 = history.iter().map(|h| h.reward).sum();
     let (min_apy, max_apy, sum_apy) = history.iter().fold(
         (f64::MAX, f64::MIN, 0.0),
         |(min, max, sum), h| (min.min(h.apy), max.max(h.apy), sum + h.apy),
@@ -87,7 +87,7 @@ pub fn compute_stats(history: &[HistoryPoint]) -> HistoryStats {
     let era_count = history.len();
     let avg_apy = sum_apy / era_count as f64;
     let avg_rewards_per_era = total_rewards as f64 / era_count as f64;
-    let final_stake = history.last().map(|h| h.staked).unwrap_or(0);
+    let final_stake = history.last().map(|h| h.bonded).unwrap_or(0);
 
     HistoryStats {
         total_rewards,
@@ -122,14 +122,15 @@ pub fn generate_mock_history(era_count: usize, starting_era: u32) -> Vec<History
             let stake_variation = (i as f64 * 0.01).sin() * 0.1 + 1.0;
             let apy_variation = (i as f64 * 0.05).cos() * 2.0;
             
-            let staked = (base_stake as f64 * stake_variation) as u128;
+            let bonded = (base_stake as f64 * stake_variation) as u128;
             let apy = (base_apy + apy_variation).max(0.0);
-            let rewards = (staked as f64 * apy / 100.0 / 365.0) as u128;
+            let reward = (bonded as f64 * apy / 100.0 / 365.0) as u128;
 
             HistoryPoint {
                 era,
-                staked,
-                rewards,
+                date: None,
+                bonded,
+                reward,
                 apy,
             }
         })
@@ -159,7 +160,7 @@ pub fn cumulative_rewards(history: &[HistoryPoint]) -> Vec<(u32, u128)> {
     history
         .iter()
         .map(|h| {
-            cumulative += h.rewards;
+            cumulative += h.reward;
             (h.era, cumulative)
         })
         .collect()
@@ -194,11 +195,11 @@ mod tests {
 
     fn sample_history() -> Vec<HistoryPoint> {
         vec![
-            HistoryPoint { era: 100, staked: 1000, rewards: 10, apy: 10.0 },
-            HistoryPoint { era: 101, staked: 1100, rewards: 12, apy: 11.0 },
-            HistoryPoint { era: 102, staked: 1200, rewards: 15, apy: 12.5 },
-            HistoryPoint { era: 103, staked: 1300, rewards: 14, apy: 10.8 },
-            HistoryPoint { era: 104, staked: 1400, rewards: 18, apy: 12.9 },
+            HistoryPoint { era: 100, date: None, bonded: 1000, reward: 10, apy: 10.0 },
+            HistoryPoint { era: 101, date: None, bonded: 1100, reward: 12, apy: 11.0 },
+            HistoryPoint { era: 102, date: None, bonded: 1200, reward: 15, apy: 12.5 },
+            HistoryPoint { era: 103, date: None, bonded: 1300, reward: 14, apy: 10.8 },
+            HistoryPoint { era: 104, date: None, bonded: 1400, reward: 18, apy: 12.9 },
         ]
     }
 
@@ -246,7 +247,7 @@ mod tests {
         assert_eq!(history.len(), 10);
         assert_eq!(history[0].era, 500);
         assert_eq!(history[9].era, 509);
-        assert!(history.iter().all(|h| h.staked > 0));
+        assert!(history.iter().all(|h| h.bonded > 0));
         assert!(history.iter().all(|h| h.apy > 0.0));
     }
 
