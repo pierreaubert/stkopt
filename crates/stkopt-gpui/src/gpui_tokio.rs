@@ -76,7 +76,7 @@ impl Tokio {
     /// Note that the Tokio task will be cancelled if the GPUI task is dropped.
     pub fn spawn<C, Fut, R>(cx: &C, f: Fut) -> Task<Result<R, JoinError>>
     where
-        C: AppContext,
+        C: AppContext<Result<Task<Result<R, JoinError>>> = Task<Result<R, JoinError>>>,
         Fut: Future<Output = R> + Send + 'static,
         R: Send + 'static,
     {
@@ -98,7 +98,7 @@ impl Tokio {
     /// This version unwraps the JoinError into an anyhow::Result.
     pub fn spawn_result<C, Fut, R>(cx: &C, f: Fut) -> Task<anyhow::Result<R>>
     where
-        C: AppContext,
+        C: AppContext<Result<Task<anyhow::Result<R>>> = Task<anyhow::Result<R>>>,
         Fut: Future<Output = anyhow::Result<R>> + Send + 'static,
         R: Send + 'static,
     {

@@ -31,7 +31,7 @@ A terminal user interface (TUI) application for optimizing Polkadot staking. Bro
 Requires Rust 1.85 or later.
 
 ```bash
-git clone https://github.com/dotidx/stkopt.git
+git clone https://github.com/pierreaubert/stkopt.git
 cd stkopt
 cargo install just
 just build

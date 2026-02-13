@@ -14,11 +14,11 @@ stkopt-core = { workspace = true, features = ["persistence"] }
 subxt.workspace = true
 
 # GPUI framework (from zed git)
-gpui = { version = "*", git = "https://github.com/zed-industries/zed.git" }
+gpui = "0.2"
 
 # UI components from local sotf
-gpui-ui-kit = { path = "../../../gpui-toolkit/gpui-ui-kit" }
-gpui-px = { path = "../../../gpui-toolkit/gpui-px", features = ["gpui"] }
+gpui-ui-kit = { version = "0.5" }
+gpui-px = { version="0.5", features = ["gpui"] }
 
 # Async runtime
 tokio = { workspace = true, features = ["full"] }
