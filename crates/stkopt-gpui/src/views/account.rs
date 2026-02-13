@@ -100,8 +100,7 @@ impl AccountSection {
 
                                                     cx.spawn(move |_this: gpui::WeakEntity<StkoptApp>, _cx: &mut gpui::AsyncApp| async move {
                                                         let result = handle.fetch_account(address).await;
-                                                        // Note: entity.update returns () - errors are handled inside the closure
-                                                        entity.update(&mut async_cx, |this, cx: &mut Context<StkoptApp>| {
+                                                        let _ = entity.update(&mut async_cx, |this, cx: &mut Context<StkoptApp>| {
                                                             match result {
                                                                 Ok(account_data) => {
                                                                     this.apply_chain_update(ChainUpdate::AccountLoaded(account_data), cx);
@@ -304,8 +303,7 @@ impl AccountSection {
 
                                                 cx.spawn(move |_this: gpui::WeakEntity<StkoptApp>, _cx: &mut gpui::AsyncApp| async move {
                                                     let result = handle.fetch_account(addr).await;
-                                                    // Note: entity.update returns () - errors are handled inside the closure
-                                                    entity.update(&mut async_cx, |this, cx: &mut Context<StkoptApp>| {
+                                                    let _ = entity.update(&mut async_cx, |this, cx: &mut Context<StkoptApp>| {
                                                         match result {
                                                             Ok(account_data) => {
                                                                 this.apply_chain_update(ChainUpdate::AccountLoaded(account_data), cx);

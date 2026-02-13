@@ -101,7 +101,7 @@ fn render_loading_spinner(frame: &mut Frame, app: &App) {
 
     // Build progress bar
     let progress_width = 30usize;
-    let filled = (app.loading.progress * progress_width as f32) as usize;
+    let filled = ((app.loading.progress * progress_width as f32) as usize).min(progress_width);
     let bar: String = "█".repeat(filled) + &"░".repeat(progress_width - filled);
 
     // ETA or bandwidth info
@@ -1334,9 +1334,9 @@ fn render_account_history(frame: &mut Frame, app: &App, area: Rect) {
         )));
     } else if app.history.loading {
         // Loading state
-        let progress = app.history.points.len() as f64 / app.history.total_eras as f64;
+        let progress = app.history.points.len() as f64 / app.history.total_eras.max(1) as f64;
         let bar_width = 20;
-        let filled = (progress * bar_width as f64) as usize;
+        let filled = ((progress * bar_width as f64) as usize).min(bar_width);
         let bar = format!(
             "[{}{}] {}/{}",
             "█".repeat(filled),
@@ -2563,6 +2563,7 @@ fn calculate_chunk_size(max_qr_height: usize, max_qr_width: usize) -> usize {
 /// Uses UOS multipart format for Polkadot Vault:
 /// - Each frame: `[0x00][total_frames:2 BE][frame_index:2 BE][frame_data]`
 /// - Data is raw binary (not hex-encoded)
+#[allow(clippy::too_many_arguments)]
 fn render_multipart_qr(
     lines: &mut Vec<Line<'static>>,
     qr_width: &mut u16,
@@ -2670,7 +2671,8 @@ fn render_multipart_qr(
 
             // Progress bar for animation
             let progress_width = 20usize;
-            let filled = ((frame_idx as usize + 1) * progress_width) / (total_parts as usize);
+            let filled = (((frame_idx as usize + 1) * progress_width) / (total_parts as usize))
+                .min(progress_width);
             let bar: String = "█".repeat(filled) + &"░".repeat(progress_width - filled);
             lines.push(Line::from(Span::styled(
                 format!("[{}]", bar),

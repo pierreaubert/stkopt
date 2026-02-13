@@ -616,10 +616,10 @@ impl App {
             KeyCode::Char('s') | KeyCode::Enter
                 if self.qr.pending_signed.is_some() && self.qr.modal_tab == 3 =>
             {
-                if let Some(ref tx) = self.qr.pending_signed {
-                    if matches!(tx.status, TxSubmissionStatus::ReadyToSubmit) {
-                        return Some(Action::SubmitTransaction);
-                    }
+                if let Some(ref tx) = self.qr.pending_signed
+                    && matches!(tx.status, TxSubmissionStatus::ReadyToSubmit)
+                {
+                    return Some(Action::SubmitTransaction);
                 }
             }
             _ => {}

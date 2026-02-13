@@ -69,6 +69,7 @@ base64 = "0.22"
 directories = "5.0"
 hex = "0.4"
 terminal-light = "1.0"
+lru = "0.16.3"
 
 [profile.release]
 lto = true

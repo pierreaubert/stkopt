@@ -327,6 +327,7 @@ impl ChainClient {
 
     /// Get the relay chain genesis hash (for transactions).
     /// Returns error if relay chain is not connected.
+    #[allow(clippy::result_large_err)]
     pub fn relay_genesis_hash(&self) -> Result<[u8; 32], ChainError> {
         self.relay_client
             .as_ref()
