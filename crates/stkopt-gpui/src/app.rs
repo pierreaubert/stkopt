@@ -164,6 +164,12 @@ pub struct StkoptApp {
     pub camera_preview: Option<crate::qr_reader::CameraPreview>,
     /// Scanned signature data (from Vault QR)
     pub scanned_signature: Option<Vec<u8>>,
+    /// Reward destination for SetPayee operation
+    pub rewards_destination: stkopt_chain::RewardDestination,
+    /// Whether to show blocked validators in the validators view
+    pub show_blocked: bool,
+    /// Current viewport width in pixels (updated each render)
+    pub viewport_width: f32,
 }
 
 /// Type of pool operation being performed.
@@ -208,6 +214,7 @@ pub enum StakingOperation {
     Nominate,
     Chill,
     ClaimRewards,
+    SetPayee,
 }
 
 impl StakingOperation {
@@ -221,6 +228,7 @@ impl StakingOperation {
             StakingOperation::Nominate => "Nominate",
             StakingOperation::Chill => "Stop Nominating",
             StakingOperation::ClaimRewards => "Claim Rewards",
+            StakingOperation::SetPayee => "Set Payee",
         }
     }
 
@@ -233,7 +241,8 @@ impl StakingOperation {
             StakingOperation::WithdrawUnbonded
             | StakingOperation::Nominate
             | StakingOperation::Chill
-            | StakingOperation::ClaimRewards => false,
+            | StakingOperation::ClaimRewards
+            | StakingOperation::SetPayee => false,
         }
     }
 }
@@ -475,7 +484,7 @@ impl StkoptApp {
             .detach();
         }
 
-        let instance = Self {
+        let mut instance = Self {
             // Start on Account tab since no address is set yet
             current_section: Section::Account,
             entity: cx.entity().clone(),
@@ -528,7 +537,22 @@ impl StkoptApp {
             qr_reader: None,
             camera_preview: None,
             scanned_signature: None,
+            rewards_destination: stkopt_chain::RewardDestination::Staked,
+            show_blocked: true,
+            viewport_width: 1400.0,
         };
+
+        // Load address book from disk
+        if let Ok(book) = crate::persistence::load_address_book() {
+            let net_config = crate::persistence::NetworkConfig::from(instance.network.to_core());
+            for entry in book.for_network(net_config) {
+                instance.address_book.push(SavedAccount {
+                    address: entry.address.clone(),
+                    label: Some(entry.label.clone()),
+                    network: instance.network,
+                });
+            }
+        }
 
         instance.load_cache(cx);
         instance
@@ -640,6 +664,10 @@ impl StkoptApp {
                     account_data.unbonding_balance,
                     account_data.pool_pending_rewards
                 );
+                // Auto-load history if empty
+                if self.staking_history.is_empty() && !self.history_loading {
+                    self.load_history(cx);
+                }
             }
             ChainUpdate::HistoryLoaded(history) => {
                 self.staking_history = history;
@@ -713,12 +741,40 @@ impl StkoptApp {
             label: None,
             network: self.network,
         });
+        self.persist_address_book();
     }
 
     /// Remove an account from the address book.
     pub fn remove_from_address_book(&mut self, address: &str) {
         self.address_book
             .retain(|a| a.address != address || a.network != self.network);
+        self.persist_address_book();
+    }
+
+    /// Persist the address book to disk.
+    fn persist_address_book(&self) {
+        let net_config = crate::persistence::NetworkConfig::from(self.network.to_core());
+        let mut book = crate::persistence::load_address_book().unwrap_or_default();
+
+        // Remove existing entries for this network and re-add from current state
+        book.entries.retain(|e| e.network != net_config);
+
+        for saved in &self.address_book {
+            if saved.network == self.network {
+                let entry = crate::persistence::AddressBookEntry {
+                    address: saved.address.clone(),
+                    label: saved.label.clone().unwrap_or_default(),
+                    network: net_config,
+                    notes: None,
+                    created_at: 0,
+                };
+                let _ = book.add(entry);
+            }
+        }
+
+        if let Err(e) = crate::persistence::save_address_book(&book) {
+            tracing::warn!("Failed to persist address book: {}", e);
+        }
     }
 
     /// Get the token decimals for the current network.
@@ -783,8 +839,39 @@ impl StkoptApp {
             0
         };
 
+        // For Nominate, redirect to Optimization view
+        if self.staking_operation == StakingOperation::Nominate {
+            self.connection_error =
+                Some("Use 'Nominate Validators' from Optimization or Validators view".to_string());
+            self.show_staking_modal = false;
+            cx.notify();
+            return;
+        }
+
+        // For ClaimRewards, route to pool claim if user has pool rewards
+        if self.staking_operation == StakingOperation::ClaimRewards {
+            let has_pool_rewards = self
+                .staking_info
+                .as_ref()
+                .is_some_and(|info| info.rewards_pending > 0);
+            if has_pool_rewards {
+                self.show_staking_modal = false;
+                self.open_pool_modal(PoolOperation::ClaimPayout, None, cx);
+                return;
+            } else {
+                self.connection_error = Some(
+                    "Direct staking rewards are auto-distributed. Use pool claim for pool rewards."
+                        .to_string(),
+                );
+                self.show_staking_modal = false;
+                cx.notify();
+                return;
+            }
+        }
+
         let handle = chain_handle.clone();
         let operation = self.staking_operation;
+        let rewards_destination = self.rewards_destination.clone();
         let mut async_cx = cx.to_async();
 
         cx.spawn(
@@ -795,13 +882,20 @@ impl StkoptApp {
                     StakingOperation::BondExtra => {
                         handle.create_bond_extra_payload(signer, amount).await
                     }
+                    StakingOperation::Rebond => handle.create_rebond_payload(signer, amount).await,
                     StakingOperation::WithdrawUnbonded => {
                         handle.create_withdraw_unbonded_payload(signer).await
                     }
                     StakingOperation::Chill => handle.create_chill_payload(signer).await,
-                    StakingOperation::Rebond
-                    | StakingOperation::Nominate
-                    | StakingOperation::ClaimRewards => Err("Not implemented yet".to_string()),
+                    StakingOperation::SetPayee => {
+                        handle
+                            .create_set_payee_payload(signer, rewards_destination)
+                            .await
+                    }
+                    // Nominate and ClaimRewards are handled above, before the spawn
+                    StakingOperation::Nominate | StakingOperation::ClaimRewards => {
+                        unreachable!()
+                    }
                 };
 
                 match result {
@@ -1305,18 +1399,39 @@ impl StkoptApp {
 
     fn render_connection_status(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+
+        let is_loading = match self.connection_status {
+            ConnectionStatus::Connecting => true,
+            ConnectionStatus::Connected => {
+                self.validators_loading || self.history_loading || self.validators.is_empty()
+            }
+            ConnectionStatus::Disconnected => false,
+        };
+
         let (status_text, status_color) = match self.connection_status {
             ConnectionStatus::Disconnected => ("Disconnected", theme.error),
             ConnectionStatus::Connecting => ("Connecting...", theme.warning),
-            ConnectionStatus::Connected => ("Connected", theme.success),
+            ConnectionStatus::Connected => {
+                if is_loading {
+                    ("Loading data...", theme.warning)
+                } else {
+                    ("Connected", theme.success)
+                }
+            }
         };
 
-        div()
+        let mut row = div()
             .flex()
             .items_center()
             .gap_2()
             .child(div().w(px(8.0)).h(px(8.0)).rounded_full().bg(status_color))
-            .child(Text::new(status_text).size(TextSize::Sm))
+            .child(Text::new(status_text).size(TextSize::Sm));
+
+        if is_loading {
+            row = row.child(LoadingDots::new().size(SpinnerSize::Xs));
+        }
+
+        row
     }
 
     fn render_content(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1357,7 +1472,10 @@ impl StkoptApp {
 }
 
 impl Render for StkoptApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Track viewport width for responsive chart sizing
+        self.viewport_width = f32::from(window.viewport_size().width);
+
         // Process any pending chain updates
         self.process_pending_updates(cx);
 

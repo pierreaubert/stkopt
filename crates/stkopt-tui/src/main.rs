@@ -391,6 +391,7 @@ async fn main() -> Result<()> {
                     Action::SetWatchedAccount(account, original_addr) => {
                         let _ = request_tx.send(ChainRequest::FetchAccount(account.clone())).await;
                         // Save account to config with original address string (preserves user's SS58 format)
+                        app_config.last_account = Some(original_addr.clone());
                         app_config.add_account(
                             original_addr.clone(),
                             None,
@@ -706,13 +707,20 @@ async fn main() -> Result<()> {
                         let _ = history_cancel_tx.send(true);
                     }
                     Action::SelectAddressBookEntry(idx) => {
-                        // Get address from saved accounts in config
                         let idx = *idx;
+                        tracing::info!("[ADDR] SelectAddressBookEntry idx={}, watched={}", idx, app.watched_account.is_some());
+
+                        // Known addresses matching the hardcoded list in ui.rs
+                        let known_addresses: &[(&str, &str)] = &[
+                            ("Polkadot Treasury", "13UVJyLnbVp9RBZYFwCNuGnK87JYJ2nb7jMwaVe4vQ2UNCzN"),
+                            ("Polkadot Fellowship", "16SpacegeUTft9v3ts27CEC3tJaxgvE4uZeCctThFH3Vb24p"),
+                            ("Snowbridge", "13cKp89Nt7t1hZVWnqhKW9LY7Udhxk2BmLwKi3snVgUAjZGE"),
+                        ];
 
                         // Determine the actual index (accounting for "My Account")
-                        let actual_idx = if app.watched_account.is_some() {
+                        let known_idx = if app.watched_account.is_some() {
                             if idx == 0 {
-                                // "My Account" selected - no action needed
+                                tracing::info!("[ADDR] My Account selected, skipping");
                                 continue;
                             }
                             idx - 1
@@ -720,11 +728,15 @@ async fn main() -> Result<()> {
                             idx
                         };
 
-                        if let Some(saved_account) = app_config.accounts.get(actual_idx) {
+                        tracing::info!("[ADDR] known_idx={}, known_addresses.len()={}", known_idx, known_addresses.len());
+                        if let Some((name, addr)) = known_addresses.get(known_idx) {
                             use std::str::FromStr;
-                            if let Ok(account) = subxt::utils::AccountId32::from_str(&saved_account.address) {
-                                let _ = action_tx.send(Action::SetWatchedAccount(account, saved_account.address.clone())).await;
+                            tracing::info!("[ADDR] Selected: {} ({})", name, addr);
+                            if let Ok(account) = subxt::utils::AccountId32::from_str(addr) {
+                                let _ = action_tx.send(Action::SetWatchedAccount(account, addr.to_string())).await;
                             }
+                        } else {
+                            tracing::warn!("[ADDR] known_idx {} out of bounds!", known_idx);
                         }
                     }
                     Action::RemoveAccount(address) => {
@@ -1316,38 +1328,101 @@ async fn chain_task(
 
     tracing::info!("Validator data loaded successfully");
 
-    // Fetch nomination pools
-    // Note: This may fail with light client as storage iteration is limited
-    let pools = match client.get_nomination_pools().await {
-        Ok(p) => {
-            tracing::info!("Found {} nomination pools", p.len());
-            p
-        }
-        Err(e) => {
-            if client.is_light_client() {
-                tracing::warn!(
-                    "Nomination pools unavailable (light client limitation): {}",
-                    e
-                );
-            } else {
-                tracing::warn!("Failed to get nomination pools: {}", e);
+    // Stabilize connection before pool queries
+    // Light clients can become unstable after heavy validator query phase
+    if client.is_light_client() {
+        tracing::info!("Stabilizing light client before pool queries...");
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+        // Verify connection is still healthy, reconnect if needed
+        if !client.is_connected().await {
+            tracing::warn!("Light client disconnected after validator loading, reconnecting...");
+            if let Some(new_client) = try_reconnect(&client, 3).await {
+                client = new_client;
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
             }
-            Vec::new()
         }
+    }
+
+    // Fetch nomination pools with retry logic
+    let pools = {
+        let max_attempts = if client.is_light_client() { 3 } else { 2 };
+        let mut result = Vec::new();
+        for attempt in 1..=max_attempts {
+            match client.get_nomination_pools().await {
+                Ok(p) => {
+                    tracing::info!("Found {} nomination pools", p.len());
+                    result = p;
+                    break;
+                }
+                Err(e) => {
+                    if attempt < max_attempts {
+                        tracing::warn!(
+                            "Pool query failed (attempt {}/{}): {} - retrying...",
+                            attempt,
+                            max_attempts,
+                            e
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                        if client.is_light_client()
+                            && !client.is_connected().await
+                            && let Some(new_client) = try_reconnect(&client, 2).await
+                        {
+                            client = new_client;
+                            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                        }
+                    } else if client.is_light_client() {
+                        tracing::warn!(
+                            "Nomination pools unavailable (light client limitation): {}",
+                            e
+                        );
+                    } else {
+                        tracing::warn!("Failed to get nomination pools: {}", e);
+                    }
+                }
+            }
+        }
+        result
     };
 
-    // Fetch pool metadata for names
-    // Note: This may fail with light client as storage iteration is limited
-    let metadata = match client.get_pool_metadata().await {
-        Ok(m) => m,
-        Err(e) => {
-            if client.is_light_client() {
-                tracing::warn!("Pool metadata unavailable (light client limitation): {}", e);
-            } else {
-                tracing::warn!("Failed to get pool metadata: {}", e);
+    // Fetch pool metadata for names with retry logic
+    let metadata = {
+        let max_attempts = if client.is_light_client() { 3 } else { 2 };
+        let mut result = Vec::new();
+        for attempt in 1..=max_attempts {
+            match client.get_pool_metadata().await {
+                Ok(m) => {
+                    result = m;
+                    break;
+                }
+                Err(e) => {
+                    if attempt < max_attempts {
+                        tracing::warn!(
+                            "Pool metadata query failed (attempt {}/{}): {} - retrying...",
+                            attempt,
+                            max_attempts,
+                            e
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                        if client.is_light_client()
+                            && !client.is_connected().await
+                            && let Some(new_client) = try_reconnect(&client, 2).await
+                        {
+                            client = new_client;
+                            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                        }
+                    } else if client.is_light_client() {
+                        tracing::warn!(
+                            "Pool metadata unavailable (light client limitation): {}",
+                            e
+                        );
+                    } else {
+                        tracing::warn!("Failed to get pool metadata: {}", e);
+                    }
+                }
             }
-            Vec::new()
         }
+        result
     };
 
     // Build metadata map for name lookup
@@ -1689,8 +1764,8 @@ async fn chain_task(
                         }
                     };
 
-                    // Get total staked for this era to calculate network-wide APY
-                    let total_staked = match client.get_era_total_staked(era).await {
+                    // Get total staked for this era (direct point query, no iteration)
+                    let total_staked = match client.get_era_total_stake_direct(era).await {
                         Ok(staked) if staked > 0 => staked,
                         Ok(_) => {
                             tracing::debug!("No stake data for era {}", era);
@@ -2038,8 +2113,8 @@ async fn run_update_mode(
             }
         };
 
-        // Get total staked
-        let total_staked = match client.get_era_total_staked(era).await {
+        // Get total staked (direct point query, no iteration)
+        let total_staked = match client.get_era_total_stake_direct(era).await {
             Ok(staked) if staked > 0 => staked,
             Ok(_) => {
                 eprintln!("  Era {}: no stake data", era);

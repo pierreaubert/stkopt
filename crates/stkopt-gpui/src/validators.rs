@@ -30,23 +30,30 @@ pub fn sort_validators(
                     .partial_cmp(&b_apy)
                     .unwrap_or(std::cmp::Ordering::Equal)
             }
+            ValidatorSortColumn::Points => a.points.cmp(&b.points),
+            ValidatorSortColumn::Blocked => a.blocked.cmp(&b.blocked),
         };
         if ascending { cmp } else { cmp.reverse() }
     });
 }
 
-/// Filter validators by search query (matches name or address).
+/// Filter validators by search query (matches name or address) and blocked status.
 pub fn filter_validators<'a>(
     validators: &'a [ValidatorInfo],
     query: &str,
-) -> Vec<&'a ValidatorInfo> {
+    show_blocked: bool,
+) -> Vec<(usize, &'a ValidatorInfo)> {
     let query = query.to_lowercase();
-    if query.is_empty() {
-        return validators.iter().collect();
-    }
     validators
         .iter()
-        .filter(|v| {
+        .enumerate()
+        .filter(|(_, v)| {
+            if !show_blocked && v.blocked {
+                return false;
+            }
+            if query.is_empty() {
+                return true;
+            }
             v.address.to_lowercase().contains(&query)
                 || v.name
                     .as_ref()
@@ -212,31 +219,41 @@ mod tests {
     #[test]
     fn test_filter_by_name() {
         let validators = sample_validators();
-        let filtered = filter_validators(&validators, "alice");
+        let filtered = filter_validators(&validators, "alice", true);
         assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].name.as_deref(), Some("Alice"));
+        assert_eq!(filtered[0].1.name.as_deref(), Some("Alice"));
     }
 
     #[test]
     fn test_filter_by_address() {
         let validators = sample_validators();
-        let filtered = filter_validators(&validators, "1def");
+        let filtered = filter_validators(&validators, "1def", true);
         assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].address, "1def");
+        assert_eq!(filtered[0].1.address, "1def");
     }
 
     #[test]
     fn test_filter_empty_query() {
         let validators = sample_validators();
-        let filtered = filter_validators(&validators, "");
+        let filtered = filter_validators(&validators, "", true);
         assert_eq!(filtered.len(), 3);
     }
 
     #[test]
     fn test_filter_no_match() {
         let validators = sample_validators();
-        let filtered = filter_validators(&validators, "xyz");
+        let filtered = filter_validators(&validators, "xyz", true);
         assert_eq!(filtered.len(), 0);
+    }
+
+    #[test]
+    fn test_filter_hides_blocked() {
+        let mut validators = sample_validators();
+        validators[1].blocked = true;
+        let filtered = filter_validators(&validators, "", false);
+        assert_eq!(filtered.len(), 2);
+        // The blocked validator (index 1) should be filtered out
+        assert!(filtered.iter().all(|(_, v)| !v.blocked));
     }
 
     #[test]
@@ -281,6 +298,8 @@ mod proptest_tests {
             Just(ValidatorSortColumn::OwnStake),
             Just(ValidatorSortColumn::NominatorCount),
             Just(ValidatorSortColumn::Apy),
+            Just(ValidatorSortColumn::Points),
+            Just(ValidatorSortColumn::Blocked),
         ]
     }
 
@@ -294,9 +313,9 @@ mod proptest_tests {
         }
 
         #[test]
-        fn test_filter_never_increases_length(count in 0usize..50, query in ".*") {
+        fn test_filter_never_increases_length(count in 0usize..50, query in ".*", show_blocked in any::<bool>()) {
             let validators = generate_mock_validators(count);
-            let filtered = filter_validators(&validators, &query);
+            let filtered = filter_validators(&validators, &query, show_blocked);
             prop_assert!(filtered.len() <= validators.len());
         }
 

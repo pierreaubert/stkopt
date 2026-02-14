@@ -1,7 +1,7 @@
 //! Terminal event handling.
 
 use color_eyre::Result;
-use crossterm::event::{self, Event as CrosstermEvent, KeyEvent};
+use crossterm::event::{self, Event as CrosstermEvent, KeyEvent, KeyEventKind};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -49,7 +49,10 @@ impl EventHandler {
                             && let Ok(evt) = event::read()
                         {
                             let event = match evt {
-                                CrosstermEvent::Key(key) => Some(Event::Key(key)),
+                                CrosstermEvent::Key(key) if key.kind == KeyEventKind::Press => {
+                                    Some(Event::Key(key))
+                                }
+                                CrosstermEvent::Key(_) => None, // Ignore Release/Repeat
                                 CrosstermEvent::Resize(w, h) => Some(Event::Resize(w, h)),
                                 _ => None,
                             };

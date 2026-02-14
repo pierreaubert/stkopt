@@ -284,6 +284,9 @@ impl AppConfig {
     /// Remove an account from the legacy accounts list.
     pub fn remove_account(&mut self, address: &str) {
         self.accounts.retain(|a| a.address != address);
+        if self.last_account.as_deref() == Some(address) {
+            self.last_account = None;
+        }
     }
 
     /// Get the most recently added account address from legacy list.

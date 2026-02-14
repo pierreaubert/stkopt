@@ -22,31 +22,35 @@ impl PoolModal {
             .id("pool-modal-overlay")
             .absolute()
             .inset_0()
-            .bg(rgba(0x00000088))
             .flex()
             .items_center()
             .justify_center()
-            .on_mouse_down(MouseButton::Left, {
-                let entity = entity.clone();
-                move |_event, _window, cx| {
-                    entity.update(cx, |this, cx| {
-                        this.show_pool_modal = false;
-                        cx.notify();
-                    });
-                }
-            })
+            .child(
+                div()
+                    .id("pool-modal-bg")
+                    .absolute()
+                    .inset_0()
+                    .bg(rgba(0x00000088))
+                    .on_mouse_down(MouseButton::Left, {
+                        let entity = entity.clone();
+                        move |_event, _window, cx| {
+                            entity.update(cx, |this, cx| {
+                                this.show_pool_modal = false;
+                                cx.notify();
+                            });
+                        }
+                    }),
+            )
             .child(
                 div()
                     .id("pool-modal-content")
+                    .relative()
                     .w(px(450.0))
                     .bg(theme.surface)
                     .rounded_lg()
                     .border_1()
                     .border_color(theme.border)
                     .shadow_lg()
-                    .on_mouse_down(MouseButton::Left, |_event, _window, _cx| {
-                        // Stop propagation
-                    })
                     .child(Self::render_header(operation, app, cx))
                     .child(Self::render_body(app, cx))
                     .child(Self::render_footer(app, cx)),

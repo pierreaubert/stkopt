@@ -493,6 +493,28 @@ impl ChainClient {
             .and_then(|v| v.as_u128()))
     }
 
+    /// Get total staked amount for an era from the dedicated `ErasTotalStake` storage item.
+    ///
+    /// This is a direct point query (no iteration), so it works reliably with light clients.
+    /// Prefer this over summing from `get_era_stakers_overview`, which may return partial results.
+    pub async fn get_era_total_stake_direct(&self, era: EraIndex) -> Result<Balance, ChainError> {
+        let storage_query =
+            subxt::dynamic::storage("Staking", "ErasTotalStake", vec![Value::u128(era as u128)]);
+
+        let result: Option<DecodedValueThunk> = self
+            .client()
+            .storage()
+            .at_latest()
+            .await?
+            .fetch(&storage_query)
+            .await?;
+
+        Ok(result
+            .and_then(|v| v.to_value().ok())
+            .and_then(|v| v.as_u128())
+            .unwrap_or(0))
+    }
+
     /// Get staking exposure for validators in an era (using ErasStakersOverview).
     /// Returns partial results if iteration is interrupted (e.g., connection drop).
     /// Deduplicates by address (light clients may return duplicates during iteration).

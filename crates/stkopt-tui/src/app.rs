@@ -555,6 +555,16 @@ impl App {
 
     /// Handle keyboard input.
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
+        if key.code == KeyCode::Enter {
+            tracing::info!(
+                "[KEY] Enter received: input_mode={:?}, view={:?}, panel={}, qr={}, help={}",
+                self.input_mode,
+                self.current_view,
+                self.account_panel_focus,
+                self.qr.showing,
+                self.showing_help,
+            );
+        }
         match self.input_mode {
             InputMode::Normal => self.handle_normal_key(key),
             InputMode::EnteringAccount => self.handle_input_key(key),
@@ -816,15 +826,23 @@ impl App {
             }
             KeyCode::Right if self.current_view == View::AccountStatus => {
                 self.account_panel_focus = 1;
+                // Auto-select first row if nothing selected
+                if self.address_book_state.selected().is_none() && self.address_book_len() > 0 {
+                    self.address_book_state.select(Some(0));
+                }
             }
             // Select from address book with Enter when focused on address book
             KeyCode::Enter
                 if self.current_view == View::AccountStatus && self.account_panel_focus == 1 =>
             {
                 if let Some(idx) = self.address_book_state.selected() {
-                    // Return action to select this address
+                    tracing::info!(
+                        "[KEY] Enter pressed on address book, selected index: {}",
+                        idx
+                    );
                     return Some(Action::SelectAddressBookEntry(idx));
                 }
+                tracing::warn!("[KEY] Enter pressed on address book but nothing selected");
             }
             // Navigation
             KeyCode::Up | KeyCode::Char('k') => self.select_previous(),
@@ -839,7 +857,16 @@ impl App {
             KeyCode::End => {
                 self.scroll_logs_to_bottom();
             }
-            _ => {}
+            other => {
+                if matches!(other, KeyCode::Enter) {
+                    tracing::warn!(
+                        "[KEY] Enter fell through to wildcard! view={:?}, panel={}, selected={:?}",
+                        self.current_view,
+                        self.account_panel_focus,
+                        self.address_book_state.selected(),
+                    );
+                }
+            }
         }
         None
     }
@@ -1299,6 +1326,7 @@ impl App {
             Action::SetWatchedAccount(account, _original) => {
                 self.watched_account = Some(account);
                 self.account_status = None; // Will be fetched
+                self.account_panel_focus = 0; // Move focus back to account status
             }
             Action::SetAccountStatus(status) => {
                 tracing::debug!("SetAccountStatus action received, updating app state");

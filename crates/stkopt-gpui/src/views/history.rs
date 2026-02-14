@@ -2,7 +2,7 @@
 
 use gpui::prelude::*;
 use gpui::*;
-use gpui_px::line;
+use gpui_px::{ChartTheme, line};
 use gpui_ui_kit::theme::ThemeExt;
 use gpui_ui_kit::*;
 
@@ -103,13 +103,27 @@ impl HistorySection {
         let x_data: Vec<f64> = app.staking_history.iter().map(|h| h.era as f64).collect();
         let y_data: Vec<f64> = app.staking_history.iter().map(|h| h.apy * 100.0).collect();
 
+        let dark_theme = ChartTheme {
+            plot_background: gpui::rgb(0x000000),
+            grid_color: gpui::rgba(0xffffff33),
+            axis_line_color: gpui::rgba(0xffffff55),
+            axis_label_color: gpui::rgba(0xffffffcc),
+            title_color: gpui::rgba(0xffffffee),
+            legend_text_color: gpui::rgba(0xffffffcc),
+        };
+
+        // Compute chart width from available space: viewport - sidebar(220) - content padding(2*24) - card padding(2*16)
+        let chart_width = (app.viewport_width - 220.0 - 48.0 - 32.0).max(300.0);
+        let chart_height = chart_width / 2.0;
+
         // Build the line chart
         match line(&x_data, &y_data)
             .title("APY Over Time (%)")
             .color(0x22c55e) // Green color matching theme.success
             .stroke_width(2.0)
             .show_points(true)
-            .size(600.0, 200.0)
+            .size(chart_width, chart_height)
+            .theme(dark_theme)
             .build()
         {
             Ok(chart) => Card::new()
@@ -176,6 +190,13 @@ impl HistorySection {
                     ),
                 )
                 .child(
+                    div().w(px(100.0)).child(
+                        Text::new("Date")
+                            .size(TextSize::Sm)
+                            .weight(TextWeight::Semibold),
+                    ),
+                )
+                .child(
                     div().flex_1().child(
                         Text::new("Staked")
                             .size(TextSize::Sm)
@@ -198,13 +219,14 @@ impl HistorySection {
                 ),
         );
 
-        // History rows (show last 15 eras)
+        // History rows (show last 30 eras)
         let symbol = app.token_symbol();
         let decimals = app.token_decimals();
-        for (i, point) in app.staking_history.iter().rev().take(15).enumerate() {
+        for (i, point) in app.staking_history.iter().rev().take(30).enumerate() {
             let staked_str = format_balance(point.bonded, symbol, decimals);
             let rewards_str = format_balance(point.reward, symbol, decimals);
             let apy_str = format!("{:.2}%", point.apy * 100.0);
+            let date_str = point.date.clone().unwrap_or_else(|| "-".to_string());
             let row_bg = if i % 2 == 0 {
                 theme.background
             } else {
@@ -233,6 +255,13 @@ impl HistorySection {
                         ),
                     )
                     .child(
+                        div().w(px(100.0)).child(
+                            Text::new(date_str)
+                                .size(TextSize::Sm)
+                                .color(theme.text_secondary),
+                        ),
+                    )
+                    .child(
                         div()
                             .flex_1()
                             .child(Text::new(staked_str).size(TextSize::Sm)),
@@ -253,11 +282,11 @@ impl HistorySection {
         }
 
         // Show count if more history exists
-        if app.staking_history.len() > 15 {
+        if app.staking_history.len() > 30 {
             list = list.child(
                 div().px_4().py_3().child(
                     Text::new(format!(
-                        "Showing last 15 of {} eras",
+                        "Showing last 30 of {} eras",
                         app.staking_history.len()
                     ))
                     .size(TextSize::Sm)

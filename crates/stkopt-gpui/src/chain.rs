@@ -89,6 +89,12 @@ pub enum ChainCommand {
         value: u128,
         reply: oneshot::Sender<Result<TransactionPayload, String>>,
     },
+    /// Create rebond transaction payload.
+    CreateRebondPayload {
+        signer: AccountId32,
+        value: u128,
+        reply: oneshot::Sender<Result<TransactionPayload, String>>,
+    },
     /// Create set_payee transaction payload.
     CreateSetPayeePayload {
         signer: AccountId32,
@@ -554,6 +560,24 @@ impl ChainHandle {
         reply_rx.await.map_err(|_| "Channel closed".to_string())?
     }
 
+    /// Create a rebond transaction payload.
+    pub async fn create_rebond_payload(
+        &self,
+        signer: AccountId32,
+        value: u128,
+    ) -> Result<TransactionPayload, String> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(ChainCommand::CreateRebondPayload {
+                signer,
+                value,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|e| format!("Failed to send command: {}", e))?;
+        reply_rx.await.map_err(|_| "Channel closed".to_string())?
+    }
+
     /// Create a set_payee transaction payload.
     pub async fn create_set_payee_payload(
         &self,
@@ -737,6 +761,8 @@ struct ChainWorker {
     people_client: Option<PeopleChainClient>,
     update_tx: mpsc::Sender<ChainUpdate>,
     db: Option<DbService>,
+    network: Option<Network>,
+    use_light_client: bool,
 }
 
 impl ChainWorker {
@@ -746,10 +772,15 @@ impl ChainWorker {
             people_client: None,
             update_tx,
             db,
+            network: None,
+            use_light_client: false,
         }
     }
 
     async fn handle_connect(&mut self, network: Network, use_light_client: bool) {
+        self.network = Some(network);
+        self.use_light_client = use_light_client;
+
         // Send connecting status
         let _ = self
             .update_tx
@@ -845,8 +876,11 @@ impl ChainWorker {
                     }
                 }
 
-                // Auto-fetch validators after connection
+                // Auto-fetch validators and pools after connection
                 self.fetch_validators_internal(network).await;
+                // Delay before pool fetch: light client needs time for storage iteration
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                self.fetch_pools_internal(network).await;
             }
             Err(e) => {
                 tracing::error!("Failed to connect: {}", e);
@@ -870,6 +904,27 @@ impl ChainWorker {
                 ConnectionStatus::Disconnected,
             ))
             .await;
+    }
+
+    /// Check if an error string indicates a lost connection.
+    fn is_connection_error(err: &str) -> bool {
+        err.contains("ConnectionShutdown")
+            || err.contains("Not connected")
+            || err.contains("Rpc error")
+            || err.contains("connection closed")
+            || err.contains("channel closed")
+    }
+
+    /// Attempt to reconnect using stored connection params.
+    async fn try_reconnect(&mut self) -> bool {
+        let Some(network) = self.network else {
+            return false;
+        };
+        tracing::warn!("Connection lost, attempting reconnection to {}...", network);
+        self.client = None;
+        self.people_client = None;
+        self.handle_connect(network, self.use_light_client).await;
+        self.client.is_some()
     }
 
     async fn fetch_validators_internal(&mut self, network: Network) {
@@ -922,118 +977,146 @@ impl ChainWorker {
         }
     }
 
+    async fn fetch_account_once(
+        &self,
+        network: Network,
+        address: &str,
+    ) -> Result<AccountData, String> {
+        let Some(ref client) = self.client else {
+            return Err("Not connected".to_string());
+        };
+        let account_id: subxt::utils::AccountId32 = address
+            .parse()
+            .map_err(|e| format!("Invalid address: {}", e))?;
+
+        // Fetch balance
+        let balance = client.get_account_balance(&account_id).await;
+        let staking = client.get_staking_ledger(&account_id).await;
+        let nominations = client.get_nominations(&account_id).await;
+        let pool = client.get_pool_membership(&account_id).await;
+
+        let bal = balance.map_err(|e| format!("Failed to fetch balance: {}", e))?;
+
+        let staking_ledger = staking.ok().flatten();
+        let staked = staking_ledger.as_ref().map(|s| s.active);
+        let unbonding = staking_ledger
+            .as_ref()
+            .map(|s| s.unlocking.iter().map(|c| c.value).sum())
+            .unwrap_or(0);
+        let noms: Vec<String> = nominations
+            .ok()
+            .flatten()
+            .map(|n| n.targets.iter().map(|t| t.to_string()).collect())
+            .unwrap_or_default();
+
+        // Get pool membership and calculate pending rewards
+        let pool_membership = pool.ok().flatten();
+        let pool_id = pool_membership.as_ref().map(|p| p.pool_id);
+        let pool_pending_rewards = if let Some(ref membership) = pool_membership {
+            match client
+                .get_pool_pending_rewards(
+                    membership.pool_id,
+                    membership.points,
+                    membership.last_recorded_reward_counter,
+                )
+                .await
+            {
+                Ok(pending) => {
+                    tracing::info!("Pool {} pending rewards: {}", membership.pool_id, pending);
+                    pending
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to calculate pool pending rewards: {}", e);
+                    0
+                }
+            }
+        } else {
+            0
+        };
+
+        let account_data = AccountData {
+            free_balance: bal.free,
+            reserved_balance: bal.reserved,
+            staked_balance: staked,
+            unbonding_balance: unbonding,
+            is_nominating: !noms.is_empty(),
+            nominations: noms.clone(),
+            pool_id,
+            pool_pending_rewards,
+        };
+
+        // Persist to DB
+        if let Some(ref db) = self.db {
+            let cached_status = CachedAccountStatus {
+                free_balance: account_data.free_balance,
+                reserved_balance: account_data.reserved_balance,
+                frozen_balance: bal.frozen,
+                staked_amount: account_data.staked_balance.unwrap_or(0),
+                nominations_json: if noms.is_empty() {
+                    None
+                } else {
+                    serde_json::to_string(&noms).ok()
+                },
+                pool_id: account_data.pool_id,
+                pool_points: None,
+            };
+            if let Err(e) = db
+                .set_cached_account_status(network, address.to_string(), cached_status)
+                .await
+            {
+                tracing::warn!("Failed to cache account status: {}", e);
+            }
+        }
+
+        Ok(account_data)
+    }
+
     async fn handle_fetch_account(
         &mut self,
         network: Network,
         address: String,
         reply: oneshot::Sender<Result<AccountData, String>>,
     ) {
-        let result = if let Some(ref client) = self.client {
-            match address.parse::<subxt::utils::AccountId32>() {
-                Ok(account_id) => {
-                    // Fetch balance
-                    let balance = client.get_account_balance(&account_id).await;
-                    let staking = client.get_staking_ledger(&account_id).await;
-                    let nominations = client.get_nominations(&account_id).await;
-                    let pool = client.get_pool_membership(&account_id).await;
+        let mut result = self.fetch_account_once(network, &address).await;
+        if let Err(ref e) = result
+            && Self::is_connection_error(e)
+            && self.try_reconnect().await
+        {
+            result = self.fetch_account_once(network, &address).await;
+        }
+        let _ = reply.send(result);
+    }
 
-                    match balance {
-                        Ok(bal) => {
-                            let staking_ledger = staking.ok().flatten();
-                            let staked = staking_ledger.as_ref().map(|s| s.active);
-                            let unbonding = staking_ledger
-                                .as_ref()
-                                .map(|s| s.unlocking.iter().map(|c| c.value).sum())
-                                .unwrap_or(0);
-                            let noms: Vec<String> = nominations
-                                .ok()
-                                .flatten()
-                                .map(|n| n.targets.iter().map(|t| t.to_string()).collect())
-                                .unwrap_or_default();
+    async fn fetch_validators_once(&self, network: Network) -> Result<Vec<ValidatorInfo>, String> {
+        let Some(ref client) = self.client else {
+            return Err("Not connected".to_string());
+        };
+        match client.get_validators().await {
+            Ok(validators) => {
+                tracing::info!("Fetched {} raw validators, enriching...", validators.len());
+                let enriched =
+                    enrich_validators(client, &validators, self.people_client.as_ref()).await;
 
-                            // Get pool membership and calculate pending rewards
-                            let pool_membership = pool.ok().flatten();
-                            let pool_id = pool_membership.as_ref().map(|p| p.pool_id);
-                            let pool_pending_rewards = if let Some(ref membership) = pool_membership
-                            {
-                                match client
-                                    .get_pool_pending_rewards(
-                                        membership.pool_id,
-                                        membership.points,
-                                        membership.last_recorded_reward_counter,
-                                    )
-                                    .await
-                                {
-                                    Ok(pending) => {
-                                        tracing::info!(
-                                            "Pool {} pending rewards: {}",
-                                            membership.pool_id,
-                                            pending
-                                        );
-                                        pending
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            "Failed to calculate pool pending rewards: {}",
-                                            e
-                                        );
-                                        0
-                                    }
-                                }
-                            } else {
-                                0
-                            };
+                // Persist to DB
+                if let Some(ref db) = self.db {
+                    let era = if let Ok(Some(meta)) = db.get_chain_metadata(network).await {
+                        meta.current_era
+                    } else {
+                        0
+                    };
 
-                            let account_data = AccountData {
-                                free_balance: bal.free,
-                                reserved_balance: bal.reserved,
-                                staked_balance: staked,
-                                unbonding_balance: unbonding,
-                                is_nominating: !noms.is_empty(),
-                                nominations: noms.clone(),
-                                pool_id,
-                                pool_pending_rewards,
-                            };
-
-                            // Persist to DB
-                            if let Some(ref db) = self.db {
-                                let cached_status = CachedAccountStatus {
-                                    free_balance: account_data.free_balance,
-                                    reserved_balance: account_data.reserved_balance,
-                                    frozen_balance: bal.frozen,
-                                    staked_amount: account_data.staked_balance.unwrap_or(0),
-                                    nominations_json: if noms.is_empty() {
-                                        None
-                                    } else {
-                                        serde_json::to_string(&noms).ok()
-                                    },
-                                    pool_id: account_data.pool_id,
-                                    pool_points: None, // Need to fetch pool points
-                                };
-                                if let Err(e) = db
-                                    .set_cached_account_status(
-                                        network,
-                                        address.clone(),
-                                        cached_status,
-                                    )
-                                    .await
-                                {
-                                    tracing::warn!("Failed to cache account status: {}", e);
-                                }
-                            }
-
-                            Ok(account_data)
-                        }
-                        Err(e) => Err(format!("Failed to fetch balance: {}", e)),
+                    if let Err(e) = db
+                        .set_cached_validators(network, era, enriched.clone())
+                        .await
+                    {
+                        tracing::warn!("Failed to cache validators: {}", e);
                     }
                 }
-                Err(e) => Err(format!("Invalid address: {}", e)),
-            }
-        } else {
-            Err("Not connected".to_string())
-        };
 
-        let _ = reply.send(result);
+                Ok(enriched)
+            }
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     async fn handle_fetch_validators(
@@ -1041,37 +1124,98 @@ impl ChainWorker {
         network: Network,
         reply: oneshot::Sender<Result<Vec<ValidatorInfo>, String>>,
     ) {
-        let result = if let Some(ref client) = self.client {
-            match client.get_validators().await {
-                Ok(validators) => {
-                    tracing::info!("Fetched {} raw validators, enriching...", validators.len());
-                    let enriched =
-                        enrich_validators(client, &validators, self.people_client.as_ref()).await;
-
-                    // Persist to DB
-                    if let Some(ref db) = self.db {
-                        let era = if let Ok(Some(meta)) = db.get_chain_metadata(network).await {
-                            meta.current_era
-                        } else {
-                            0
-                        };
-
-                        if let Err(e) = db
-                            .set_cached_validators(network, era, enriched.clone())
-                            .await
-                        {
-                            tracing::warn!("Failed to cache validators: {}", e);
-                        }
-                    }
-
-                    Ok(enriched)
-                }
-                Err(e) => Err(e.to_string()),
-            }
-        } else {
-            Err("Not connected".to_string())
-        };
+        let mut result = self.fetch_validators_once(network).await;
+        if let Err(ref e) = result
+            && Self::is_connection_error(e)
+            && self.try_reconnect().await
+        {
+            result = self.fetch_validators_once(network).await;
+        }
         let _ = reply.send(result);
+    }
+
+    async fn fetch_pools_once(&self, network: Network) -> Result<Vec<PoolInfo>, String> {
+        let Some(ref client) = self.client else {
+            return Err("Not connected".to_string());
+        };
+        match client.get_nomination_pools().await {
+            Ok(pools) => {
+                // Fetch pool metadata (names)
+                let metadata_map: HashMap<u32, String> = match client.get_pool_metadata().await {
+                    Ok(metadata) => {
+                        tracing::info!("Fetched {} pool names", metadata.len());
+                        metadata.into_iter().map(|m| (m.id, m.name)).collect()
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to fetch pool metadata: {}", e);
+                        HashMap::new()
+                    }
+                };
+
+                // Calculate network average APY for pool estimation
+                let network_apy = self.calculate_network_apy(client).await;
+                tracing::info!("Network average APY for pools: {:?}", network_apy);
+
+                let enriched: Vec<PoolInfo> = pools
+                    .iter()
+                    .map(|p| {
+                        // Pool APY = network APY * (1 - pool commission)
+                        let pool_apy = network_apy.map(|apy| {
+                            let commission = p.commission.unwrap_or(0.0);
+                            let after_commission = apy * (1.0 - commission);
+                            // Cap at realistic maximum
+                            after_commission.min(MAX_REALISTIC_APY)
+                        });
+
+                        // Use metadata name if available, otherwise default
+                        let name = metadata_map
+                            .get(&p.id)
+                            .cloned()
+                            .unwrap_or_else(|| format!("Pool #{}", p.id));
+
+                        PoolInfo {
+                            id: p.id,
+                            name,
+                            state: match p.state {
+                                ChainPoolState::Open => PoolState::Open,
+                                ChainPoolState::Blocked => PoolState::Blocked,
+                                ChainPoolState::Destroying => PoolState::Destroying,
+                            },
+                            member_count: p.member_count,
+                            total_bonded: p.points,
+                            commission: p.commission,
+                            apy: pool_apy,
+                        }
+                    })
+                    .collect();
+
+                // Persist to DB
+                if let Some(ref db) = self.db
+                    && let Err(e) = db.set_cached_pools(network, enriched.clone()).await
+                {
+                    tracing::warn!("Failed to cache pools: {}", e);
+                }
+
+                Ok(enriched)
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    async fn fetch_pools_internal(&mut self, network: Network) {
+        match self.fetch_pools_once(network).await {
+            Ok(pools) => {
+                tracing::info!("Sending {} pools to UI", pools.len());
+                let _ = self.update_tx.send(ChainUpdate::PoolsLoaded(pools)).await;
+            }
+            Err(e) => {
+                tracing::error!("Failed to fetch pools: {}", e);
+                let _ = self
+                    .update_tx
+                    .send(ChainUpdate::Error(format!("Failed to fetch pools: {}", e)))
+                    .await;
+            }
+        }
     }
 
     async fn handle_fetch_pools(
@@ -1079,73 +1223,13 @@ impl ChainWorker {
         network: Network,
         reply: oneshot::Sender<Result<Vec<PoolInfo>, String>>,
     ) {
-        let result = if let Some(ref client) = self.client {
-            match client.get_nomination_pools().await {
-                Ok(pools) => {
-                    // Fetch pool metadata (names)
-                    let metadata_map: HashMap<u32, String> = match client.get_pool_metadata().await
-                    {
-                        Ok(metadata) => {
-                            tracing::info!("Fetched {} pool names", metadata.len());
-                            metadata.into_iter().map(|m| (m.id, m.name)).collect()
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to fetch pool metadata: {}", e);
-                            HashMap::new()
-                        }
-                    };
-
-                    // Calculate network average APY for pool estimation
-                    let network_apy = self.calculate_network_apy(client).await;
-                    tracing::info!("Network average APY for pools: {:?}", network_apy);
-
-                    let enriched: Vec<PoolInfo> = pools
-                        .iter()
-                        .map(|p| {
-                            // Pool APY = network APY * (1 - pool commission)
-                            let pool_apy = network_apy.map(|apy| {
-                                let commission = p.commission.unwrap_or(0.0);
-                                let after_commission = apy * (1.0 - commission);
-                                // Cap at realistic maximum
-                                after_commission.min(MAX_REALISTIC_APY)
-                            });
-
-                            // Use metadata name if available, otherwise default
-                            let name = metadata_map
-                                .get(&p.id)
-                                .cloned()
-                                .unwrap_or_else(|| format!("Pool #{}", p.id));
-
-                            PoolInfo {
-                                id: p.id,
-                                name,
-                                state: match p.state {
-                                    ChainPoolState::Open => PoolState::Open,
-                                    ChainPoolState::Blocked => PoolState::Blocked,
-                                    ChainPoolState::Destroying => PoolState::Destroying,
-                                },
-                                member_count: p.member_count,
-                                total_bonded: p.points,
-                                commission: p.commission,
-                                apy: pool_apy,
-                            }
-                        })
-                        .collect();
-
-                    // Persist to DB
-                    if let Some(ref db) = self.db
-                        && let Err(e) = db.set_cached_pools(network, enriched.clone()).await
-                    {
-                        tracing::warn!("Failed to cache pools: {}", e);
-                    }
-
-                    Ok(enriched)
-                }
-                Err(e) => Err(e.to_string()),
-            }
-        } else {
-            Err("Not connected".to_string())
-        };
+        let mut result = self.fetch_pools_once(network).await;
+        if let Err(ref e) = result
+            && Self::is_connection_error(e)
+            && self.try_reconnect().await
+        {
+            result = self.fetch_pools_once(network).await;
+        }
         let _ = reply.send(result);
     }
 
@@ -1173,16 +1257,14 @@ impl ChainWorker {
             }
         };
 
-        // Get total staked from era exposures
-        let exposures = match client.get_era_stakers_overview(query_era).await {
-            Ok(exp) => exp,
+        // Get total staked (direct point query, no iteration)
+        let total_staked = match client.get_era_total_stake_direct(query_era).await {
+            Ok(staked) => staked,
             Err(e) => {
-                tracing::debug!("Failed to get era stakers for APY: {}", e);
+                tracing::debug!("Failed to get era total staked for APY: {}", e);
                 return None;
             }
         };
-
-        let total_staked: u128 = exposures.iter().map(|e| e.total).sum();
         if total_staked == 0 {
             tracing::debug!("Total staked is 0, cannot calculate APY");
             return None;
@@ -1259,6 +1341,24 @@ impl ChainWorker {
                 .await
                 .map(|p| make_transaction_payload(p, signer))
                 .map_err(|e| format!("Failed to create bond_extra payload: {}", e))
+        } else {
+            Err("Not connected".to_string())
+        };
+        let _ = reply.send(result);
+    }
+
+    async fn handle_create_rebond_payload(
+        &self,
+        signer: AccountId32,
+        value: u128,
+        reply: oneshot::Sender<Result<TransactionPayload, String>>,
+    ) {
+        let result = if let Some(ref client) = self.client {
+            client
+                .create_rebond_payload(&signer, value, true)
+                .await
+                .map(|p| make_transaction_payload(p, signer))
+                .map_err(|e| format!("Failed to create rebond payload: {}", e))
         } else {
             Err("Not connected".to_string())
         };
@@ -1466,12 +1566,16 @@ impl ChainWorker {
     // === History Fetching Handler ===
 
     async fn handle_fetch_history(
-        &self,
+        &mut self,
         network: Network,
         address: String,
         num_eras: u32,
         reply: oneshot::Sender<Result<Vec<HistoryPoint>, String>>,
     ) {
+        if self.client.is_none() && !self.try_reconnect().await {
+            let _ = reply.send(Err("Not connected".to_string()));
+            return;
+        }
         let Some(ref client) = self.client else {
             let _ = reply.send(Err("Not connected".to_string()));
             return;
@@ -1579,8 +1683,8 @@ impl ChainWorker {
                 }
             };
 
-            // Get total staked for this era
-            let total_staked = match client.get_era_total_staked(era).await {
+            // Get total staked for this era (direct point query, no iteration)
+            let total_staked = match client.get_era_total_stake_direct(era).await {
                 Ok(staked) if staked > 0 => staked,
                 Ok(_) => {
                     tracing::debug!("No stake data for era {}", era);
@@ -1730,6 +1834,15 @@ pub fn spawn_chain_worker(
                 } => {
                     worker
                         .handle_create_bond_extra_payload(signer, value, reply)
+                        .await;
+                }
+                ChainCommand::CreateRebondPayload {
+                    signer,
+                    value,
+                    reply,
+                } => {
+                    worker
+                        .handle_create_rebond_payload(signer, value, reply)
                         .await;
                 }
                 ChainCommand::CreateSetPayeePayload {

@@ -61,6 +61,7 @@ impl DashboardSection {
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .gap_3()
                             .child(
                                 Button::new("btn-bond", "Bond")
@@ -90,16 +91,44 @@ impl DashboardSection {
                                     }),
                             )
                             .child(
-                                Button::new("btn-claim", "Claim Rewards")
+                                Button::new("btn-rebond", "Rebond")
                                     .variant(ButtonVariant::Secondary)
                                     .on_click({
                                         let entity = entity.clone();
                                         move |_window, cx| {
                                             entity.update(cx, |this, cx| {
                                                 this.open_staking_modal(
-                                                    StakingOperation::ClaimRewards,
+                                                    StakingOperation::Rebond,
                                                     cx,
                                                 );
+                                            });
+                                        }
+                                    }),
+                            )
+                            .child(
+                                Button::new("btn-claim", "Claim Rewards")
+                                    .variant(ButtonVariant::Secondary)
+                                    .on_click({
+                                        let entity = entity.clone();
+                                        move |_window, cx| {
+                                            entity.update(cx, |this, cx| {
+                                                // Route to pool claim if pool rewards > 0
+                                                let has_pool_rewards = this
+                                                    .staking_info
+                                                    .as_ref()
+                                                    .is_some_and(|info| info.rewards_pending > 0);
+                                                if has_pool_rewards {
+                                                    this.open_pool_modal(
+                                                        crate::app::PoolOperation::ClaimPayout,
+                                                        None,
+                                                        cx,
+                                                    );
+                                                } else {
+                                                    this.tx_status_message = Some(
+                                                        "Staking rewards are auto-distributed. Use pool claim for pool rewards.".to_string(),
+                                                    );
+                                                    cx.notify();
+                                                }
                                             });
                                         }
                                     }),
@@ -111,8 +140,23 @@ impl DashboardSection {
                                         let entity = entity.clone();
                                         move |_window, cx| {
                                             entity.update(cx, |this, cx| {
+                                                // Navigate to Optimization section
+                                                this.current_section =
+                                                    crate::app::Section::Optimization;
+                                                cx.notify();
+                                            });
+                                        }
+                                    }),
+                            )
+                            .child(
+                                Button::new("btn-set-payee", "Set Payee")
+                                    .variant(ButtonVariant::Secondary)
+                                    .on_click({
+                                        let entity = entity.clone();
+                                        move |_window, cx| {
+                                            entity.update(cx, |this, cx| {
                                                 this.open_staking_modal(
-                                                    StakingOperation::Nominate,
+                                                    StakingOperation::SetPayee,
                                                     cx,
                                                 );
                                             });
@@ -154,8 +198,16 @@ fn stat_card(
 
 fn format_balance(amount: u128, symbol: &str, decimals: u8) -> String {
     let divisor = 10u128.pow(decimals as u32);
-    let frac_divisor = 10u128.pow(decimals.saturating_sub(4) as u32);
     let whole = amount / divisor;
-    let frac = (amount % divisor) / frac_divisor;
-    format!("{}.{:04} {}", whole, frac, symbol)
+    if whole >= 1_000_000 {
+        let m = whole as f64 / 1_000_000.0;
+        format!("{:.1}m{}", m, symbol)
+    } else if whole >= 10_000 {
+        let k = whole as f64 / 1_000.0;
+        format!("{:.0}k{}", k, symbol)
+    } else {
+        let frac_divisor = 10u128.pow(decimals.saturating_sub(4) as u32);
+        let frac = (amount % divisor) / frac_divisor;
+        format!("{}.{:04} {}", whole, frac, symbol)
+    }
 }

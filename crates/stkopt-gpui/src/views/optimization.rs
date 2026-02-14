@@ -85,16 +85,70 @@ impl OptimizationSection {
                             div()
                                 .flex()
                                 .gap_4()
-                                .child(param_field(
-                                    "Max Validators",
-                                    &app.optimization_target_count.to_string(),
-                                    &theme,
-                                ))
-                                .child(param_field(
-                                    "Max Commission (%)",
-                                    &format!("{:.0}", app.optimization_max_commission * 100.0),
-                                    &theme,
-                                )),
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_2()
+                                        .child(
+                                            Text::new("Max Validators (1-16)")
+                                                .size(TextSize::Sm)
+                                                .color(theme.text_secondary),
+                                        )
+                                        .child(
+                                            Input::new("optimization-target-count")
+                                                .placeholder("16")
+                                                .size(InputSize::Md)
+                                                .value(app.optimization_target_count.to_string())
+                                                .on_text_change({
+                                                    let entity = entity.clone();
+                                                    move |value: String, _window, cx| {
+                                                        entity.update(cx, |this, cx| {
+                                                            if let Ok(n) = value.parse::<usize>()
+                                                                && (1..=16).contains(&n)
+                                                            {
+                                                                this.optimization_target_count = n;
+                                                                cx.notify();
+                                                            }
+                                                        });
+                                                    }
+                                                }),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_2()
+                                        .child(
+                                            Text::new("Max Commission (0-100%)")
+                                                .size(TextSize::Sm)
+                                                .color(theme.text_secondary),
+                                        )
+                                        .child(
+                                            Input::new("optimization-max-commission")
+                                                .placeholder("15")
+                                                .size(InputSize::Md)
+                                                .value(format!(
+                                                    "{:.0}",
+                                                    app.optimization_max_commission * 100.0
+                                                ))
+                                                .on_text_change({
+                                                    let entity = entity.clone();
+                                                    move |value: String, _window, cx| {
+                                                        entity.update(cx, |this, cx| {
+                                                            if let Ok(pct) = value.parse::<f64>()
+                                                                && (0.0..=100.0).contains(&pct)
+                                                            {
+                                                                this.optimization_max_commission =
+                                                                    pct / 100.0;
+                                                                cx.notify();
+                                                            }
+                                                        });
+                                                    }
+                                                }),
+                                        ),
+                                ),
                         ),
                 ),
             )
@@ -232,7 +286,7 @@ impl OptimizationSection {
                 let commission_str = format!("{:.1}%", validator.commission * 100.0);
                 let apy_str = validator
                     .apy
-                    .map(|a| format!("{:.1}%", a))
+                    .map(|a| format!("{:.1}%", a * 100.0))
                     .unwrap_or_else(|| "-".to_string());
                 let row_bg = if i % 2 == 0 {
                     theme.background
@@ -367,32 +421,5 @@ where
                         .size(TextSize::Xs)
                         .color(theme.text_secondary),
                 ),
-        )
-}
-
-fn param_field(
-    label: &'static str,
-    value: &str,
-    theme: &gpui_ui_kit::theme::Theme,
-) -> impl IntoElement {
-    let value = SharedString::from(value.to_string());
-    div()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .child(
-            Text::new(label)
-                .size(TextSize::Sm)
-                .color(theme.text_secondary),
-        )
-        .child(
-            div()
-                .px_3()
-                .py_2()
-                .bg(theme.surface)
-                .border_1()
-                .border_color(theme.border)
-                .rounded_md()
-                .child(Text::new(value).size(TextSize::Sm)),
         )
 }

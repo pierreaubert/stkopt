@@ -16,11 +16,12 @@ impl ValidatorsSection {
         let entity = app.entity.clone();
         let is_loading = app.validators_loading;
 
-        // Filter validators based on search query
-        let filtered = filter_validators(&app.validators, &app.validator_search);
+        // Filter validators based on search query and blocked filter
+        let filtered = filter_validators(&app.validators, &app.validator_search, app.show_blocked);
         let filtered_count = filtered.len();
         let total = app.validators.len();
         let selected = app.selected_validators.len();
+        let show_blocked = app.show_blocked;
 
         div()
             .flex()
@@ -51,6 +52,27 @@ impl ValidatorsSection {
                                             });
                                         }
                                     }),
+                            )
+                            .child(
+                                Button::new(
+                                    "btn-toggle-blocked",
+                                    if show_blocked {
+                                        "Hide Blocked"
+                                    } else {
+                                        "Show Blocked"
+                                    },
+                                )
+                                .variant(ButtonVariant::Secondary)
+                                .size(ButtonSize::Sm)
+                                .on_click({
+                                    let entity = entity.clone();
+                                    move |_window, cx| {
+                                        entity.update(cx, |this, cx| {
+                                            this.show_blocked = !this.show_blocked;
+                                            cx.notify();
+                                        });
+                                    }
+                                }),
                             )
                             .child(
                                 Button::new(
@@ -103,7 +125,31 @@ impl ValidatorsSection {
                         } else {
                             BadgeVariant::Default
                         }),
-                    ),
+                    )
+                    .when(selected > 0, |el| {
+                        let entity = entity.clone();
+                        el.child(
+                            Button::new(
+                                "btn-nominate-selected",
+                                format!("Nominate Selected ({})", selected),
+                            )
+                            .variant(ButtonVariant::Primary)
+                            .size(ButtonSize::Sm)
+                            .on_click(move |_window, cx| {
+                                entity.update(cx, |this, cx| {
+                                    let targets: Vec<String> = this
+                                        .selected_validators
+                                        .iter()
+                                        .filter_map(|&idx| this.validators.get(idx))
+                                        .map(|v| v.address.clone())
+                                        .collect();
+                                    if !targets.is_empty() {
+                                        this.generate_nominate_qr(targets, cx);
+                                    }
+                                });
+                            }),
+                        )
+                    }),
             )
             .child(Self::render_validator_list(app, cx, &filtered))
     }
@@ -111,7 +157,7 @@ impl ValidatorsSection {
     fn render_validator_list(
         app: &StkoptApp,
         cx: &Context<StkoptApp>,
-        filtered: &[&crate::app::ValidatorInfo],
+        filtered: &[(usize, &crate::app::ValidatorInfo)],
     ) -> AnyElement {
         let theme = cx.theme();
         let entity = app.entity.clone();
@@ -185,6 +231,13 @@ impl ValidatorsSection {
                 .border_b_1()
                 .border_color(theme.border)
                 .child(
+                    div().w(px(30.0)).child(
+                        Text::new("Sel")
+                            .size(TextSize::Xs)
+                            .weight(TextWeight::Semibold),
+                    ),
+                )
+                .child(
                     div().w(px(40.0)).child(
                         Text::new("#")
                             .size(TextSize::Sm)
@@ -209,6 +262,24 @@ impl ValidatorsSection {
                     entity.clone(),
                 ))
                 .child(sortable_header_fixed(
+                    "Own Stake",
+                    110.0,
+                    ValidatorSortColumn::OwnStake,
+                    sort_column,
+                    sort_asc,
+                    &theme,
+                    entity.clone(),
+                ))
+                .child(sortable_header_fixed(
+                    "Nom",
+                    60.0,
+                    ValidatorSortColumn::NominatorCount,
+                    sort_column,
+                    sort_asc,
+                    &theme,
+                    entity.clone(),
+                ))
+                .child(sortable_header_fixed(
                     "Commission",
                     100.0,
                     ValidatorSortColumn::Commission,
@@ -225,11 +296,31 @@ impl ValidatorsSection {
                     sort_asc,
                     &theme,
                     entity.clone(),
+                ))
+                .child(sortable_header_fixed(
+                    "Points",
+                    70.0,
+                    ValidatorSortColumn::Points,
+                    sort_column,
+                    sort_asc,
+                    &theme,
+                    entity.clone(),
+                ))
+                .child(sortable_header_fixed(
+                    "Blocked",
+                    70.0,
+                    ValidatorSortColumn::Blocked,
+                    sort_column,
+                    sort_asc,
+                    &theme,
+                    entity.clone(),
                 )),
         );
 
-        // Validator rows (limit to first 50 for performance)
-        for (i, validator) in filtered.iter().take(50).enumerate() {
+        // Validator rows (limit to first 200 for performance)
+        for (i, (original_idx, validator)) in filtered.iter().take(200).enumerate() {
+            let original_idx = *original_idx;
+            let is_selected = app.selected_validators.contains(&original_idx);
             let name = validator.name.clone().unwrap_or_else(|| {
                 if validator.address.len() >= 8 {
                     validator.address[..8].to_string()
@@ -247,73 +338,141 @@ impl ValidatorsSection {
                 app.token_symbol(),
                 app.token_decimals(),
             );
-            let commission_str = format!("{:.1}%", validator.commission);
+            let own_stake_str = format_stake(
+                validator.own_stake,
+                app.token_symbol(),
+                app.token_decimals(),
+            );
+            let commission_str = format!("{:.1}%", validator.commission * 100.0);
             let apy_str = validator
                 .apy
-                .map(|a| format!("{:.1}%", a))
+                .map(|a| format!("{:.1}%", a * 100.0))
                 .unwrap_or_else(|| "-".to_string());
+            let points_str = if validator.points > 0 {
+                validator.points.to_string()
+            } else {
+                "-".to_string()
+            };
+            let blocked_str = if validator.blocked { "Yes" } else { "" };
             let row_bg = if i % 2 == 0 {
                 theme.background
             } else {
                 theme.surface
             };
-            let apy_color = if validator.apy.unwrap_or(0.0) > 15.0 {
+            let apy_color = if validator.apy.unwrap_or(0.0) > 0.15 {
                 theme.success
             } else {
                 theme.text_primary
             };
+            let blocked_color = if validator.blocked {
+                theme.error
+            } else {
+                theme.text_primary
+            };
 
-            list = list.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .px_4()
-                    .py_2()
-                    .bg(row_bg)
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .child(
-                        div().w(px(40.0)).child(
-                            Text::new(format!("{}", i + 1))
-                                .size(TextSize::Sm)
-                                .color(theme.text_secondary),
-                        ),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .child(Text::new(name).size(TextSize::Sm))
-                            .child(
-                                Text::new(addr_short)
+            let checkbox_text = if is_selected { "[x]" } else { "[ ]" };
+            let selected_count = app.selected_validators.len();
+            let entity = entity.clone();
+
+            list =
+                list.child(
+                    div()
+                        .id(SharedString::from(format!("validator-row-{}", i)))
+                        .flex()
+                        .items_center()
+                        .px_4()
+                        .py_2()
+                        .bg(row_bg)
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .cursor_pointer()
+                        .on_click(move |_event, _window, cx| {
+                            entity.update(cx, |this, cx| {
+                                if let Some(pos) = this
+                                    .selected_validators
+                                    .iter()
+                                    .position(|&i| i == original_idx)
+                                {
+                                    this.selected_validators.remove(pos);
+                                } else if selected_count < 16 {
+                                    this.selected_validators.push(original_idx);
+                                }
+                                cx.notify();
+                            });
+                        })
+                        .child(
+                            div().w(px(30.0)).child(
+                                Text::new(checkbox_text)
                                     .size(TextSize::Xs)
+                                    .color(if is_selected {
+                                        theme.accent
+                                    } else {
+                                        theme.text_secondary
+                                    }),
+                            ),
+                        )
+                        .child(
+                            div().w(px(40.0)).child(
+                                Text::new(format!("{}", i + 1))
+                                    .size(TextSize::Sm)
                                     .color(theme.text_secondary),
                             ),
-                    )
-                    .child(
-                        div()
-                            .w(px(120.0))
-                            .child(Text::new(stake_str).size(TextSize::Sm)),
-                    )
-                    .child(
-                        div()
-                            .w(px(100.0))
-                            .child(Text::new(commission_str).size(TextSize::Sm)),
-                    )
-                    .child(
-                        div()
-                            .w(px(80.0))
-                            .child(Text::new(apy_str).size(TextSize::Sm).color(apy_color)),
-                    ),
-            );
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .child(Text::new(name).size(TextSize::Sm))
+                                .child(
+                                    Text::new(addr_short)
+                                        .size(TextSize::Xs)
+                                        .color(theme.text_secondary),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .w(px(120.0))
+                                .child(Text::new(stake_str).size(TextSize::Sm)),
+                        )
+                        .child(
+                            div()
+                                .w(px(110.0))
+                                .child(Text::new(own_stake_str).size(TextSize::Sm)),
+                        )
+                        .child(div().w(px(60.0)).child(
+                            Text::new(validator.nominator_count.to_string()).size(TextSize::Sm),
+                        ))
+                        .child(
+                            div()
+                                .w(px(100.0))
+                                .child(Text::new(commission_str).size(TextSize::Sm)),
+                        )
+                        .child(
+                            div()
+                                .w(px(80.0))
+                                .child(Text::new(apy_str).size(TextSize::Sm).color(apy_color)),
+                        )
+                        .child(
+                            div()
+                                .w(px(70.0))
+                                .child(Text::new(points_str).size(TextSize::Sm)),
+                        )
+                        .child(
+                            div().w(px(70.0)).child(
+                                Text::new(blocked_str)
+                                    .size(TextSize::Sm)
+                                    .color(blocked_color),
+                            ),
+                        ),
+                );
         }
 
         // Show count if more validators exist
-        if filtered.len() > 50 {
+        if filtered.len() > 200 {
             list = list.child(
                 div().px_4().py_3().child(
-                    Text::new(format!("... and {} more validators", filtered.len() - 50))
+                    Text::new(format!("... and {} more validators", filtered.len() - 200))
                         .size(TextSize::Sm)
                         .color(theme.text_secondary),
                 ),

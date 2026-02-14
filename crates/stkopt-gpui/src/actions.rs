@@ -81,6 +81,8 @@ pub enum ValidatorSortColumn {
     OwnStake,
     NominatorCount,
     Apy,
+    Points,
+    Blocked,
 }
 
 #[cfg(test)]

@@ -234,13 +234,12 @@ LAUNCHER_EOF
     # Create PkgInfo
     echo -n "APPL????" > "$APP_BUNDLE/Contents/PkgInfo"
 
-    # Copy icon if it exists (convert from jpg/png to icns if needed)
-    if [ -f "$SCRIPT_DIR/icon.png" ]; then
-        create_icns "$SCRIPT_DIR/icon.png" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
-    elif [ -f "$SCRIPT_DIR/icon.icns" ]; then
-        cp "$SCRIPT_DIR/icon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+    # Copy icon if it exists (convert from png to icns)
+    local icon_path="$PROJECT_ROOT/assets/stkopt.png"
+    if [ -f "$icon_path" ]; then
+        create_icns "$icon_path" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
     else
-        log_warning "No icon found, app will use default icon"
+        log_warning "No icon found at $icon_path, app will use default icon"
     fi
 
     log_success "App bundle created at $APP_BUNDLE"

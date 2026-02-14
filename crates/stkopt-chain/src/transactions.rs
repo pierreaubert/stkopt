@@ -192,6 +192,27 @@ impl ChainClient {
         .await
     }
 
+    /// Generate an unsigned rebond extrinsic.
+    pub async fn create_rebond_payload(
+        &self,
+        signer: &AccountId32,
+        value: u128,
+        use_mortal_era: bool,
+    ) -> Result<UnsignedPayload, ChainError> {
+        let call = subxt::dynamic::tx(
+            "Staking",
+            "rebond",
+            vec![Value::primitive(Primitive::U128(value))],
+        );
+        self.create_payload_internal(
+            signer,
+            call,
+            format!("Rebond {} tokens", value),
+            use_mortal_era,
+        )
+        .await
+    }
+
     /// Generate an unsigned set_payee extrinsic.
     pub async fn create_set_payee_payload(
         &self,

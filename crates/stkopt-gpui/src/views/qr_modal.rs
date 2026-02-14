@@ -22,33 +22,37 @@ impl QrModal {
             .id("qr-modal-overlay")
             .absolute()
             .inset_0()
-            .bg(rgba(0x00000088))
             .flex()
             .items_center()
             .justify_center()
-            .on_mouse_down(MouseButton::Left, {
-                let entity = entity.clone();
-                move |_event, _window, cx| {
-                    entity.update(cx, |this, cx| {
-                        this.show_qr_modal = false;
-                        this.pending_tx_payload = None;
-                        this.stop_camera(cx);
-                        cx.notify();
-                    });
-                }
-            })
+            .child(
+                div()
+                    .id("qr-modal-bg")
+                    .absolute()
+                    .inset_0()
+                    .bg(rgba(0x00000088))
+                    .on_mouse_down(MouseButton::Left, {
+                        let entity = entity.clone();
+                        move |_event, _window, cx| {
+                            entity.update(cx, |this, cx| {
+                                this.show_qr_modal = false;
+                                this.pending_tx_payload = None;
+                                this.stop_camera(cx);
+                                cx.notify();
+                            });
+                        }
+                    }),
+            )
             .child(
                 div()
                     .id("qr-modal-content")
+                    .relative()
                     .w(px(500.0))
                     .bg(theme.surface)
                     .rounded_lg()
                     .border_1()
                     .border_color(theme.border)
                     .shadow_lg()
-                    .on_mouse_down(MouseButton::Left, |_event, _window, _cx| {
-                        // Stop propagation
-                    })
                     .child(Self::render_header(app, cx))
                     .child(Self::render_tabs(app, cx))
                     .child(Self::render_content(app, cx))
