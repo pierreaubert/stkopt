@@ -42,7 +42,11 @@ mod tests {
     #[test]
     fn test_theme_config_labels() {
         assert_eq!(ThemeConfig::System.label(), "System");
+        assert_eq!(ThemeConfig::Light.label(), "Light");
         assert_eq!(ThemeConfig::Dark.label(), "Dark");
+        assert_eq!(ThemeConfig::Midnight.label(), "Midnight");
+        assert_eq!(ThemeConfig::Forest.label(), "Forest");
+        assert_eq!(ThemeConfig::BlackAndWhite.label(), "Black & White");
     }
 
     #[test]

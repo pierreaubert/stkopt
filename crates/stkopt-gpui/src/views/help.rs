@@ -20,7 +20,7 @@ impl HelpOverlay {
             .id("help-overlay")
             .absolute()
             .inset_0()
-            .bg(rgba(0x00000088))
+            .bg(theme.overlay_bg)
             .flex()
             .items_center()
             .justify_center()
@@ -144,21 +144,25 @@ impl HelpOverlay {
                 "🔍",
                 "Watch an Account",
                 "Enter a Polkadot or Kusama address to monitor staking status.",
+                &theme,
             ))
             .child(Self::render_tip(
                 "⚡",
                 "Optimize Selection",
                 "Use the Optimization tab to find the best validators for your stake.",
+                &theme,
             ))
             .child(Self::render_tip(
                 "📊",
                 "Track History",
                 "View your staking rewards and APY trends in the History tab.",
+                &theme,
             ))
             .child(Self::render_tip(
                 "🔐",
                 "Secure Signing",
                 "Generate QR codes for air-gapped signing with Polkadot Vault.",
+                &theme,
             ))
     }
 
@@ -166,6 +170,7 @@ impl HelpOverlay {
         icon: &'static str,
         title: &'static str,
         description: &'static str,
+        theme: &gpui_ui_kit::theme::Theme,
     ) -> impl IntoElement {
         div()
             .flex()
@@ -180,7 +185,7 @@ impl HelpOverlay {
                     .child(
                         Text::new(description)
                             .size(TextSize::Xs)
-                            .color(gpui::rgb(0x888888)),
+                            .color(theme.text_secondary),
                     ),
             )
     }

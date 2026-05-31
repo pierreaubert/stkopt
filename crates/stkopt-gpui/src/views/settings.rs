@@ -5,8 +5,8 @@ use gpui::*;
 use gpui_ui_kit::theme::ThemeExt;
 use gpui_ui_kit::*;
 
-use crate::app::StkoptApp;
-use crate::persistence::{ConnectionModeConfig, NetworkConfig, ThemeConfig};
+use crate::app::{ConnectionMode, StkoptApp};
+use crate::persistence::{ConnectionModeConfig, NetworkConfig};
 use crate::shortcuts::{Shortcut, shortcuts_by_category};
 
 /// Settings section component.
@@ -70,32 +70,40 @@ impl SettingsSection {
                         "Theme",
                         "Choose your preferred color scheme",
                         Self::render_theme_selector(app, cx),
+                        &theme,
                     ))
                     .child(Self::render_setting_row(
                         "Auto-connect",
                         "Automatically connect to the network on startup",
-                        Self::render_toggle(app.settings_auto_connect, "auto-connect").on_click(
-                            move |_event, _window, cx| {
+                        Toggle::new("auto-connect")
+                            .checked(app.settings_auto_connect)
+                            .size(ToggleSize::Md)
+                            .on_change(move |enabled, _window, cx| {
                                 entity.update(cx, |this, cx| {
-                                    this.settings_auto_connect = !this.settings_auto_connect;
+                                    this.settings_auto_connect = enabled;
                                     this.save_config();
                                     cx.notify();
                                 });
-                            },
-                        ),
+                            }),
+                        &theme,
                     ))
                     .child(Self::render_setting_row(
                         "Show testnets",
                         "Display testnet networks in the network selector",
-                        Self::render_toggle(app.settings_show_testnets, "show-testnets").on_click(
-                            move |_event, _window, cx| {
+                        Toggle::new("show-testnets")
+                            .checked(app.settings_show_testnets)
+                            .size(ToggleSize::Md)
+                            .on_change(move |enabled, _window, cx| {
                                 entity2.update(cx, |this, cx| {
-                                    this.settings_show_testnets = !this.settings_show_testnets;
+                                    this.settings_show_testnets = enabled;
+                                    if !enabled && this.settings_network.is_testnet() {
+                                        this.settings_network = NetworkConfig::Polkadot;
+                                    }
                                     this.save_config();
                                     cx.notify();
                                 });
-                            },
-                        ),
+                            }),
+                        &theme,
                     )),
             )
     }
@@ -122,11 +130,13 @@ impl SettingsSection {
                         "Default Network",
                         "The network to connect to by default",
                         Self::render_network_selector(app, cx),
+                        &theme,
                     ))
                     .child(Self::render_setting_row(
                         "Connection Mode",
                         "How to connect to the blockchain",
                         Self::render_connection_mode_selector(app, cx),
+                        &theme,
                     )),
             )
     }
@@ -192,9 +202,11 @@ impl SettingsSection {
         label: &'static str,
         description: &'static str,
         control: impl IntoElement,
+        theme: &gpui_ui_kit::theme::Theme,
     ) -> impl IntoElement {
         div()
             .flex()
+            .flex_wrap()
             .items_center()
             .justify_between()
             .gap_4()
@@ -207,7 +219,7 @@ impl SettingsSection {
                     .child(
                         Text::new(description)
                             .size(TextSize::Xs)
-                            .color(gpui::rgb(0x888888)),
+                            .color(theme.text_secondary),
                     ),
             )
             .child(control)
@@ -215,168 +227,116 @@ impl SettingsSection {
 
     fn render_theme_selector(app: &StkoptApp, cx: &Context<StkoptApp>) -> impl IntoElement {
         let _theme = cx.theme();
-        let current = app.settings_theme;
+        let current = crate::theme::theme_config_value(app.settings_theme);
         let entity = app.entity.clone();
-        let entity2 = app.entity.clone();
-        let entity3 = app.entity.clone();
 
-        div()
-            .flex()
-            .gap_1()
-            .child(
-                Self::render_option_button("System", current == ThemeConfig::System, cx).on_click(
-                    move |_event, _window, cx| {
-                        entity.update(cx, |this, cx| {
-                            this.settings_theme = ThemeConfig::System;
-                            this.save_config();
-                            cx.notify();
-                        });
-                    },
-                ),
-            )
-            .child(
-                Self::render_option_button("Light", current == ThemeConfig::Light, cx).on_click(
-                    move |_event, _window, cx| {
-                        entity2.update(cx, |this, cx| {
-                            this.settings_theme = ThemeConfig::Light;
-                            this.save_config();
-                            cx.notify();
-                        });
-                    },
-                ),
-            )
-            .child(
-                Self::render_option_button("Dark", current == ThemeConfig::Dark, cx).on_click(
-                    move |_event, _window, cx| {
-                        entity3.update(cx, |this, cx| {
-                            this.settings_theme = ThemeConfig::Dark;
-                            this.save_config();
-                            cx.notify();
-                        });
-                    },
-                ),
-            )
+        ButtonSet::new("theme-selector")
+            .options(vec![
+                ButtonSetOption::new("system", "System"),
+                ButtonSetOption::new("light", "Light"),
+                ButtonSetOption::new("dark", "Dark"),
+                ButtonSetOption::new("midnight", "Midnight"),
+                ButtonSetOption::new("forest", "Forest"),
+                ButtonSetOption::new("black-and-white", "B&W"),
+            ])
+            .selected(current)
+            .size(ButtonSetSize::Sm)
+            .on_change(move |value, _window, cx| {
+                let value = value.to_string();
+                if let Some(theme) = crate::theme::theme_config_from_value(&value) {
+                    entity.update(cx, |this, cx| {
+                        this.settings_theme = theme;
+                        this.save_config();
+                        cx.notify();
+                    });
+                    crate::theme::apply_theme_config(theme, cx);
+                }
+            })
     }
 
-    fn render_network_selector(app: &StkoptApp, cx: &Context<StkoptApp>) -> impl IntoElement {
+    fn render_network_selector(app: &StkoptApp, _cx: &Context<StkoptApp>) -> impl IntoElement {
         let current = app.settings_network;
         let entity = app.entity.clone();
-        let entity2 = app.entity.clone();
 
-        div()
-            .flex()
-            .gap_1()
-            .child(
-                Self::render_option_button("Polkadot", current == NetworkConfig::Polkadot, cx)
-                    .on_click(move |_event, _window, cx| {
-                        entity.update(cx, |this, cx| {
-                            this.settings_network = NetworkConfig::Polkadot;
-                            this.save_config();
-                            cx.notify();
-                        });
-                    }),
-            )
-            .child(
-                Self::render_option_button("Kusama", current == NetworkConfig::Kusama, cx)
-                    .on_click(move |_event, _window, cx| {
-                        entity2.update(cx, |this, cx| {
-                            this.settings_network = NetworkConfig::Kusama;
-                            this.save_config();
-                            cx.notify();
-                        });
-                    }),
-            )
+        let mut options = vec![
+            ButtonSetOption::new("polkadot", "Polkadot"),
+            ButtonSetOption::new("kusama", "Kusama"),
+        ];
+        if app.settings_show_testnets || current == NetworkConfig::Westend {
+            options.push(ButtonSetOption::new("westend", "Westend"));
+        }
+
+        ButtonSet::new("network-selector")
+            .options(options)
+            .selected(network_config_value(current))
+            .size(ButtonSetSize::Sm)
+            .on_change(move |value, _window, cx| {
+                let value = value.to_string();
+                if let Some(network) = network_config_from_value(&value) {
+                    entity.update(cx, |this, cx| {
+                        this.settings_network = network;
+                        this.save_config();
+                        cx.notify();
+                    });
+                }
+            })
     }
 
     fn render_connection_mode_selector(
         app: &StkoptApp,
-        cx: &Context<StkoptApp>,
+        _cx: &Context<StkoptApp>,
     ) -> impl IntoElement {
         let current = app.settings_connection_mode;
         let entity = app.entity.clone();
-        let entity2 = app.entity.clone();
 
-        div()
-            .flex()
-            .gap_1()
-            .child(
-                Self::render_option_button(
-                    "Light Client",
-                    current == ConnectionModeConfig::LightClient,
-                    cx,
-                )
-                .on_click(move |_event, _window, cx| {
+        ButtonSet::new("connection-mode-selector")
+            .options(vec![
+                ButtonSetOption::new("light-client", "Light Client"),
+                ButtonSetOption::new("rpc", "RPC"),
+            ])
+            .selected(connection_mode_config_value(current))
+            .size(ButtonSetSize::Sm)
+            .on_change(move |value, _window, cx| {
+                let value = value.to_string();
+                if let Some(mode) = connection_mode_config_from_value(&value) {
                     entity.update(cx, |this, cx| {
-                        this.settings_connection_mode = ConnectionModeConfig::LightClient;
-                        this.save_config();
-                        cx.notify();
+                        this.set_connection_mode(ConnectionMode::from_config(mode), cx);
                     });
-                }),
-            )
-            .child(
-                Self::render_option_button("RPC", current == ConnectionModeConfig::Rpc, cx)
-                    .on_click(move |_event, _window, cx| {
-                        entity2.update(cx, |this, cx| {
-                            this.settings_connection_mode = ConnectionModeConfig::Rpc;
-                            this.save_config();
-                            cx.notify();
-                        });
-                    }),
-            )
+                }
+            })
     }
+}
 
-    fn render_option_button(
-        label: &'static str,
-        is_selected: bool,
-        cx: &Context<StkoptApp>,
-    ) -> Stateful<Div> {
-        let theme = cx.theme();
-        let id = SharedString::from(format!("option-{}", label.to_lowercase()));
-
-        let mut btn = div()
-            .id(id)
-            .px_3()
-            .py_1()
-            .rounded_md()
-            .text_sm()
-            .cursor_pointer()
-            .child(label);
-
-        if is_selected {
-            btn = btn.bg(theme.accent).text_color(gpui::rgb(0xffffff));
-        } else {
-            btn = btn
-                .bg(theme.background)
-                .border_1()
-                .border_color(theme.border)
-                .text_color(theme.text_secondary);
-        }
-
-        btn
+fn network_config_value(network: NetworkConfig) -> &'static str {
+    match network {
+        NetworkConfig::Polkadot => "polkadot",
+        NetworkConfig::Kusama => "kusama",
+        NetworkConfig::Westend => "westend",
+        NetworkConfig::Paseo => "paseo",
+        NetworkConfig::Custom => "custom",
     }
+}
 
-    fn render_toggle(enabled: bool, id: impl Into<ElementId>) -> Stateful<Div> {
-        let (bg, dot_pos) = if enabled {
-            (gpui::rgb(0x22c55e), px(18.0))
-        } else {
-            (gpui::rgb(0x6b7280), px(2.0))
-        };
+fn network_config_from_value(value: &str) -> Option<NetworkConfig> {
+    match value {
+        "polkadot" => Some(NetworkConfig::Polkadot),
+        "kusama" => Some(NetworkConfig::Kusama),
+        "westend" => Some(NetworkConfig::Westend),
+        _ => None,
+    }
+}
 
-        div()
-            .id(id)
-            .w(px(40.0))
-            .h(px(22.0))
-            .rounded_full()
-            .bg(bg)
-            .cursor_pointer()
-            .child(
-                div()
-                    .w(px(18.0))
-                    .h(px(18.0))
-                    .mt(px(2.0))
-                    .ml(dot_pos)
-                    .rounded_full()
-                    .bg(gpui::rgb(0xffffff)),
-            )
+fn connection_mode_config_value(mode: ConnectionModeConfig) -> &'static str {
+    match mode {
+        ConnectionModeConfig::LightClient => "light-client",
+        ConnectionModeConfig::Rpc => "rpc",
+    }
+}
+
+fn connection_mode_config_from_value(value: &str) -> Option<ConnectionModeConfig> {
+    match value {
+        "light-client" => Some(ConnectionModeConfig::LightClient),
+        "rpc" => Some(ConnectionModeConfig::Rpc),
+        _ => None,
     }
 }

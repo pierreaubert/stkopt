@@ -11,7 +11,11 @@ use crate::log::{LogBuffer, LogLevel};
 pub struct LogsView;
 
 impl LogsView {
-    pub fn render(buffer: &LogBuffer, cx: &Context<crate::app::StkoptApp>) -> impl IntoElement {
+    pub fn render(
+        buffer: &LogBuffer,
+        cx: &Context<crate::app::StkoptApp>,
+        entity: Entity<crate::app::StkoptApp>,
+    ) -> impl IntoElement {
         let theme = cx.theme();
         let lines = buffer.get_lines();
 
@@ -36,9 +40,25 @@ impl LogsView {
                     .border_color(theme.border)
                     .child(Heading::h3("Application Logs"))
                     .child(
-                        Text::new(format!("{} events", lines.len()))
-                            .size(TextSize::Xs)
-                            .color(theme.text_secondary),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                Text::new(format!("{} events", lines.len()))
+                                    .size(TextSize::Xs)
+                                    .color(theme.text_secondary),
+                            )
+                            .child(
+                                Button::new("btn-close-logs", "Close")
+                                    .variant(ButtonVariant::Ghost)
+                                    .size(ButtonSize::Sm)
+                                    .on_click(move |_window, cx| {
+                                        entity.update(cx, |this, cx| {
+                                            this.set_logs_visible(false, cx);
+                                        });
+                                    }),
+                            ),
                     ),
             )
             .child(

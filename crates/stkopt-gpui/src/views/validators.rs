@@ -13,6 +13,7 @@ pub struct ValidatorsSection;
 
 impl ValidatorsSection {
     pub fn render(app: &StkoptApp, cx: &Context<StkoptApp>) -> impl IntoElement {
+        let theme = cx.theme();
         let entity = app.entity.clone();
         let is_loading = app.validators_loading;
 
@@ -134,6 +135,7 @@ impl ValidatorsSection {
                                 format!("Nominate Selected ({})", selected),
                             )
                             .variant(ButtonVariant::Primary)
+                            .theme(crate::theme::button_theme_for_ui_theme(&theme))
                             .size(ButtonSize::Sm)
                             .on_click(move |_window, cx| {
                                 entity.update(cx, |this, cx| {

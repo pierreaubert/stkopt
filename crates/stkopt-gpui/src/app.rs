@@ -12,6 +12,15 @@ use crate::views::{
     PoolsSection, SettingsSection, ValidatorsSection,
 };
 
+const LOG_PANE_DEFAULT_HEIGHT: f32 = 220.0;
+const LOG_PANE_MIN_HEIGHT: f32 = 120.0;
+const LOG_PANE_MIN_APP_HEIGHT: f32 = 220.0;
+
+pub(crate) fn clamp_log_pane_height(height: f32, viewport_height: f32) -> f32 {
+    let max_height = (viewport_height - LOG_PANE_MIN_APP_HEIGHT).max(LOG_PANE_MIN_HEIGHT);
+    height.clamp(LOG_PANE_MIN_HEIGHT, max_height)
+}
+
 /// Navigation sections in the app
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Section {
@@ -27,8 +36,8 @@ pub enum Section {
 impl Section {
     pub fn all() -> &'static [Section] {
         &[
-            Section::Dashboard,
             Section::Account,
+            Section::Dashboard,
             Section::Validators,
             Section::Optimization,
             Section::Pools,
@@ -134,6 +143,14 @@ pub struct StkoptApp {
     pub log_buffer: crate::log::LogBuffer,
     /// Whether log window is visible
     pub show_logs: bool,
+    /// Current bottom log pane height in pixels.
+    pub log_pane_height: f32,
+    /// Whether the bottom log pane divider is currently being dragged.
+    pub log_pane_dragging: bool,
+    /// Mouse Y position when log pane divider dragging started.
+    pub log_pane_drag_start_y: f32,
+    /// Log pane height when divider dragging started.
+    pub log_pane_drag_start_height: f32,
     /// Saved accounts (address book)
     pub address_book: Vec<SavedAccount>,
     /// Whether staking modal is visible
@@ -170,6 +187,8 @@ pub struct StkoptApp {
     pub show_blocked: bool,
     /// Current viewport width in pixels (updated each render)
     pub viewport_width: f32,
+    /// Current viewport height in pixels (updated each render)
+    pub viewport_height: f32,
 }
 
 /// Type of pool operation being performed.
@@ -306,6 +325,24 @@ pub enum ConnectionMode {
 }
 
 impl ConnectionMode {
+    pub fn from_config(config: crate::persistence::ConnectionModeConfig) -> Self {
+        match config {
+            crate::persistence::ConnectionModeConfig::Rpc => ConnectionMode::Rpc,
+            crate::persistence::ConnectionModeConfig::LightClient => ConnectionMode::LightClient,
+        }
+    }
+
+    pub fn to_config(self) -> crate::persistence::ConnectionModeConfig {
+        match self {
+            ConnectionMode::Rpc => crate::persistence::ConnectionModeConfig::Rpc,
+            ConnectionMode::LightClient => crate::persistence::ConnectionModeConfig::LightClient,
+        }
+    }
+
+    pub fn uses_light_client(self) -> bool {
+        self == ConnectionMode::LightClient
+    }
+
     pub fn label(&self) -> &'static str {
         match self {
             ConnectionMode::Rpc => "RPC",
@@ -434,11 +471,7 @@ impl StkoptApp {
             crate::persistence::NetworkConfig::Custom => Network::Polkadot,
         };
 
-        // Convert connection mode config
-        let connection_mode = match config.connection_mode {
-            crate::persistence::ConnectionModeConfig::Rpc => ConnectionMode::Rpc,
-            crate::persistence::ConnectionModeConfig::LightClient => ConnectionMode::LightClient,
-        };
+        let connection_mode = ConnectionMode::from_config(config.connection_mode);
 
         // Initialize database and chain worker
         let handle = crate::gpui_tokio::Tokio::handle(cx);
@@ -475,7 +508,7 @@ impl StkoptApp {
         if config.auto_connect {
             let handle = chain_handle.clone();
             let net = network; // Copy
-            let use_light = connection_mode == ConnectionMode::LightClient;
+            let use_light = connection_mode.uses_light_client();
             cx.spawn(move |_, _cx: &mut gpui::AsyncApp| async move {
                 if let Err(e) = handle.connect(net.to_core(), use_light).await {
                     eprintln!("Failed to auto-connect: {}", e);
@@ -521,7 +554,11 @@ impl StkoptApp {
             pending_updates,
             db,
             log_buffer,
-            show_logs: false,
+            show_logs: true,
+            log_pane_height: LOG_PANE_DEFAULT_HEIGHT,
+            log_pane_dragging: false,
+            log_pane_drag_start_y: 0.0,
+            log_pane_drag_start_height: LOG_PANE_DEFAULT_HEIGHT,
             address_book: Vec::new(),
             show_staking_modal: false,
             staking_operation: StakingOperation::default(),
@@ -540,6 +577,7 @@ impl StkoptApp {
             rewards_destination: stkopt_chain::RewardDestination::Staked,
             show_blocked: true,
             viewport_width: 1400.0,
+            viewport_height: 900.0,
         };
 
         // Load address book from disk
@@ -726,6 +764,88 @@ impl StkoptApp {
         }
     }
 
+    /// Change the active connection mode and reconnect if the app was connected.
+    pub fn set_connection_mode(&mut self, mode: ConnectionMode, cx: &mut Context<Self>) {
+        if self.connection_mode == mode && self.settings_connection_mode == mode.to_config() {
+            return;
+        }
+
+        let should_reconnect = matches!(
+            self.connection_status,
+            ConnectionStatus::Connected | ConnectionStatus::Connecting
+        ) || self.settings_auto_connect;
+
+        self.connection_mode = mode;
+        self.settings_connection_mode = mode.to_config();
+        self.connection_error = None;
+        self.save_config();
+
+        if should_reconnect {
+            if let Some(ref handle) = self.chain_handle {
+                let handle = handle.clone();
+                let network = self.network.to_core();
+                let use_light_client = mode.uses_light_client();
+
+                self.connection_status = ConnectionStatus::Connecting;
+                self.validators_loading = true;
+                self.validators.clear();
+                self.pools.clear();
+
+                cx.spawn(
+                    move |_: gpui::WeakEntity<StkoptApp>, _: &mut gpui::AsyncApp| async move {
+                        let _ = handle.disconnect().await;
+                        let _ = handle.connect(network, use_light_client).await;
+                    },
+                )
+                .detach();
+            } else {
+                self.connection_status = ConnectionStatus::Disconnected;
+                self.validators_loading = false;
+                self.connection_error = Some("Connection worker is not available".to_string());
+            }
+        }
+
+        cx.notify();
+    }
+
+    pub fn set_logs_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        self.show_logs = visible;
+        self.log_pane_dragging = false;
+        self.log_pane_height = clamp_log_pane_height(self.log_pane_height, self.viewport_height);
+        cx.notify();
+    }
+
+    fn begin_log_pane_drag(&mut self, y: f32, cx: &mut Context<Self>) {
+        if !self.show_logs {
+            return;
+        }
+
+        self.log_pane_dragging = true;
+        self.log_pane_drag_start_y = y;
+        self.log_pane_drag_start_height = self.log_pane_height;
+        cx.notify();
+    }
+
+    fn update_log_pane_drag(&mut self, y: f32, cx: &mut Context<Self>) {
+        if !self.log_pane_dragging {
+            return;
+        }
+
+        let delta = y - self.log_pane_drag_start_y;
+        self.log_pane_height = clamp_log_pane_height(
+            self.log_pane_drag_start_height - delta,
+            self.viewport_height,
+        );
+        cx.notify();
+    }
+
+    fn end_log_pane_drag(&mut self, cx: &mut Context<Self>) {
+        if self.log_pane_dragging {
+            self.log_pane_dragging = false;
+            cx.notify();
+        }
+    }
+
     /// Add an account to the address book if not already present.
     pub fn add_to_address_book(&mut self, address: String) {
         // Check if already exists
@@ -850,23 +970,8 @@ impl StkoptApp {
 
         // For ClaimRewards, route to pool claim if user has pool rewards
         if self.staking_operation == StakingOperation::ClaimRewards {
-            let has_pool_rewards = self
-                .staking_info
-                .as_ref()
-                .is_some_and(|info| info.rewards_pending > 0);
-            if has_pool_rewards {
-                self.show_staking_modal = false;
-                self.open_pool_modal(PoolOperation::ClaimPayout, None, cx);
-                return;
-            } else {
-                self.connection_error = Some(
-                    "Direct staking rewards are auto-distributed. Use pool claim for pool rewards."
-                        .to_string(),
-                );
-                self.show_staking_modal = false;
-                cx.notify();
-                return;
-            }
+            self.claim_rewards(cx);
+            return;
         }
 
         let handle = chain_handle.clone();
@@ -929,6 +1034,43 @@ impl StkoptApp {
             },
         )
         .detach();
+    }
+
+    /// Generate a claim-payout QR for pending nomination-pool rewards.
+    pub fn claim_rewards(&mut self, cx: &mut Context<Self>) {
+        self.show_staking_modal = false;
+        self.show_pool_modal = false;
+        self.connection_error = None;
+
+        if self.chain_handle.is_none() {
+            self.connection_error = Some("Connect to a network before claiming rewards.".into());
+            cx.notify();
+            return;
+        }
+
+        if self.watched_account.is_none() {
+            self.connection_error = Some("Watch an account before claiming rewards.".into());
+            cx.notify();
+            return;
+        }
+
+        let pending_rewards = self
+            .staking_info
+            .as_ref()
+            .map_or(0, |info| info.rewards_pending);
+        if pending_rewards == 0 {
+            self.connection_error = Some(
+                "No pending pool rewards to claim. Direct staking rewards are paid automatically."
+                    .into(),
+            );
+            cx.notify();
+            return;
+        }
+
+        self.pool_operation = PoolOperation::ClaimPayout;
+        self.selected_pool_id = None;
+        self.pool_amount_input.clear();
+        self.generate_pool_qr(cx);
     }
 
     /// Generate QR payload for nominating validators.
@@ -1334,7 +1476,7 @@ impl StkoptApp {
             if is_active {
                 item = item
                     .bg(theme.accent)
-                    .text_color(rgba(0xffffffff))
+                    .text_color(crate::theme::text_color_on(theme.accent, &theme))
                     .font_weight(FontWeight::SEMIBOLD);
             } else {
                 let hover_bg = theme.surface_hover;
@@ -1462,12 +1604,75 @@ impl StkoptApp {
                     .flex_1()
                     .overflow_y_scroll()
                     .p_6()
-                    .bg(gpui::rgba(0x00000000)) // Transparent but present for hit-testing
+                    .bg(theme.transparent) // Transparent but present for hit-testing
                     .on_mouse_down(MouseButton::Left, |_event, _window, _cx| {
                         tracing::info!("[CONTENT] Scroll container clicked!");
                     })
                     .child(content),
             )
+    }
+
+    fn render_main_layout(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+
+        let mut layout = div()
+            .id("main-layout")
+            .w_full()
+            .h_full()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .bg(theme.background)
+            .child(
+                div()
+                    .id("main-upper")
+                    .flex()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .overflow_hidden()
+                    .child(self.render_sidebar(cx))
+                    .child(self.render_content(cx)),
+            )
+            .child(self.render_log_divider(cx));
+
+        if self.show_logs {
+            layout = layout.child(
+                div()
+                    .id("bottom-log-pane")
+                    .w_full()
+                    .h(px(self.log_pane_height))
+                    .min_h(px(LOG_PANE_MIN_HEIGHT))
+                    .overflow_hidden()
+                    .child(LogsView::render(&self.log_buffer, cx, self.entity.clone())),
+            );
+        }
+
+        layout
+    }
+
+    fn render_log_divider(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let entity = self.entity.clone();
+
+        PaneDivider::horizontal("log-pane-divider", CollapseDirection::Down)
+            .label("Logs")
+            .collapsed(!self.show_logs)
+            .thickness(px(8.0))
+            .collapsed_size(px(24.0))
+            .theme(PaneDividerTheme::from(&theme))
+            .on_toggle({
+                let entity = entity.clone();
+                move |collapsed, _window, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.set_logs_visible(!collapsed, cx);
+                    });
+                }
+            })
+            .on_drag_start(move |position_y, _window, cx| {
+                entity.update(cx, |this, cx| {
+                    this.begin_log_pane_drag(position_y, cx);
+                });
+            })
     }
 }
 
@@ -1475,6 +1680,8 @@ impl Render for StkoptApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Track viewport width for responsive chart sizing
         self.viewport_width = f32::from(window.viewport_size().width);
+        self.viewport_height = f32::from(window.viewport_size().height);
+        self.log_pane_height = clamp_log_pane_height(self.log_pane_height, self.viewport_height);
 
         // Process any pending chain updates
         self.process_pending_updates(cx);
@@ -1493,8 +1700,30 @@ impl Render for StkoptApp {
             .bg(theme.background)
             .text_color(theme.text_primary)
             .flex()
+            .flex_col()
             .on_mouse_down(MouseButton::Left, |_event, _window, _cx| {
                 tracing::info!("[ROOT] Root element clicked!");
+            });
+
+        root = root
+            .on_mouse_move({
+                let entity = entity.clone();
+                move |event, _window, cx| {
+                    if event.pressed_button == Some(MouseButton::Left) {
+                        let y: f32 = event.position.y.into();
+                        entity.update(cx, |this, cx| {
+                            this.update_log_pane_drag(y, cx);
+                        });
+                    }
+                }
+            })
+            .on_mouse_up(MouseButton::Left, {
+                let entity = entity.clone();
+                move |_event, _window, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.end_log_pane_drag(cx);
+                    });
+                }
             });
 
         // Add keyboard handler for shortcuts (Cmd on macOS, Ctrl on other platforms)
@@ -1517,8 +1746,7 @@ impl Render for StkoptApp {
                 // Cmd/Ctrl+L to toggle logs
                 if event.keystroke.key == "l" && has_cmd_modifier {
                     entity.update(cx, |this, cx| {
-                        this.show_logs = !this.show_logs;
-                        cx.notify();
+                        this.set_logs_visible(!this.show_logs, cx);
                     });
                 }
                 // Escape to close modals/settings/help/logs (in priority order)
@@ -1537,7 +1765,7 @@ impl Render for StkoptApp {
                         } else if this.show_settings {
                             this.show_settings = false;
                         } else if this.show_logs {
-                            this.show_logs = false;
+                            this.set_logs_visible(false, cx);
                         }
                         cx.notify();
                     });
@@ -1566,20 +1794,8 @@ impl Render for StkoptApp {
                     .overflow_y_scroll()
                     .child(SettingsSection::render(self, cx)),
             );
-        } else if self.show_logs {
-            root = root.child(
-                div()
-                    .id("logs-overlay")
-                    .w_full()
-                    .h_full()
-                    .flex()
-                    .flex_col()
-                    .child(LogsView::render(&self.log_buffer, cx)),
-            );
         } else {
-            root = root
-                .child(self.render_sidebar(cx))
-                .child(self.render_content(cx));
+            root = root.child(self.render_main_layout(cx));
         }
 
         // Render overlays on top
@@ -1615,7 +1831,7 @@ fn network_pill(
         theme.surface_hover
     };
     let text_color = if is_active {
-        rgba(0xffffffff)
+        crate::theme::text_color_on(theme.accent, theme)
     } else {
         theme.text_secondary
     };
@@ -1673,7 +1889,7 @@ fn mode_pill(
         theme.surface_hover
     };
     let text_color = if is_active {
-        rgba(0xffffffff)
+        crate::theme::text_color_on(theme.accent, theme)
     } else {
         theme.text_secondary
     };
@@ -1689,24 +1905,16 @@ fn mode_pill(
             Text::new(label)
                 .size(TextSize::Xs)
                 .color(text_color)
-                .weight(if is_active { TextWeight::Semibold } else { TextWeight::Normal }),
+                .weight(if is_active {
+                    TextWeight::Semibold
+                } else {
+                    TextWeight::Normal
+                }),
         )
         .on_click(move |_event, _window, cx| {
             entity.update(cx, |this, cx| {
                 if this.connection_mode != mode {
-                    this.connection_mode = mode;
-                    this.save_config();
-                    // Disconnect from current connection (keep chain_handle for future commands)
-                    if this.connection_status == ConnectionStatus::Connected {
-                        if let Some(ref handle) = this.chain_handle {
-                            let handle = handle.clone();
-                            cx.spawn(move |_: gpui::WeakEntity<StkoptApp>, _: &mut gpui::AsyncApp| async move {
-                                let _ = handle.disconnect().await;
-                            }).detach();
-                        }
-                        this.connection_status = ConnectionStatus::Disconnected;
-                    }
-                    cx.notify();
+                    this.set_connection_mode(mode, cx);
                 }
             });
         })

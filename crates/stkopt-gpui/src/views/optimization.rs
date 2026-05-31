@@ -6,7 +6,9 @@ use gpui_ui_kit::theme::ThemeExt;
 use gpui_ui_kit::*;
 
 use crate::app::StkoptApp;
-use crate::optimization::{OptimizationCriteria, SelectionStrategy, optimize_selection};
+use crate::optimization::{
+    OptimizationCriteria, SelectionStrategy, format_apy_ratio, optimize_selection,
+};
 
 pub struct OptimizationSection;
 
@@ -84,6 +86,7 @@ impl OptimizationSection {
                         .child(
                             div()
                                 .flex()
+                                .flex_wrap()
                                 .gap_4()
                                 .child(
                                     div()
@@ -96,20 +99,21 @@ impl OptimizationSection {
                                                 .color(theme.text_secondary),
                                         )
                                         .child(
-                                            Input::new("optimization-target-count")
-                                                .placeholder("16")
-                                                .size(InputSize::Md)
-                                                .value(app.optimization_target_count.to_string())
-                                                .on_text_change({
+                                            NumberInput::new("optimization-target-count")
+                                                .value(app.optimization_target_count as f64)
+                                                .range(1.0, 16.0)
+                                                .step(1.0)
+                                                .decimals(0)
+                                                .size(NumberInputSize::Md)
+                                                .width(120.0)
+                                                .on_change({
                                                     let entity = entity.clone();
-                                                    move |value: String, _window, cx| {
+                                                    move |value, _window, cx| {
                                                         entity.update(cx, |this, cx| {
-                                                            if let Ok(n) = value.parse::<usize>()
-                                                                && (1..=16).contains(&n)
-                                                            {
-                                                                this.optimization_target_count = n;
-                                                                cx.notify();
-                                                            }
+                                                            this.optimization_target_count =
+                                                                value.round().clamp(1.0, 16.0)
+                                                                    as usize;
+                                                            cx.notify();
                                                         });
                                                     }
                                                 }),
@@ -126,24 +130,21 @@ impl OptimizationSection {
                                                 .color(theme.text_secondary),
                                         )
                                         .child(
-                                            Input::new("optimization-max-commission")
-                                                .placeholder("15")
-                                                .size(InputSize::Md)
-                                                .value(format!(
-                                                    "{:.0}",
-                                                    app.optimization_max_commission * 100.0
-                                                ))
-                                                .on_text_change({
+                                            NumberInput::new("optimization-max-commission")
+                                                .value(app.optimization_max_commission * 100.0)
+                                                .range(0.0, 100.0)
+                                                .step(1.0)
+                                                .decimals(0)
+                                                .unit("%")
+                                                .size(NumberInputSize::Md)
+                                                .width(120.0)
+                                                .on_change({
                                                     let entity = entity.clone();
-                                                    move |value: String, _window, cx| {
+                                                    move |value, _window, cx| {
                                                         entity.update(cx, |this, cx| {
-                                                            if let Ok(pct) = value.parse::<f64>()
-                                                                && (0.0..=100.0).contains(&pct)
-                                                            {
-                                                                this.optimization_max_commission =
-                                                                    pct / 100.0;
-                                                                cx.notify();
-                                                            }
+                                                            this.optimization_max_commission =
+                                                                value.clamp(0.0, 100.0) / 100.0;
+                                                            cx.notify();
                                                         });
                                                     }
                                                 }),
@@ -159,6 +160,7 @@ impl OptimizationSection {
                     .child(
                         Button::new("btn-optimize", "Run Optimization")
                             .variant(ButtonVariant::Primary)
+                            .theme(crate::theme::button_theme_for_ui_theme(&theme))
                             .size(ButtonSize::Lg)
                             .disabled(validator_count == 0)
                             .on_click(move |_window, cx| {
@@ -193,6 +195,7 @@ impl OptimizationSection {
                     .child(
                         Button::new("btn-generate-qr", "Nominate Validators")
                             .variant(ButtonVariant::Primary)
+                            .theme(crate::theme::button_theme_for_ui_theme(&theme))
                             .size(ButtonSize::Lg)
                             .disabled(selected_count == 0)
                             .on_click({
@@ -286,7 +289,7 @@ impl OptimizationSection {
                 let commission_str = format!("{:.1}%", validator.commission * 100.0);
                 let apy_str = validator
                     .apy
-                    .map(|a| format!("{:.1}%", a * 100.0))
+                    .map(format_apy_ratio)
                     .unwrap_or_else(|| "-".to_string());
                 let row_bg = if i % 2 == 0 {
                     theme.background
@@ -344,7 +347,7 @@ impl OptimizationSection {
                         .weight(TextWeight::Semibold),
                     )
                     .child(
-                        Text::new(format!("Estimated avg APY: {:.1}%", avg_apy))
+                        Text::new(format!("Estimated avg APY: {}", format_apy_ratio(avg_apy)))
                             .size(TextSize::Sm)
                             .weight(TextWeight::Semibold)
                             .color(theme.success),

@@ -30,7 +30,7 @@ impl StakingModal {
                     .id("staking-modal-bg")
                     .absolute()
                     .inset_0()
-                    .bg(rgba(0x00000088))
+                    .bg(theme.overlay_bg)
                     .on_mouse_down(MouseButton::Left, {
                         let entity = entity.clone();
                         move |_event, _window, cx| {
@@ -224,11 +224,15 @@ impl StakingModal {
 
         // Operation description
         body = body.child(
-            div().p_3().rounded_md().bg(rgba(0x3b82f620)).child(
-                Text::new(Self::operation_description(operation))
-                    .size(TextSize::Sm)
-                    .color(theme.text_secondary),
-            ),
+            div()
+                .p_3()
+                .rounded_md()
+                .bg(theme.info_token().subtle)
+                .child(
+                    Text::new(Self::operation_description(operation))
+                        .size(TextSize::Sm)
+                        .color(theme.text_secondary),
+                ),
         );
 
         body
@@ -332,6 +336,7 @@ impl StakingModal {
             .child(
                 Button::new("btn-generate-qr", "Generate QR")
                     .variant(ButtonVariant::Primary)
+                    .theme(crate::theme::button_theme_for_ui_theme(&theme))
                     .disabled(!has_amount)
                     .on_click({
                         let entity = entity.clone();

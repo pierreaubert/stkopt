@@ -225,6 +225,11 @@ pub fn optimize_selection(
     }
 }
 
+/// Format an APY ratio for display as a percentage.
+pub fn format_apy_ratio(apy: f64) -> String {
+    format!("{:.1}%", apy * 100.0)
+}
+
 /// Validate optimization criteria.
 pub fn validate_criteria(criteria: &OptimizationCriteria) -> Result<(), String> {
     if criteria.max_commission < 0.0 || criteria.max_commission > 1.0 {
@@ -394,6 +399,12 @@ mod tests {
         assert!(result.estimated_apy_avg > 0.0);
         assert!(result.total_stake > 0);
         assert!(result.avg_commission > 0.0);
+    }
+
+    #[test]
+    fn test_format_apy_ratio() {
+        assert_eq!(format_apy_ratio(0.068), "6.8%");
+        assert_eq!(format_apy_ratio(0.0), "0.0%");
     }
 
     #[test]

@@ -76,6 +76,7 @@ impl AccountSection {
                     .child(
                         Button::new("btn-watch", "Watch")
                             .variant(ButtonVariant::Primary)
+                            .theme(crate::theme::button_theme_for_ui_theme(&theme))
                             .on_click({
                                 let entity = entity.clone();
                                 move |_window, cx| {

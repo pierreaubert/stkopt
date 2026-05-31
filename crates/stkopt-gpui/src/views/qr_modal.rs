@@ -30,7 +30,7 @@ impl QrModal {
                     .id("qr-modal-bg")
                     .absolute()
                     .inset_0()
-                    .bg(rgba(0x00000088))
+                    .bg(theme.overlay_bg)
                     .on_mouse_down(MouseButton::Left, {
                         let entity = entity.clone();
                         move |_event, _window, cx| {
@@ -115,12 +115,12 @@ impl QrModal {
                     .border_color(if is_selected {
                         theme.accent
                     } else {
-                        rgba(0x00000000)
+                        theme.transparent
                     })
                     .bg(if is_selected {
-                        rgba(0x3b82f610)
+                        theme.accent_muted
                     } else {
-                        rgba(0x00000000)
+                        theme.transparent
                     })
                     .on_mouse_down(MouseButton::Left, {
                         let entity = entity.clone();
@@ -170,7 +170,7 @@ impl QrModal {
             let qr_data = &payload.qr_data;
 
             // Try to generate QR code with different versions
-            let qr_result = Self::generate_qr_code(qr_data);
+            let qr_result = Self::generate_qr_code(qr_data, &theme);
 
             match qr_result {
                 Ok(qr_element) => div()
@@ -198,7 +198,7 @@ impl QrModal {
                         div()
                             .w(px(250.0))
                             .h(px(250.0))
-                            .bg(gpui::rgb(0xffffff))
+                            .bg(theme.surface)
                             .rounded_lg()
                             .border_1()
                             .border_color(theme.border)
@@ -208,7 +208,7 @@ impl QrModal {
                             .child(
                                 Text::new(format!("QR Error:\n{}", e))
                                     .size(TextSize::Xs)
-                                    .color(gpui::rgb(0xcc0000)),
+                                    .color(theme.error),
                             ),
                     )
                     .child(
@@ -227,7 +227,7 @@ impl QrModal {
     }
 
     /// Generate a QR code element from binary data.
-    fn generate_qr_code(data: &[u8]) -> Result<Div, String> {
+    fn generate_qr_code(data: &[u8], theme: &gpui_ui_kit::theme::Theme) -> Result<Div, String> {
         // Try different QR versions to find one that fits
         let qr_versions = [
             Version::Normal(15),
@@ -242,7 +242,7 @@ impl QrModal {
         for version in qr_versions {
             match QrCode::with_version(data, version, EcLevel::L) {
                 Ok(qr) => {
-                    return Ok(Self::render_qr_grid(&qr));
+                    return Ok(Self::render_qr_grid(&qr, theme));
                 }
                 Err(e) => {
                     last_error = format!("{}", e);
@@ -254,7 +254,7 @@ impl QrModal {
     }
 
     /// Render a QR code as a grid of colored divs.
-    fn render_qr_grid(qr: &QrCode) -> Div {
+    fn render_qr_grid(qr: &QrCode, theme: &gpui_ui_kit::theme::Theme) -> Div {
         let modules = qr.to_colors();
         let size = qr.width();
 
@@ -300,7 +300,7 @@ impl QrModal {
             .rounded_lg()
             .overflow_hidden()
             .border_1()
-            .border_color(gpui::rgb(0xdddddd))
+            .border_color(theme.border)
             .child(rows)
     }
 
@@ -317,7 +317,7 @@ impl QrModal {
             div()
                 .w(px(320.0))
                 .h(px(240.0))
-                .bg(gpui::rgb(0x1a1a1a))
+                .bg(theme.muted)
                 .rounded_lg()
                 .border_1()
                 .border_color(if preview.qr_bounds.is_some() {
@@ -346,7 +346,7 @@ impl QrModal {
             div()
                 .w(px(320.0))
                 .h(px(240.0))
-                .bg(gpui::rgb(0x1a1a1a))
+                .bg(theme.muted)
                 .rounded_lg()
                 .border_1()
                 .border_color(theme.border)
@@ -356,7 +356,7 @@ impl QrModal {
                 .child(
                     Text::new("Camera Preview")
                         .size(TextSize::Sm)
-                        .color(gpui::rgb(0x666666)),
+                        .color(theme.text_muted),
                 )
         };
 
@@ -386,6 +386,7 @@ impl QrModal {
             content = content.child(
                 Button::new("btn-start-camera", "Start Camera")
                     .variant(ButtonVariant::Primary)
+                    .theme(crate::theme::button_theme_for_ui_theme(&theme))
                     .on_click({
                         let entity = entity.clone();
                         move |_window, cx| {
@@ -410,22 +411,31 @@ impl QrModal {
                 div()
                     .p_4()
                     .rounded_lg()
-                    .bg(rgba(0x22c55e20))
-                    .child(Text::new(status.clone()).size(TextSize::Sm)),
+                    .bg(theme.success_token().subtle)
+                    .child(
+                        Text::new(status.clone())
+                            .size(TextSize::Sm)
+                            .color(theme.text_primary),
+                    ),
             );
         } else {
             content = content.child(
-                div().p_4().rounded_lg().bg(rgba(0xfbbf2420)).child(
-                    Text::new("Scan the signed QR code first")
-                        .size(TextSize::Sm)
-                        .color(theme.text_secondary),
-                ),
+                div()
+                    .p_4()
+                    .rounded_lg()
+                    .bg(theme.warning_token().subtle)
+                    .child(
+                        Text::new("Scan the signed QR code first")
+                            .size(TextSize::Sm)
+                            .color(theme.text_secondary),
+                    ),
             );
         }
 
         content = content.child(
             Button::new("btn-submit-tx", "Submit Transaction")
                 .variant(ButtonVariant::Primary)
+                .theme(crate::theme::button_theme_for_ui_theme(&theme))
                 .disabled(app.tx_status_message.is_none()),
         );
 

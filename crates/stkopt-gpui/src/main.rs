@@ -17,6 +17,7 @@ pub mod qr_reader;
 pub mod shortcuts;
 pub mod tcc;
 mod tests;
+pub mod theme;
 pub mod transactions;
 pub mod validators;
 pub mod views;
@@ -28,6 +29,9 @@ use gpui_ui_kit::{MiniApp, MiniAppConfig};
 use tracing_subscriber::prelude::*;
 
 fn main() {
+    let config = crate::persistence::load_config().unwrap_or_default();
+    let initial_theme = crate::theme::theme_variant_for_config(config.theme);
+
     // Create tokio runtime for async chain operations
     let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
     let handle = runtime.handle().clone();
@@ -47,6 +51,7 @@ fn main() {
             .size(1400.0, 900.0)
             .scrollable(false)
             .with_theme(true)
+            .initial_theme(initial_theme)
             .with_i18n(false),
         move |cx| {
             // Initialize gpui_tokio bridge with the runtime handle

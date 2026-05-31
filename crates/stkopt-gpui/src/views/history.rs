@@ -1,14 +1,20 @@
 //! History section view - staking history and rewards chart.
 
 use gpui::prelude::*;
-use gpui::*;
-use gpui_px::{ChartTheme, line};
+use gpui::{
+    AnyElement, Bounds, Context, PathBuilder, Pixels, Point, Rgba, Window, canvas, div, point, px,
+    quad, size, transparent_black,
+};
 use gpui_ui_kit::theme::ThemeExt;
 use gpui_ui_kit::*;
 
-use crate::app::StkoptApp;
+use crate::app::{HistoryPoint, StkoptApp};
 
 pub struct HistorySection;
+
+const Y_AXIS_WIDTH: f32 = 56.0;
+const CHART_GAP: f32 = 12.0;
+const MAX_X_TICKS: usize = 6;
 
 impl HistorySection {
     pub fn render(app: &mut StkoptApp, cx: &mut Context<StkoptApp>) -> impl IntoElement {
@@ -99,52 +105,64 @@ impl HistorySection {
             return div().into_any_element();
         }
 
-        // Prepare data for the chart
-        let x_data: Vec<f64> = app.staking_history.iter().map(|h| h.era as f64).collect();
-        let y_data: Vec<f64> = app.staking_history.iter().map(|h| h.apy * 100.0).collect();
+        let chart_points: Vec<ApyChartPoint> = app
+            .staking_history
+            .iter()
+            .map(ApyChartPoint::from)
+            .collect();
+        let max_apy = chart_points
+            .iter()
+            .map(|point| point.apy_percent)
+            .fold(0.0_f64, f64::max);
+        let y_max = nice_axis_max(max_apy);
+        let y_ticks = y_axis_ticks(y_max);
+        let x_tick_indices = chart_tick_indices(chart_points.len(), MAX_X_TICKS);
+        let x_tick_labels: Vec<String> = x_tick_indices
+            .iter()
+            .filter_map(|index| chart_points.get(*index).map(|point| point.label.clone()))
+            .collect();
 
-        let dark_theme = ChartTheme {
-            plot_background: gpui::rgb(0x000000),
-            grid_color: gpui::rgba(0xffffff33),
-            axis_line_color: gpui::rgba(0xffffff55),
-            axis_label_color: gpui::rgba(0xffffffcc),
-            title_color: gpui::rgba(0xffffffee),
-            legend_text_color: gpui::rgba(0xffffffcc),
-        };
-
-        // Compute chart width from available space: viewport - sidebar(220) - content padding(2*24) - card padding(2*16)
         let chart_width = (app.viewport_width - 220.0 - 48.0 - 32.0).max(300.0);
-        let chart_height = chart_width / 2.0;
+        let plot_width = (chart_width - Y_AXIS_WIDTH - CHART_GAP).max(240.0);
+        let plot_height = (chart_width * 0.42).clamp(220.0, 360.0);
 
-        // Build the line chart
-        match line(&x_data, &y_data)
-            .title("APY Over Time (%)")
-            .color(0x22c55e) // Green color matching theme.success
-            .stroke_width(2.0)
-            .show_points(true)
-            .size(chart_width, chart_height)
-            .theme(dark_theme)
-            .build()
-        {
-            Ok(chart) => Card::new()
-                .content(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(Heading::h3("APY Trend"))
-                        .child(chart),
-                )
-                .into_any_element(),
-            Err(_) => div()
-                .p_4()
-                .child(
-                    Text::new("Unable to render chart")
-                        .size(TextSize::Sm)
-                        .color(theme.text_secondary),
-                )
-                .into_any_element(),
-        }
+        Card::new()
+            .content(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(Heading::h3("APY Trend"))
+                    .child(
+                        div()
+                            .w(px(chart_width))
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_3()
+                                    .child(render_y_axis_labels(&y_ticks, theme, plot_height))
+                                    .child(render_apy_plot(
+                                        chart_points,
+                                        x_tick_indices,
+                                        y_max,
+                                        theme,
+                                        plot_width,
+                                        plot_height,
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_3()
+                                    .child(div().w(px(Y_AXIS_WIDTH)))
+                                    .child(render_x_axis_labels(&x_tick_labels, theme, plot_width)),
+                            ),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn render_history_table(app: &StkoptApp, theme: &gpui_ui_kit::theme::Theme) -> AnyElement {
@@ -299,6 +317,334 @@ impl HistorySection {
     }
 }
 
+#[derive(Clone)]
+struct ApyChartPoint {
+    label: String,
+    apy_percent: f64,
+}
+
+impl From<&HistoryPoint> for ApyChartPoint {
+    fn from(point: &HistoryPoint) -> Self {
+        let apy_percent = if point.apy.is_finite() {
+            (point.apy * 100.0).max(0.0)
+        } else {
+            0.0
+        };
+
+        Self {
+            label: format_history_axis_label(point),
+            apy_percent,
+        }
+    }
+}
+
+fn render_y_axis_labels(
+    ticks: &[f64],
+    theme: &gpui_ui_kit::theme::Theme,
+    plot_height: f32,
+) -> AnyElement {
+    let mut column = div()
+        .w(px(Y_AXIS_WIDTH))
+        .h(px(plot_height))
+        .flex()
+        .flex_col()
+        .justify_between()
+        .items_end()
+        .pr_1();
+
+    for tick in ticks {
+        column = column.child(
+            Text::new(format_percent_tick(*tick))
+                .size(TextSize::Xs)
+                .color(theme.text_secondary),
+        );
+    }
+
+    column.into_any_element()
+}
+
+fn render_x_axis_labels(
+    labels: &[String],
+    theme: &gpui_ui_kit::theme::Theme,
+    plot_width: f32,
+) -> AnyElement {
+    let mut row = div()
+        .w(px(plot_width))
+        .flex()
+        .items_center()
+        .justify_between();
+
+    for label in labels {
+        row = row.child(
+            Text::new(label.clone())
+                .size(TextSize::Xs)
+                .color(theme.text_secondary),
+        );
+    }
+
+    row.into_any_element()
+}
+
+fn render_apy_plot(
+    points: Vec<ApyChartPoint>,
+    x_tick_indices: Vec<usize>,
+    y_max: f64,
+    theme: &gpui_ui_kit::theme::Theme,
+    plot_width: f32,
+    plot_height: f32,
+) -> AnyElement {
+    let line_color = theme.success;
+    let marker_color = theme.success;
+    let grid_color = with_alpha(theme.border, 0.55);
+    let axis_color = with_alpha(theme.text_muted, 0.85);
+    let background = theme.background;
+    let border = theme.border;
+
+    div()
+        .w(px(plot_width))
+        .h(px(plot_height))
+        .rounded_md()
+        .bg(background)
+        .border_1()
+        .border_color(border)
+        .child(
+            canvas(
+                move |_, _, _| {},
+                move |bounds, _, window, _| {
+                    paint_chart_grid(
+                        bounds,
+                        &x_tick_indices,
+                        points.len(),
+                        grid_color,
+                        axis_color,
+                        window,
+                    );
+                    paint_apy_line(bounds, &points, y_max, line_color, marker_color, window);
+                },
+            )
+            .size_full(),
+        )
+        .into_any_element()
+}
+
+fn paint_chart_grid(
+    bounds: Bounds<Pixels>,
+    x_tick_indices: &[usize],
+    point_count: usize,
+    grid_color: Rgba,
+    axis_color: Rgba,
+    window: &mut Window,
+) {
+    let left = bounds.origin.x;
+    let right = bounds.origin.x + bounds.size.width;
+    let top = bounds.origin.y;
+    let bottom = bounds.origin.y + bounds.size.height;
+
+    for tick in 0..=4 {
+        let y = bottom - px((tick as f32 / 4.0) * f32::from(bounds.size.height));
+        paint_stroke(
+            window,
+            point(left, y),
+            point(right, y),
+            if tick == 0 { axis_color } else { grid_color },
+            if tick == 0 { 1.25 } else { 1.0 },
+        );
+    }
+
+    paint_stroke(
+        window,
+        point(left, top),
+        point(left, bottom),
+        axis_color,
+        1.25,
+    );
+
+    for index in x_tick_indices {
+        let x = x_position(*index, point_count, bounds);
+        paint_stroke(window, point(x, top), point(x, bottom), grid_color, 1.0);
+    }
+}
+
+fn paint_apy_line(
+    bounds: Bounds<Pixels>,
+    points: &[ApyChartPoint],
+    y_max: f64,
+    line_color: Rgba,
+    marker_color: Rgba,
+    window: &mut Window,
+) {
+    if points.len() < 2 {
+        return;
+    }
+
+    let mut builder = PathBuilder::stroke(px(2.0));
+    for (index, chart_point) in points.iter().enumerate() {
+        let point =
+            chart_point_position(index, chart_point.apy_percent, points.len(), y_max, bounds);
+        if index == 0 {
+            builder.move_to(point);
+        } else {
+            builder.line_to(point);
+        }
+    }
+
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, line_color);
+    }
+
+    for (index, chart_point) in points.iter().enumerate() {
+        let center =
+            chart_point_position(index, chart_point.apy_percent, points.len(), y_max, bounds);
+        let radius = px(3.0);
+        window.paint_quad(quad(
+            Bounds {
+                origin: point(center.x - radius, center.y - radius),
+                size: size(radius * 2.0, radius * 2.0),
+            },
+            radius,
+            marker_color,
+            px(0.0),
+            transparent_black(),
+            Default::default(),
+        ));
+    }
+}
+
+fn paint_stroke(
+    window: &mut Window,
+    from: Point<Pixels>,
+    to: Point<Pixels>,
+    color: Rgba,
+    width: f32,
+) {
+    let mut builder = PathBuilder::stroke(px(width));
+    builder.move_to(from);
+    builder.line_to(to);
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, color);
+    }
+}
+
+fn chart_point_position(
+    index: usize,
+    apy_percent: f64,
+    point_count: usize,
+    y_max: f64,
+    bounds: Bounds<Pixels>,
+) -> Point<Pixels> {
+    let x = x_position(index, point_count, bounds);
+    let normalized_y = if y_max > 0.0 {
+        (apy_percent / y_max).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let y = bounds.origin.y + bounds.size.height
+        - px((normalized_y as f32) * f32::from(bounds.size.height));
+    point(x, y)
+}
+
+fn x_position(index: usize, point_count: usize, bounds: Bounds<Pixels>) -> Pixels {
+    if point_count <= 1 {
+        return bounds.origin.x + bounds.size.width / 2.0;
+    }
+
+    let normalized_x = index as f32 / (point_count - 1) as f32;
+    bounds.origin.x + px(normalized_x * f32::from(bounds.size.width))
+}
+
+fn nice_axis_max(max_value: f64) -> f64 {
+    if !max_value.is_finite() || max_value <= 0.0 {
+        return 1.0;
+    }
+
+    let padded = max_value * 1.12;
+    let magnitude = 10_f64.powf(padded.log10().floor());
+    let normalized = padded / magnitude;
+    let nice_normalized = if normalized <= 1.0 {
+        1.0
+    } else if normalized <= 2.0 {
+        2.0
+    } else if normalized <= 5.0 {
+        5.0
+    } else {
+        10.0
+    };
+
+    nice_normalized * magnitude
+}
+
+fn y_axis_ticks(y_max: f64) -> Vec<f64> {
+    (0..=4)
+        .rev()
+        .map(|tick| y_max * tick as f64 / 4.0)
+        .collect()
+}
+
+fn chart_tick_indices(point_count: usize, max_ticks: usize) -> Vec<usize> {
+    if point_count == 0 || max_ticks == 0 {
+        return Vec::new();
+    }
+    if point_count <= max_ticks {
+        return (0..point_count).collect();
+    }
+
+    let last_index = point_count - 1;
+    let steps = max_ticks - 1;
+    let mut indices = Vec::with_capacity(max_ticks);
+    for tick in 0..max_ticks {
+        let index = ((tick * last_index) + (steps / 2)) / steps;
+        if indices.last().copied() != Some(index) {
+            indices.push(index);
+        }
+    }
+    indices
+}
+
+fn format_history_axis_label(point: &HistoryPoint) -> String {
+    point
+        .date
+        .as_deref()
+        .and_then(format_mm_dd_date)
+        .unwrap_or_else(|| format!("#{}", point.era))
+}
+
+fn format_mm_dd_date(date: &str) -> Option<String> {
+    if let (Some(month), Some(day)) = (date.get(5..7), date.get(8..10))
+        && matches!(date.as_bytes().get(4), Some(b'-' | b'/'))
+        && matches!(date.as_bytes().get(7), Some(b'-' | b'/'))
+        && month.bytes().all(|b| b.is_ascii_digit())
+        && day.bytes().all(|b| b.is_ascii_digit())
+    {
+        return Some(format!("{}-{}", month, day));
+    }
+
+    if let (Some(month), Some(day), Some(prefix)) = (date.get(4..6), date.get(6..8), date.get(0..8))
+        && prefix.bytes().all(|b| b.is_ascii_digit())
+    {
+        return Some(format!("{}-{}", month, day));
+    }
+
+    if let Some(mm_dd) = date.get(0..5)
+        && matches!(mm_dd.as_bytes().get(2), Some(b'-' | b'/'))
+        && mm_dd
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| index == 2 || byte.is_ascii_digit())
+    {
+        return Some(mm_dd.replace('/', "-"));
+    }
+
+    None
+}
+
+fn format_percent_tick(value: f64) -> String {
+    if value >= 10.0 || (value - value.round()).abs() < 0.05 {
+        format!("{:.0}%", value)
+    } else {
+        format!("{:.1}%", value)
+    }
+}
+
 fn stat_card(
     label: &'static str,
     value: String,
@@ -350,4 +696,36 @@ fn format_balance(amount: u128, symbol: &str, decimals: u8) -> String {
     let whole = amount / divisor;
     let frac = (amount % divisor) / frac_divisor;
     format!("{}.{:04} {}", whole, frac, symbol)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn date_labels_use_mm_dd() {
+        assert_eq!(format_mm_dd_date("20260531").as_deref(), Some("05-31"));
+        assert_eq!(format_mm_dd_date("2026-05-31").as_deref(), Some("05-31"));
+        assert_eq!(format_mm_dd_date("2026/12/07").as_deref(), Some("12-07"));
+        assert_eq!(format_mm_dd_date("05-31").as_deref(), Some("05-31"));
+    }
+
+    #[test]
+    fn date_label_falls_back_to_era() {
+        let point = HistoryPoint {
+            era: 42,
+            date: Some("unknown".to_string()),
+            bonded: 0,
+            reward: 0,
+            apy: 0.0,
+        };
+
+        assert_eq!(format_history_axis_label(&point), "#42");
+    }
+
+    #[test]
+    fn y_axis_ticks_start_at_zero() {
+        let ticks = y_axis_ticks(20.0);
+        assert_eq!(ticks.last().copied(), Some(0.0));
+    }
 }

@@ -111,6 +111,12 @@ pub enum ThemeConfig {
     Light,
     /// Force dark theme.
     Dark,
+    /// Deep blue theme.
+    Midnight,
+    /// Green-toned theme.
+    Forest,
+    /// Monochrome high contrast theme.
+    BlackAndWhite,
 }
 
 impl ThemeConfig {
@@ -120,6 +126,9 @@ impl ThemeConfig {
             ThemeConfig::System => "System",
             ThemeConfig::Light => "Light",
             ThemeConfig::Dark => "Dark",
+            ThemeConfig::Midnight => "Midnight",
+            ThemeConfig::Forest => "Forest",
+            ThemeConfig::BlackAndWhite => "Black & White",
         }
     }
 }
@@ -526,6 +535,9 @@ mod tests {
         assert_eq!(ThemeConfig::System.label(), "System");
         assert_eq!(ThemeConfig::Light.label(), "Light");
         assert_eq!(ThemeConfig::Dark.label(), "Dark");
+        assert_eq!(ThemeConfig::Midnight.label(), "Midnight");
+        assert_eq!(ThemeConfig::Forest.label(), "Forest");
+        assert_eq!(ThemeConfig::BlackAndWhite.label(), "Black & White");
     }
 
     // ==================== AppConfig Tests ====================

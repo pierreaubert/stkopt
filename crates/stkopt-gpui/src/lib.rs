@@ -16,6 +16,7 @@ pub mod persistence;
 pub mod qr_reader;
 pub mod shortcuts;
 pub mod tcc;
+pub mod theme;
 pub mod transactions;
 pub mod validators;
 pub mod views;
@@ -28,6 +29,8 @@ mod tests {
     fn test_section_all_returns_all_sections() {
         let sections = Section::all();
         assert_eq!(sections.len(), 6);
+        assert_eq!(sections[0], Section::Account);
+        assert_eq!(sections[1], Section::Dashboard);
         assert!(sections.contains(&Section::Dashboard));
         assert!(sections.contains(&Section::Account));
         assert!(sections.contains(&Section::Validators));
@@ -104,6 +107,39 @@ mod tests {
                 .description()
                 .contains("light client")
         );
+    }
+
+    #[test]
+    fn test_connection_mode_config_roundtrip() {
+        assert_eq!(
+            ConnectionMode::from_config(crate::persistence::ConnectionModeConfig::Rpc),
+            ConnectionMode::Rpc
+        );
+        assert_eq!(
+            ConnectionMode::from_config(crate::persistence::ConnectionModeConfig::LightClient),
+            ConnectionMode::LightClient
+        );
+        assert_eq!(
+            ConnectionMode::LightClient.to_config(),
+            crate::persistence::ConnectionModeConfig::LightClient
+        );
+        assert_eq!(
+            ConnectionMode::Rpc.to_config(),
+            crate::persistence::ConnectionModeConfig::Rpc
+        );
+    }
+
+    #[test]
+    fn test_connection_mode_light_client_flag() {
+        assert!(!ConnectionMode::Rpc.uses_light_client());
+        assert!(ConnectionMode::LightClient.uses_light_client());
+    }
+
+    #[test]
+    fn test_log_pane_height_clamps_to_viewport() {
+        assert_eq!(clamp_log_pane_height(20.0, 900.0), 120.0);
+        assert_eq!(clamp_log_pane_height(240.0, 900.0), 240.0);
+        assert_eq!(clamp_log_pane_height(900.0, 900.0), 680.0);
     }
 
     #[test]

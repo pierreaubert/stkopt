@@ -41,6 +41,34 @@ fn estimate_user_reward(era_reward: u128, user_bonded: u128, total_staked: u128)
     }
 }
 
+/// Calculate a compact persisted date for an era in YYYYMMDD format.
+fn calculate_era_date(
+    era: u32,
+    current_era: u32,
+    current_era_start_ms: u64,
+    era_duration_ms: u64,
+) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let eras_ago = current_era.saturating_sub(era) as u64;
+    let elapsed_ms = eras_ago.saturating_mul(era_duration_ms);
+    let reference_ms = if current_era_start_ms > 0 {
+        current_era_start_ms
+    } else {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
+            .unwrap_or_default()
+    };
+    let era_start_ms = reference_ms.saturating_sub(elapsed_ms);
+    let era_start_ms = era_start_ms.min(i64::MAX as u64) as i64;
+
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(era_start_ms)
+        .unwrap_or_else(chrono::Utc::now)
+        .format("%Y%m%d")
+        .to_string()
+}
+
 /// Commands that can be sent to the chain worker.
 #[derive(Debug)]
 pub enum ChainCommand {
@@ -1629,7 +1657,19 @@ impl ChainWorker {
             }
         };
         let current_era = current_era_info.index;
+        let current_era_start_ms = current_era_info.start_timestamp_ms;
         let era_duration_ms = current_era_info.duration_ms;
+
+        for point in &mut cached_history {
+            if point.date.is_none() {
+                point.date = Some(calculate_era_date(
+                    point.era,
+                    current_era,
+                    current_era_start_ms,
+                    era_duration_ms,
+                ));
+            }
+        }
 
         // Get user's bonded amount for APY calculation
         let user_bonded = match client.get_staking_ledger(&account).await {
@@ -1726,7 +1766,12 @@ impl ChainWorker {
 
             let point = HistoryPoint {
                 era,
-                date: None,
+                date: Some(calculate_era_date(
+                    era,
+                    current_era,
+                    current_era_start_ms,
+                    era_duration_ms,
+                )),
                 bonded: user_bonded,
                 reward: user_reward,
                 apy,
@@ -1949,5 +1994,24 @@ mod tests {
             update,
             ChainUpdate::ConnectionStatus(ConnectionStatus::Connected)
         ));
+    }
+
+    #[test]
+    fn test_calculate_era_date_uses_yyyy_mm_dd_digits() {
+        let reference_ms = chrono::NaiveDate::from_ymd_opt(2026, 5, 31)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_millis() as u64;
+
+        assert_eq!(
+            calculate_era_date(100, 100, reference_ms, 86_400_000),
+            "20260531"
+        );
+        assert_eq!(
+            calculate_era_date(99, 100, reference_ms, 86_400_000),
+            "20260530"
+        );
     }
 }

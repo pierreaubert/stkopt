@@ -43,6 +43,7 @@ impl DashboardSection {
             })
             .child(Heading::h1("Dashboard"))
             .child(Text::new("Overview of your staking activity").size(TextSize::Md))
+            .child(Self::render_feedback(app, entity.clone()))
             .child(
                 div()
                     .flex()
@@ -66,6 +67,7 @@ impl DashboardSection {
                             .child(
                                 Button::new("btn-bond", "Bond")
                                     .variant(ButtonVariant::Primary)
+                                    .theme(crate::theme::button_theme_for_ui_theme(&theme))
                                     .on_click({
                                         let entity = entity.clone();
                                         move |_window, cx| {
@@ -112,23 +114,7 @@ impl DashboardSection {
                                         let entity = entity.clone();
                                         move |_window, cx| {
                                             entity.update(cx, |this, cx| {
-                                                // Route to pool claim if pool rewards > 0
-                                                let has_pool_rewards = this
-                                                    .staking_info
-                                                    .as_ref()
-                                                    .is_some_and(|info| info.rewards_pending > 0);
-                                                if has_pool_rewards {
-                                                    this.open_pool_modal(
-                                                        crate::app::PoolOperation::ClaimPayout,
-                                                        None,
-                                                        cx,
-                                                    );
-                                                } else {
-                                                    this.tx_status_message = Some(
-                                                        "Staking rewards are auto-distributed. Use pool claim for pool rewards.".to_string(),
-                                                    );
-                                                    cx.notify();
-                                                }
+                                                this.claim_rewards(cx);
                                             });
                                         }
                                     }),
@@ -165,6 +151,23 @@ impl DashboardSection {
                             ),
                     ),
             )
+    }
+
+    fn render_feedback(app: &StkoptApp, entity: Entity<StkoptApp>) -> AnyElement {
+        if let Some(error) = app.connection_error.clone() {
+            return Alert::new("dashboard-error", error)
+                .variant(AlertVariant::Error)
+                .closeable(true)
+                .on_close(move |_window, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.connection_error = None;
+                        cx.notify();
+                    });
+                })
+                .into_any_element();
+        }
+
+        div().into_any_element()
     }
 }
 
