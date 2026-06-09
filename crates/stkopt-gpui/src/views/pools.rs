@@ -204,7 +204,7 @@ impl PoolsSection {
                             )
                             .size(ButtonSize::Xs)
                             .variant(ButtonVariant::Primary)
-                            .theme(crate::theme::button_theme_for_ui_theme(&theme))
+                            .theme(crate::theme::button_theme_for_ui_theme(theme))
                             .disabled(!is_open)
                             .on_click({
                                 let entity = entity.clone();

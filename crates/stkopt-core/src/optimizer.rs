@@ -128,7 +128,7 @@ pub fn select_validators(
                 .filter(|v| !already_selected.contains(&v.address))
                 .cloned()
                 .collect();
-            by_stake.sort_by(|a, b| a.total_stake.cmp(&b.total_stake));
+            by_stake.sort_by_key(|v| v.total_stake);
 
             selected.extend(by_stake.into_iter().take(remaining));
             selected

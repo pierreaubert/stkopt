@@ -183,7 +183,7 @@ pub fn optimize_selection(
                 .filter(|(i, _)| !selected_indices.contains(i))
                 .cloned()
                 .collect();
-            by_stake.sort_by(|a, b| a.1.total_stake.cmp(&b.1.total_stake));
+            by_stake.sort_by_key(|(_, validator)| validator.total_stake);
 
             let mut result = top_apy;
             result.extend(by_stake.into_iter().take(remaining));
