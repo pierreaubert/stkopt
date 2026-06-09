@@ -8,7 +8,7 @@ use gpui_ui_kit::theme::ThemeExt;
 use gpui_ui_kit::*;
 use qrcode::{EcLevel, QrCode, Version};
 
-use crate::app::{QrModalTab, StkoptApp};
+use crate::app::{QrModalTab, QrTxStatus, StkoptApp};
 
 /// QR modal component.
 pub struct QrModal;
@@ -35,10 +35,7 @@ impl QrModal {
                         let entity = entity.clone();
                         move |_event, _window, cx| {
                             entity.update(cx, |this, cx| {
-                                this.show_qr_modal = false;
-                                this.pending_tx_payload = None;
-                                this.stop_camera(cx);
-                                cx.notify();
+                                this.close_qr_modal(cx);
                             });
                         }
                     }),
@@ -53,6 +50,7 @@ impl QrModal {
                     .border_1()
                     .border_color(theme.border)
                     .shadow_lg()
+                    .occlude()
                     .child(Self::render_header(app, cx))
                     .child(Self::render_tabs(app, cx))
                     .child(Self::render_content(app, cx))
@@ -126,8 +124,7 @@ impl QrModal {
                         let entity = entity.clone();
                         move |_event, _window, cx| {
                             entity.update(cx, |this, cx| {
-                                this.qr_modal_tab = tab_value;
-                                cx.notify();
+                                this.set_qr_modal_tab(tab_value, cx);
                             });
                         }
                     })
@@ -313,34 +310,7 @@ impl QrModal {
 
         // Camera preview area
         let preview_area = if let Some(ref preview) = app.camera_preview {
-            // Show actual camera preview (simplified - just show status)
-            div()
-                .w(px(320.0))
-                .h(px(240.0))
-                .bg(theme.muted)
-                .rounded_lg()
-                .border_1()
-                .border_color(if preview.qr_bounds.is_some() {
-                    theme.success
-                } else {
-                    theme.border
-                })
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    Text::new(if preview.qr_bounds.is_some() {
-                        "QR Code Detected!"
-                    } else {
-                        "Scanning..."
-                    })
-                    .size(TextSize::Md)
-                    .color(if preview.qr_bounds.is_some() {
-                        theme.success
-                    } else {
-                        theme.text_secondary
-                    }),
-                )
+            Self::render_camera_preview(preview, &theme)
         } else {
             // Placeholder when camera not started
             div()
@@ -377,7 +347,7 @@ impl QrModal {
                         let entity = entity.clone();
                         move |_window, cx| {
                             entity.update(cx, |this, cx| {
-                                this.stop_camera(cx);
+                                this.stop_camera_with_reason("Stop Camera button", cx);
                             });
                         }
                     }),
@@ -401,22 +371,61 @@ impl QrModal {
         content
     }
 
+    fn render_camera_preview(
+        preview: &crate::qr_reader::CameraPreview,
+        theme: &gpui_ui_kit::theme::Theme,
+    ) -> Div {
+        let rgb_pixels = preview.rgb_pixels.clone();
+        let width = preview.width;
+        let height = preview.height;
+        let qr_bounds = preview.qr_bounds;
+
+        div()
+            .w(px(320.0))
+            .h(px(240.0))
+            .bg(theme.muted)
+            .rounded_lg()
+            .border_1()
+            .border_color(if qr_bounds.is_some() {
+                theme.success
+            } else {
+                theme.border
+            })
+            .overflow_hidden()
+            .child(
+                canvas(
+                    move |_, _, _| {},
+                    move |bounds, _, window, _| {
+                        paint_camera_preview(bounds, &rgb_pixels, width, height, window);
+                        if let Some(qr_bounds) = qr_bounds {
+                            paint_qr_bounds(bounds, qr_bounds, window);
+                        }
+                    },
+                )
+                .size_full(),
+            )
+    }
+
     fn render_submit_tab(app: &StkoptApp, cx: &Context<StkoptApp>) -> Div {
         let theme = cx.theme();
+        let entity = app.entity.clone();
 
         let mut content = div().flex().flex_col().items_center().gap_4();
 
         if let Some(ref status) = app.tx_status_message {
+            let bg = match app.tx_status {
+                QrTxStatus::Ready | QrTxStatus::Submitting | QrTxStatus::Submitted => {
+                    theme.success_token().subtle
+                }
+                QrTxStatus::NotReady | QrTxStatus::Failed => theme.warning_token().subtle,
+            };
+
             content = content.child(
-                div()
-                    .p_4()
-                    .rounded_lg()
-                    .bg(theme.success_token().subtle)
-                    .child(
-                        Text::new(status.clone())
-                            .size(TextSize::Sm)
-                            .color(theme.text_primary),
-                    ),
+                div().p_4().rounded_lg().bg(bg).child(
+                    Text::new(status.clone())
+                        .size(TextSize::Sm)
+                        .color(theme.text_primary),
+                ),
             );
         } else {
             content = content.child(
@@ -436,7 +445,19 @@ impl QrModal {
             Button::new("btn-submit-tx", "Submit Transaction")
                 .variant(ButtonVariant::Primary)
                 .theme(crate::theme::button_theme_for_ui_theme(&theme))
-                .disabled(app.tx_status_message.is_none()),
+                .disabled(
+                    app.signed_extrinsic.is_none()
+                        || app.tx_status == QrTxStatus::Submitting
+                        || app.tx_status == QrTxStatus::Submitted,
+                )
+                .on_click({
+                    let entity = entity.clone();
+                    move |_window, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.submit_scanned_transaction(cx);
+                        });
+                    }
+                }),
         );
 
         content
@@ -465,13 +486,77 @@ impl QrModal {
                         let entity = entity.clone();
                         move |_window, cx| {
                             entity.update(cx, |this, cx| {
-                                this.show_qr_modal = false;
-                                this.pending_tx_payload = None;
-                                this.stop_camera(cx);
-                                cx.notify();
+                                this.close_qr_modal(cx);
                             });
                         }
                     }),
             )
+    }
+}
+
+fn paint_camera_preview(
+    bounds: Bounds<Pixels>,
+    rgb_pixels: &[u8],
+    width: usize,
+    height: usize,
+    window: &mut Window,
+) {
+    if width == 0
+        || height == 0
+        || rgb_pixels.len() < width.saturating_mul(height).saturating_mul(3)
+    {
+        return;
+    }
+
+    const COLUMNS: usize = 96;
+    const ROWS: usize = 72;
+
+    let cell_width = f32::from(bounds.size.width) / COLUMNS as f32;
+    let cell_height = f32::from(bounds.size.height) / ROWS as f32;
+
+    for row in 0..ROWS {
+        let src_y = (row * height / ROWS).min(height - 1);
+        for column in 0..COLUMNS {
+            let src_x = (column * width / COLUMNS).min(width - 1);
+            let idx = (src_y * width + src_x) * 3;
+            let Some(rgb) = rgb_pixels.get(idx..idx + 3) else {
+                continue;
+            };
+
+            let color = gpui::rgb(((rgb[0] as u32) << 16) | ((rgb[1] as u32) << 8) | rgb[2] as u32);
+            window.paint_quad(fill(
+                Bounds {
+                    origin: point(
+                        bounds.origin.x + px(column as f32 * cell_width),
+                        bounds.origin.y + px(row as f32 * cell_height),
+                    ),
+                    size: size(px(cell_width + 0.5), px(cell_height + 0.5)),
+                },
+                color,
+            ));
+        }
+    }
+}
+
+fn paint_qr_bounds(bounds: Bounds<Pixels>, qr_bounds: [(f32, f32); 4], window: &mut Window) {
+    let mut builder = PathBuilder::stroke(px(3.0));
+    for (index, (x, y)) in qr_bounds.iter().enumerate() {
+        let point = point(
+            bounds.origin.x + px(x.clamp(0.0, 1.0) * f32::from(bounds.size.width)),
+            bounds.origin.y + px(y.clamp(0.0, 1.0) * f32::from(bounds.size.height)),
+        );
+        if index == 0 {
+            builder.move_to(point);
+        } else {
+            builder.line_to(point);
+        }
+    }
+    let first = qr_bounds[0];
+    builder.line_to(point(
+        bounds.origin.x + px(first.0.clamp(0.0, 1.0) * f32::from(bounds.size.width)),
+        bounds.origin.y + px(first.1.clamp(0.0, 1.0) * f32::from(bounds.size.height)),
+    ));
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, gpui::rgb(0x22c55e));
     }
 }

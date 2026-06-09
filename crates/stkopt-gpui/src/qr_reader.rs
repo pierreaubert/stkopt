@@ -7,6 +7,7 @@ use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::{
     CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType, Resolution,
 };
+use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -19,7 +20,7 @@ pub const PREVIEW_HEIGHT: usize = 240;
 #[derive(Debug, Clone)]
 pub struct CameraPreview {
     /// RGB pixels (PREVIEW_WIDTH x PREVIEW_HEIGHT x 3).
-    pub rgb_pixels: Vec<u8>,
+    pub rgb_pixels: Arc<[u8]>,
     /// Width of preview in pixels.
     pub width: usize,
     /// Height of preview in pixels.
@@ -204,7 +205,13 @@ fn camera_capture_loop(
         }
 
         // Create downsampled preview
-        let preview_rgb = downsample_rgb(&rgb_data, width, height, PREVIEW_WIDTH, PREVIEW_HEIGHT);
+        let preview_rgb: Arc<[u8]> = Arc::from(downsample_rgb(
+            &rgb_data,
+            width,
+            height,
+            PREVIEW_WIDTH,
+            PREVIEW_HEIGHT,
+        ));
 
         // Try to decode QR code
         let mut decoder = rqrr::PreparedImage::prepare_from_greyscale(width, height, |x, y| {
@@ -239,7 +246,7 @@ fn camera_capture_loop(
                             meta.ecc_level
                         );
                         let preview = CameraPreview {
-                            rgb_pixels: preview_rgb.clone(),
+                            rgb_pixels: Arc::clone(&preview_rgb),
                             width: PREVIEW_WIDTH,
                             height: PREVIEW_HEIGHT,
                             qr_bounds,

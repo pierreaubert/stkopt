@@ -1,6 +1,7 @@
 //! Main application state and view for the Staking Optimizer desktop app.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::*;
@@ -19,6 +20,74 @@ const LOG_PANE_MIN_APP_HEIGHT: f32 = 220.0;
 pub(crate) fn clamp_log_pane_height(height: f32, viewport_height: f32) -> f32 {
     let max_height = (viewport_height - LOG_PANE_MIN_APP_HEIGHT).max(LOG_PANE_MIN_HEIGHT);
     height.clamp(LOG_PANE_MIN_HEIGHT, max_height)
+}
+
+pub(crate) fn parse_token_amount(input: &str, decimals: u8) -> Result<u128, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("Enter an amount".to_string());
+    }
+    if trimmed.starts_with('-') {
+        return Err("Amount must be greater than 0".to_string());
+    }
+
+    let normalized = trimmed.replace(',', ".");
+    let mut parts = normalized.split('.');
+    let whole = parts.next().unwrap_or_default();
+    let fraction = parts.next();
+    if parts.next().is_some() {
+        return Err("Invalid amount format".to_string());
+    }
+
+    if whole.is_empty() && fraction.unwrap_or_default().is_empty() {
+        return Err("Invalid amount format".to_string());
+    }
+
+    if !whole.chars().all(|c| c.is_ascii_digit())
+        || !fraction
+            .unwrap_or_default()
+            .chars()
+            .all(|c| c.is_ascii_digit())
+    {
+        return Err("Invalid amount format".to_string());
+    }
+
+    let whole_value = if whole.is_empty() {
+        0
+    } else {
+        whole
+            .parse::<u128>()
+            .map_err(|_| "Amount is too large".to_string())?
+    };
+
+    let fraction = fraction.unwrap_or_default();
+    if fraction.len() > decimals as usize {
+        return Err(format!(
+            "Amount supports at most {} decimal places",
+            decimals
+        ));
+    }
+
+    let divisor = 10u128.pow(decimals as u32);
+    let fraction_value = if fraction.is_empty() {
+        0
+    } else {
+        let parsed = fraction
+            .parse::<u128>()
+            .map_err(|_| "Amount is too large".to_string())?;
+        parsed * 10u128.pow(decimals as u32 - fraction.len() as u32)
+    };
+
+    let amount = whole_value
+        .checked_mul(divisor)
+        .and_then(|whole| whole.checked_add(fraction_value))
+        .ok_or_else(|| "Amount is too large".to_string())?;
+
+    if amount == 0 {
+        return Err("Amount must be greater than 0".to_string());
+    }
+
+    Ok(amount)
 }
 
 /// Navigation sections in the app
@@ -159,6 +228,10 @@ pub struct StkoptApp {
     pub staking_operation: StakingOperation,
     /// Amount input for staking operations
     pub staking_amount_input: String,
+    /// Inline status/error for the staking operation modal
+    pub staking_action_message: Option<String>,
+    /// Whether the staking operation modal is building a QR payload
+    pub staking_action_generating: bool,
     /// Pending transaction payload (for QR display/signing)
     pub pending_tx_payload: Option<crate::chain::TransactionPayload>,
     /// Whether QR modal is visible
@@ -167,6 +240,8 @@ pub struct StkoptApp {
     pub qr_modal_tab: QrModalTab,
     /// Transaction submission status message
     pub tx_status_message: Option<String>,
+    /// Transaction submission state for the QR signing flow
+    pub tx_status: QrTxStatus,
     /// Whether pool operations modal is visible
     pub show_pool_modal: bool,
     /// Current pool operation type
@@ -175,12 +250,20 @@ pub struct StkoptApp {
     pub selected_pool_id: Option<u32>,
     /// Amount input for pool operations
     pub pool_amount_input: String,
+    /// Inline status/error for the pool operation modal
+    pub pool_action_message: Option<String>,
+    /// Whether the pool operation modal is building a QR payload
+    pub pool_action_generating: bool,
     /// Active QR reader (camera)
     pub qr_reader: Option<crate::qr_reader::QrReader>,
     /// Latest camera preview frame
     pub camera_preview: Option<crate::qr_reader::CameraPreview>,
     /// Scanned signature data (from Vault QR)
     pub scanned_signature: Option<Vec<u8>>,
+    /// Signed extrinsic built from the scanned Vault signature
+    pub signed_extrinsic: Option<Vec<u8>>,
+    /// Whether a signed extrinsic submission is in progress
+    pub tx_submitting: bool,
     /// Reward destination for SetPayee operation
     pub rewards_destination: stkopt_chain::RewardDestination,
     /// Whether to show blocked validators in the validators view
@@ -291,6 +374,17 @@ impl QrModalTab {
             QrModalTab::Submit => "Submit",
         }
     }
+}
+
+/// Submission state for a scanned signed transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QrTxStatus {
+    #[default]
+    NotReady,
+    Ready,
+    Submitting,
+    Submitted,
+    Failed,
 }
 
 /// A saved account in the address book.
@@ -563,17 +657,24 @@ impl StkoptApp {
             show_staking_modal: false,
             staking_operation: StakingOperation::default(),
             staking_amount_input: String::new(),
+            staking_action_message: None,
+            staking_action_generating: false,
             pending_tx_payload: None,
             show_qr_modal: false,
             qr_modal_tab: QrModalTab::default(),
             tx_status_message: None,
+            tx_status: QrTxStatus::NotReady,
             show_pool_modal: false,
             pool_operation: PoolOperation::default(),
             selected_pool_id: None,
             pool_amount_input: String::new(),
+            pool_action_message: None,
+            pool_action_generating: false,
             qr_reader: None,
             camera_preview: None,
             scanned_signature: None,
+            signed_extrinsic: None,
+            tx_submitting: false,
             rewards_destination: stkopt_chain::RewardDestination::Staked,
             show_blocked: true,
             viewport_width: 1400.0,
@@ -713,6 +814,7 @@ impl StkoptApp {
             ChainUpdate::QrPayloadGenerated(payload) => {
                 // Store the generated QR payload for display in QR modal
                 tracing::info!("QR payload generated: {}", payload.description);
+                self.clear_qr_signature_state();
                 self.pending_tx_payload = Some(payload);
                 self.show_staking_modal = false;
                 self.show_pool_modal = false;
@@ -916,6 +1018,8 @@ impl StkoptApp {
     pub fn open_staking_modal(&mut self, operation: StakingOperation, cx: &mut Context<Self>) {
         self.staking_operation = operation;
         self.staking_amount_input.clear();
+        self.staking_action_message = None;
+        self.staking_action_generating = false;
         self.show_staking_modal = true;
         cx.notify();
     }
@@ -923,13 +1027,15 @@ impl StkoptApp {
     /// Generate QR payload for the current staking operation.
     pub fn generate_staking_qr(&mut self, cx: &mut Context<Self>) {
         let Some(ref chain_handle) = self.chain_handle else {
-            self.connection_error = Some("Not connected".to_string());
+            self.staking_action_generating = false;
+            self.staking_action_message = Some("Not connected".to_string());
             cx.notify();
             return;
         };
 
         let Some(ref address) = self.watched_account else {
-            self.connection_error = Some("No account selected".to_string());
+            self.staking_action_generating = false;
+            self.staking_action_message = Some("No account selected".to_string());
             cx.notify();
             return;
         };
@@ -938,7 +1044,8 @@ impl StkoptApp {
         let signer = match address.parse::<subxt::utils::AccountId32>() {
             Ok(id) => id,
             Err(e) => {
-                self.connection_error = Some(format!("Invalid address: {}", e));
+                self.staking_action_generating = false;
+                self.staking_action_message = Some(format!("Invalid address: {}", e));
                 cx.notify();
                 return;
             }
@@ -946,11 +1053,11 @@ impl StkoptApp {
 
         // Parse amount if needed
         let amount = if self.staking_operation.requires_amount() {
-            let divisor = self.decimal_divisor();
-            match self.staking_amount_input.parse::<f64>() {
-                Ok(val) => (val * divisor as f64) as u128,
-                Err(_) => {
-                    self.connection_error = Some("Invalid amount".to_string());
+            match parse_token_amount(&self.staking_amount_input, self.token_decimals()) {
+                Ok(amount) => amount,
+                Err(e) => {
+                    self.staking_action_generating = false;
+                    self.staking_action_message = Some(e);
                     cx.notify();
                     return;
                 }
@@ -961,7 +1068,8 @@ impl StkoptApp {
 
         // For Nominate, redirect to Optimization view
         if self.staking_operation == StakingOperation::Nominate {
-            self.connection_error =
+            self.staking_action_generating = false;
+            self.staking_action_message =
                 Some("Use 'Nominate Validators' from Optimization or Validators view".to_string());
             self.show_staking_modal = false;
             cx.notify();
@@ -978,6 +1086,9 @@ impl StkoptApp {
         let operation = self.staking_operation;
         let rewards_destination = self.rewards_destination.clone();
         let mut async_cx = cx.to_async();
+        self.staking_action_generating = true;
+        self.staking_action_message = Some("Generating QR...".to_string());
+        cx.notify();
 
         cx.spawn(
             move |this: gpui::WeakEntity<Self>, _cx: &mut gpui::AsyncApp| async move {
@@ -1007,6 +1118,9 @@ impl StkoptApp {
                     Ok(payload) => {
                         if let Err(e) =
                             this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
+                                this.staking_action_generating = false;
+                                this.staking_action_message = None;
+                                this.clear_qr_signature_state();
                                 this.pending_tx_payload = Some(payload);
                                 this.show_staking_modal = false;
                                 this.show_qr_modal = true;
@@ -1020,7 +1134,8 @@ impl StkoptApp {
                     Err(e) => {
                         if let Err(update_err) =
                             this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
-                                this.connection_error = Some(e);
+                                this.staking_action_generating = false;
+                                this.staking_action_message = Some(e);
                                 cx.notify();
                             })
                         {
@@ -1128,6 +1243,7 @@ impl StkoptApp {
                     Ok(payload) => {
                         if let Err(e) =
                             this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
+                                this.clear_qr_signature_state();
                                 this.pending_tx_payload = Some(payload);
                                 this.show_qr_modal = true;
                                 this.qr_modal_tab = QrModalTab::QrCode;
@@ -1166,6 +1282,8 @@ impl StkoptApp {
         self.pool_operation = operation;
         self.selected_pool_id = pool_id;
         self.pool_amount_input.clear();
+        self.pool_action_message = None;
+        self.pool_action_generating = false;
         self.show_pool_modal = true;
         cx.notify();
     }
@@ -1173,13 +1291,15 @@ impl StkoptApp {
     /// Generate QR payload for the current pool operation.
     pub fn generate_pool_qr(&mut self, cx: &mut Context<Self>) {
         let Some(ref chain_handle) = self.chain_handle else {
-            self.connection_error = Some("Not connected".to_string());
+            self.pool_action_generating = false;
+            self.pool_action_message = Some("Not connected".to_string());
             cx.notify();
             return;
         };
 
         let Some(ref address) = self.watched_account else {
-            self.connection_error = Some("No account selected".to_string());
+            self.pool_action_generating = false;
+            self.pool_action_message = Some("No account selected".to_string());
             cx.notify();
             return;
         };
@@ -1188,7 +1308,8 @@ impl StkoptApp {
         let signer = match address.parse::<subxt::utils::AccountId32>() {
             Ok(id) => id,
             Err(e) => {
-                self.connection_error = Some(format!("Invalid address: {}", e));
+                self.pool_action_generating = false;
+                self.pool_action_message = Some(format!("Invalid address: {}", e));
                 cx.notify();
                 return;
             }
@@ -1196,11 +1317,11 @@ impl StkoptApp {
 
         // Parse amount if needed
         let amount = if self.pool_operation.requires_amount() {
-            let divisor = self.decimal_divisor();
-            match self.pool_amount_input.parse::<f64>() {
-                Ok(val) => (val * divisor as f64) as u128,
-                Err(_) => {
-                    self.connection_error = Some("Invalid amount".to_string());
+            match parse_token_amount(&self.pool_amount_input, self.token_decimals()) {
+                Ok(amount) => amount,
+                Err(e) => {
+                    self.pool_action_generating = false;
+                    self.pool_action_message = Some(e);
                     cx.notify();
                     return;
                 }
@@ -1213,6 +1334,9 @@ impl StkoptApp {
         let handle = chain_handle.clone();
         let operation = self.pool_operation;
         let mut async_cx = cx.to_async();
+        self.pool_action_generating = true;
+        self.pool_action_message = Some("Generating QR...".to_string());
+        cx.notify();
 
         cx.spawn(
             move |this: gpui::WeakEntity<Self>, _cx: &mut gpui::AsyncApp| async move {
@@ -1238,6 +1362,9 @@ impl StkoptApp {
                     Ok(payload) => {
                         if let Err(e) =
                             this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
+                                this.pool_action_generating = false;
+                                this.pool_action_message = None;
+                                this.clear_qr_signature_state();
                                 this.pending_tx_payload = Some(payload);
                                 this.show_pool_modal = false;
                                 this.show_qr_modal = true;
@@ -1251,7 +1378,8 @@ impl StkoptApp {
                     Err(e) => {
                         if let Err(update_err) =
                             this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
-                                this.connection_error = Some(e);
+                                this.pool_action_generating = false;
+                                this.pool_action_message = Some(e);
                                 cx.notify();
                             })
                         {
@@ -1310,8 +1438,55 @@ impl StkoptApp {
         .detach();
     }
 
+    /// Clear state derived from a previously scanned signature.
+    pub fn clear_qr_signature_state(&mut self) {
+        self.scanned_signature = None;
+        self.signed_extrinsic = None;
+        self.tx_status_message = None;
+        self.tx_status = QrTxStatus::NotReady;
+        self.tx_submitting = false;
+        self.camera_preview = None;
+    }
+
+    /// Close the QR modal and clear transaction-scanning state.
+    pub fn close_qr_modal(&mut self, cx: &mut Context<Self>) {
+        self.show_qr_modal = false;
+        self.pending_tx_payload = None;
+        self.clear_qr_signature_state();
+        self.stop_camera_with_reason("QR modal closed", cx);
+    }
+
+    /// Switch QR modal tabs and keep camera lifecycle aligned with the scan tab.
+    pub fn set_qr_modal_tab(&mut self, tab: QrModalTab, cx: &mut Context<Self>) {
+        self.qr_modal_tab = tab;
+        match tab {
+            QrModalTab::ScanSignature => {
+                if self.pending_tx_payload.is_some()
+                    && self.signed_extrinsic.is_none()
+                    && self.qr_reader.is_none()
+                {
+                    self.start_camera(cx);
+                } else {
+                    cx.notify();
+                }
+            }
+            _ => {
+                if self.qr_reader.is_some() {
+                    self.stop_camera_with_reason("left Scan Signature tab", cx);
+                } else {
+                    cx.notify();
+                }
+            }
+        }
+    }
+
     /// Start the camera for QR scanning.
     pub fn start_camera(&mut self, cx: &mut Context<Self>) {
+        if self.qr_reader.is_some() {
+            cx.notify();
+            return;
+        }
+
         // Ensure camera permission on macOS
         #[cfg(target_os = "macos")]
         {
@@ -1327,7 +1502,11 @@ impl StkoptApp {
         match crate::qr_reader::QrReader::new() {
             Ok(reader) => {
                 self.qr_reader = Some(reader);
+                self.camera_preview = None;
+                self.tx_status_message = None;
+                self.tx_status = QrTxStatus::NotReady;
                 tracing::info!("Camera started for QR scanning");
+                self.schedule_camera_poll(cx);
             }
             Err(e) => {
                 tracing::error!("Failed to start camera: {}", e);
@@ -1339,12 +1518,162 @@ impl StkoptApp {
 
     /// Stop the camera.
     pub fn stop_camera(&mut self, cx: &mut Context<Self>) {
+        self.stop_camera_with_reason("camera stop requested", cx);
+    }
+
+    /// Stop the camera and include the UI reason in the logs.
+    pub fn stop_camera_with_reason(&mut self, reason: &'static str, cx: &mut Context<Self>) {
         if let Some(mut reader) = self.qr_reader.take() {
             reader.stop();
-            tracing::info!("Camera stopped");
+            tracing::info!("Camera stopped ({})", reason);
         }
         self.camera_preview = None;
         cx.notify();
+    }
+
+    /// Wake GPUI periodically while the camera reader is active.
+    fn schedule_camera_poll(&self, cx: &mut Context<Self>) {
+        let mut async_cx = cx.to_async();
+        cx.spawn(
+            move |this: gpui::WeakEntity<Self>, _cx: &mut gpui::AsyncApp| async move {
+                loop {
+                    smol::Timer::after(Duration::from_millis(80)).await;
+
+                    let keep_polling =
+                        match this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
+                            if this.qr_reader.is_some() {
+                                this.poll_camera(cx);
+                                true
+                            } else {
+                                false
+                            }
+                        }) {
+                            Ok(keep_polling) => keep_polling,
+                            Err(e) => {
+                                tracing::warn!("Failed to poll QR camera from UI task: {:?}", e);
+                                false
+                            }
+                        };
+
+                    if !keep_polling {
+                        break;
+                    }
+                }
+            },
+        )
+        .detach();
+    }
+
+    fn build_signed_extrinsic_from_signature(
+        &mut self,
+        signature_data: &[u8],
+    ) -> Result<(), String> {
+        let payload = self.pending_tx_payload.as_ref().ok_or_else(|| {
+            "Signature received but no pending transaction is available".to_string()
+        })?;
+
+        let decoded_sig = stkopt_chain::decode_vault_signature(signature_data)?;
+        tracing::info!("Decoded {:?} signature from Vault QR", decoded_sig.sig_type);
+
+        let signed = stkopt_chain::build_signed_extrinsic(
+            &payload.unsigned_payload,
+            &payload.signer,
+            &decoded_sig,
+        );
+
+        tracing::info!(
+            "Signed extrinsic built: 0x{} ({} bytes)",
+            hex::encode(signed.hash),
+            signed.encoded.len()
+        );
+
+        let encoded_len = signed.encoded.len();
+        self.signed_extrinsic = Some(signed.encoded);
+        self.tx_status = QrTxStatus::Ready;
+        self.tx_status_message = Some(format!(
+            "Signature decoded. Signed transaction ready ({} bytes).",
+            encoded_len
+        ));
+        Ok(())
+    }
+
+    /// Submit the signed extrinsic built from the scanned Vault QR code.
+    pub fn submit_scanned_transaction(&mut self, cx: &mut Context<Self>) {
+        if self.tx_status == QrTxStatus::Submitting {
+            return;
+        }
+
+        if self.tx_status == QrTxStatus::Submitted {
+            self.tx_status_message = Some("Transaction already submitted".to_string());
+            cx.notify();
+            return;
+        }
+
+        let Some(ref chain_handle) = self.chain_handle else {
+            self.tx_status = QrTxStatus::Failed;
+            self.tx_status_message = Some("Not connected".to_string());
+            cx.notify();
+            return;
+        };
+
+        let Some(extrinsic) = self.signed_extrinsic.clone() else {
+            self.tx_status = QrTxStatus::NotReady;
+            self.tx_status_message = Some("Scan the signed QR code first".to_string());
+            cx.notify();
+            return;
+        };
+
+        self.tx_submitting = true;
+        self.tx_status = QrTxStatus::Submitting;
+        self.tx_status_message = Some("Submitting transaction...".to_string());
+        cx.notify();
+
+        let handle = chain_handle.clone();
+        let mut async_cx = cx.to_async();
+        cx.spawn(
+            move |this: gpui::WeakEntity<Self>, _cx: &mut gpui::AsyncApp| async move {
+                let result = handle.submit_signed_extrinsic(extrinsic).await;
+                if let Err(e) = this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
+                    this.tx_submitting = false;
+                    let (status, message) = match result {
+                        Ok(crate::chain::TxSubmissionResult::InBlock { block_hash }) => {
+                            this.signed_extrinsic = None;
+                            (
+                                QrTxStatus::Submitted,
+                                format!(
+                                    "Transaction included in block 0x{}",
+                                    hex::encode(block_hash)
+                                ),
+                            )
+                        }
+                        Ok(crate::chain::TxSubmissionResult::Finalized { block_hash }) => {
+                            this.signed_extrinsic = None;
+                            (
+                                QrTxStatus::Submitted,
+                                format!(
+                                    "Transaction finalized in block 0x{}",
+                                    hex::encode(block_hash)
+                                ),
+                            )
+                        }
+                        Ok(crate::chain::TxSubmissionResult::Dropped(reason)) => (
+                            QrTxStatus::Failed,
+                            format!("Transaction dropped: {}", reason),
+                        ),
+                        Err(e) => (
+                            QrTxStatus::Failed,
+                            format!("Transaction submission failed: {}", e),
+                        ),
+                    };
+                    this.tx_status = status;
+                    this.tx_status_message = Some(message);
+                    cx.notify();
+                }) {
+                    tracing::error!("Failed to update UI after transaction submit: {:?}", e);
+                }
+            },
+        )
+        .detach();
     }
 
     /// Poll the camera for scan results (called from render loop).
@@ -1356,6 +1685,8 @@ impl StkoptApp {
             return;
         };
 
+        let mut received_update = false;
+
         for result in results {
             match result {
                 crate::qr_reader::QrScanResult::Success(data, preview) => {
@@ -1366,18 +1697,29 @@ impl StkoptApp {
                     if let Some(mut reader) = self.qr_reader.take() {
                         reader.stop();
                     }
+                    match self.build_signed_extrinsic_from_signature(&data) {
+                        Ok(()) => {}
+                        Err(e) => {
+                            tracing::error!("Failed to process signature QR: {}", e);
+                            self.signed_extrinsic = None;
+                            self.tx_status = QrTxStatus::Failed;
+                            self.tx_status_message =
+                                Some(format!("Failed to read signed QR: {}", e));
+                        }
+                    }
+
                     // Move to submit tab
                     self.qr_modal_tab = QrModalTab::Submit;
-                    self.tx_status_message =
-                        Some(format!("Signature scanned ({} bytes)", data.len()));
                     cx.notify();
                     return;
                 }
                 crate::qr_reader::QrScanResult::Scanning(preview) => {
                     self.camera_preview = Some(preview);
+                    received_update = true;
                 }
                 crate::qr_reader::QrScanResult::Detected(preview) => {
                     self.camera_preview = Some(preview);
+                    received_update = true;
                 }
                 crate::qr_reader::QrScanResult::Error(e) => {
                     tracing::error!("Camera error: {}", e);
@@ -1385,8 +1727,13 @@ impl StkoptApp {
                     if let Some(mut reader) = self.qr_reader.take() {
                         reader.stop();
                     }
+                    received_update = true;
                 }
             }
+        }
+
+        if received_update {
+            cx.notify();
         }
     }
 
@@ -1753,9 +2100,7 @@ impl Render for StkoptApp {
                 if event.keystroke.key == "escape" {
                     entity.update(cx, |this, cx| {
                         if this.show_qr_modal {
-                            this.show_qr_modal = false;
-                            this.pending_tx_payload = None;
-                            this.stop_camera(cx);
+                            this.close_qr_modal(cx);
                         } else if this.show_staking_modal {
                             this.show_staking_modal = false;
                         } else if this.show_pool_modal {

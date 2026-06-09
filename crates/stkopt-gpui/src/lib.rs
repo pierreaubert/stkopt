@@ -143,6 +143,27 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_token_amount_whole_and_fractional() {
+        assert_eq!(parse_token_amount("1", 10).unwrap(), 10_000_000_000);
+        assert_eq!(parse_token_amount("1.25", 10).unwrap(), 12_500_000_000);
+        assert_eq!(parse_token_amount("0.0001", 10).unwrap(), 1_000_000);
+    }
+
+    #[test]
+    fn test_parse_token_amount_accepts_comma_decimal() {
+        assert_eq!(parse_token_amount("1,5", 10).unwrap(), 15_000_000_000);
+    }
+
+    #[test]
+    fn test_parse_token_amount_rejects_invalid_values() {
+        assert!(parse_token_amount("", 10).is_err());
+        assert!(parse_token_amount("0", 10).is_err());
+        assert!(parse_token_amount("-1", 10).is_err());
+        assert!(parse_token_amount("1.00000000001", 10).is_err());
+        assert!(parse_token_amount("abc", 10).is_err());
+    }
+
+    #[test]
     fn test_staking_info_default() {
         let info = StakingInfo::default();
         assert_eq!(info.total_balance, 0);

@@ -3,6 +3,7 @@
 //! This module provides a unified database layer used by both TUI and GPUI frontends.
 //! The schema supports all features from both implementations.
 
+use rusqlite::types::ValueRef;
 use rusqlite::{Connection, Result, params};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -10,6 +11,41 @@ use std::path::Path;
 
 use crate::display::{DisplayPool, DisplayValidator, StakingHistoryPoint};
 use crate::types::{Network, PoolState};
+
+fn read_u128(row: &rusqlite::Row<'_>, index: usize) -> Result<u128> {
+    match row.get_ref(index)? {
+        ValueRef::Integer(value) if value >= 0 => Ok(value as u128),
+        ValueRef::Integer(value) => Err(rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Integer,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("negative integer cannot be read as u128: {}", value),
+            )),
+        )),
+        ValueRef::Text(value) => {
+            let value = std::str::from_utf8(value).map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    index,
+                    rusqlite::types::Type::Text,
+                    Box::new(err),
+                )
+            })?;
+            value.parse::<u128>().map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    index,
+                    rusqlite::types::Type::Text,
+                    Box::new(err),
+                )
+            })
+        }
+        value => Err(rusqlite::Error::InvalidColumnType(
+            index,
+            "u128".to_string(),
+            value.data_type(),
+        )),
+    }
+}
 
 /// Cached chain metadata from the blockchain.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,8 +171,8 @@ impl StakingDb {
                 address TEXT NOT NULL,
                 commission REAL NOT NULL,
                 blocked INTEGER NOT NULL DEFAULT 0,
-                total_stake INTEGER NOT NULL,
-                own_stake INTEGER NOT NULL,
+                total_stake TEXT NOT NULL,
+                own_stake TEXT NOT NULL,
                 nominator_count INTEGER NOT NULL,
                 points INTEGER NOT NULL DEFAULT 0,
                 apy REAL,
@@ -192,6 +228,116 @@ impl StakingDb {
             );
             "#,
         )?;
+        self.migrate_cached_validator_stakes_to_text()?;
+        self.purge_invalid_cached_validator_stakes()?;
+        Ok(())
+    }
+
+    fn migrate_cached_validator_stakes_to_text(&self) -> Result<()> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(cached_validators)")?;
+        let columns = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        })?;
+
+        let mut total_stake_type = None;
+        let mut own_stake_type = None;
+        for column in columns {
+            let (name, column_type) = column?;
+            match name.as_str() {
+                "total_stake" => total_stake_type = Some(column_type),
+                "own_stake" => own_stake_type = Some(column_type),
+                _ => {}
+            }
+        }
+
+        if total_stake_type.as_deref() == Some("TEXT") && own_stake_type.as_deref() == Some("TEXT")
+        {
+            return Ok(());
+        }
+
+        let result = self.conn.execute_batch(
+            r#"
+            BEGIN IMMEDIATE;
+
+            DROP INDEX IF EXISTS idx_cached_validators_network_apy;
+
+            ALTER TABLE cached_validators RENAME TO cached_validators_old;
+
+            CREATE TABLE cached_validators (
+                network TEXT NOT NULL,
+                address TEXT NOT NULL,
+                commission REAL NOT NULL,
+                blocked INTEGER NOT NULL DEFAULT 0,
+                total_stake TEXT NOT NULL,
+                own_stake TEXT NOT NULL,
+                nominator_count INTEGER NOT NULL,
+                points INTEGER NOT NULL DEFAULT 0,
+                apy REAL,
+                era INTEGER NOT NULL,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (network, address)
+            );
+
+            INSERT INTO cached_validators
+                (network, address, commission, blocked, total_stake, own_stake,
+                 nominator_count, points, apy, era, updated_at)
+            SELECT network, address, commission, blocked, CAST(total_stake AS TEXT),
+                   CAST(own_stake AS TEXT), nominator_count, points, apy, era, updated_at
+            FROM cached_validators_old
+            WHERE CAST(total_stake AS TEXT) NOT GLOB '-*'
+              AND CAST(own_stake AS TEXT) NOT GLOB '-*';
+
+            DROP TABLE cached_validators_old;
+
+            CREATE INDEX IF NOT EXISTS idx_cached_validators_network_apy
+                ON cached_validators(network, apy DESC);
+
+            COMMIT;
+            "#,
+        );
+
+        if let Err(err) = result {
+            let _ = self.conn.execute_batch("ROLLBACK;");
+            return Err(err);
+        }
+
+        Ok(())
+    }
+
+    fn purge_invalid_cached_validator_stakes(&self) -> Result<()> {
+        let invalid_rows = {
+            let mut stmt = self.conn.prepare(
+                r#"
+                SELECT network, address, CAST(total_stake AS TEXT), CAST(own_stake AS TEXT)
+                FROM cached_validators
+                "#,
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?;
+
+            let mut invalid_rows = Vec::new();
+            for row in rows {
+                let (network, address, total_stake, own_stake) = row?;
+                if total_stake.parse::<u128>().is_err() || own_stake.parse::<u128>().is_err() {
+                    invalid_rows.push((network, address));
+                }
+            }
+            invalid_rows
+        };
+
+        for (network, address) in invalid_rows {
+            self.conn.execute(
+                "DELETE FROM cached_validators WHERE network = ?1 AND address = ?2",
+                params![network, address],
+            )?;
+        }
+
         Ok(())
     }
 
@@ -507,8 +653,8 @@ impl StakingDb {
                 },
                 commission: row.get(1)?,
                 blocked: row.get::<_, i32>(2)? != 0,
-                total_stake: row.get::<_, i64>(3)? as u128,
-                own_stake: row.get::<_, i64>(4)? as u128,
+                total_stake: read_u128(row, 3)?,
+                own_stake: read_u128(row, 4)?,
                 nominator_count: row.get(5)?,
                 points: row.get(6)?,
                 apy: apy_value,
@@ -554,8 +700,8 @@ impl StakingDb {
                     &v.address,
                     v.commission,
                     if v.blocked { 1 } else { 0 },
-                    v.total_stake as i64,
-                    v.own_stake as i64,
+                    v.total_stake.to_string(),
+                    v.own_stake.to_string(),
                     v.nominator_count,
                     v.points,
                     v.apy,
@@ -1146,6 +1292,63 @@ mod tests {
         let cached = db.get_cached_validators(Network::Polkadot).unwrap();
         assert_eq!(cached.len(), 2);
         assert!(!cached.iter().any(|v| v.address == "val1"));
+    }
+
+    #[test]
+    fn test_cached_validators_preserves_u128_stake() {
+        let mut db = StakingDb::open_memory().unwrap();
+        let mut validator = make_test_validator("val1", 0.15);
+        validator.total_stake = i64::MAX as u128 + 42;
+        validator.own_stake = i64::MAX as u128 + 7;
+
+        db.set_cached_validators(Network::Polkadot, 1500, &[validator.clone()])
+            .unwrap();
+
+        let cached = db.get_cached_validators(Network::Polkadot).unwrap();
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[0].total_stake, validator.total_stake);
+        assert_eq!(cached[0].own_stake, validator.own_stake);
+    }
+
+    #[test]
+    fn test_cached_validators_migration_drops_negative_legacy_stakes() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE cached_validators (
+                network TEXT NOT NULL,
+                address TEXT NOT NULL,
+                commission REAL NOT NULL,
+                blocked INTEGER NOT NULL DEFAULT 0,
+                total_stake INTEGER NOT NULL,
+                own_stake INTEGER NOT NULL,
+                nominator_count INTEGER NOT NULL,
+                points INTEGER NOT NULL DEFAULT 0,
+                apy REAL,
+                era INTEGER NOT NULL,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (network, address)
+            );
+
+            INSERT INTO cached_validators
+                (network, address, commission, blocked, total_stake, own_stake,
+                 nominator_count, points, apy, era)
+            VALUES
+                ('Polkadot', 'valid', 0.05, 0, 1000, 100, 10, 1, 0.12, 1500),
+                ('Polkadot', 'invalid-total', 0.05, 0, -1, 100, 10, 1, 0.13, 1500),
+                ('Polkadot', 'invalid-own', 0.05, 0, 1000, -1, 10, 1, 0.14, 1500);
+            "#,
+        )
+        .unwrap();
+
+        let db = StakingDb { conn };
+        db.init_schema().unwrap();
+
+        let cached = db.get_cached_validators(Network::Polkadot).unwrap();
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[0].address, "valid");
+        assert_eq!(cached[0].total_stake, 1000);
+        assert_eq!(cached[0].own_stake, 100);
     }
 
     #[test]

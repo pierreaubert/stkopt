@@ -7,7 +7,7 @@ use gpui::*;
 use gpui_ui_kit::theme::ThemeExt;
 use gpui_ui_kit::*;
 
-use crate::app::{PoolOperation, StkoptApp};
+use crate::app::{PoolOperation, StkoptApp, parse_token_amount};
 
 /// Pool modal component.
 pub struct PoolModal;
@@ -51,6 +51,7 @@ impl PoolModal {
                     .border_1()
                     .border_color(theme.border)
                     .shadow_lg()
+                    .occlude()
                     .child(Self::render_header(operation, app, cx))
                     .child(Self::render_body(app, cx))
                     .child(Self::render_footer(app, cx)),
@@ -104,21 +105,18 @@ impl PoolModal {
             .as_ref()
             .map(|i| i.transferable)
             .unwrap_or(0);
-        let divisor = 10u128.pow(decimals as u32);
 
         // Validate amount
         let amount_error = if operation.requires_amount() && !app.pool_amount_input.is_empty() {
-            match app.pool_amount_input.parse::<f64>() {
-                Ok(val) if val <= 0.0 => Some("Amount must be greater than 0"),
-                Ok(val) => {
-                    let amount_planck = (val * divisor as f64) as u128;
+            match parse_token_amount(&app.pool_amount_input, decimals) {
+                Ok(amount_planck) => {
                     if amount_planck > available_balance {
-                        Some("Insufficient balance")
+                        Some("Insufficient balance".to_string())
                     } else {
                         None
                     }
                 }
-                Err(_) => Some("Invalid amount format"),
+                Err(error) => Some(error),
             }
         } else {
             None
@@ -199,6 +197,7 @@ impl PoolModal {
                                         move |value: String, _window, cx| {
                                             entity.update(cx, |this, cx| {
                                                 this.pool_amount_input = value;
+                                                this.pool_action_message = None;
                                                 cx.notify();
                                             });
                                         }
@@ -225,6 +224,21 @@ impl PoolModal {
                 ),
         );
 
+        if let Some(ref message) = app.pool_action_message {
+            let bg = if app.pool_action_generating {
+                theme.info_token().subtle
+            } else {
+                theme.warning_token().subtle
+            };
+            body = body.child(
+                div().p_3().rounded_md().bg(bg).child(
+                    Text::new(message.clone())
+                        .size(TextSize::Sm)
+                        .color(theme.text_primary),
+                ),
+            );
+        }
+
         body
     }
 
@@ -233,8 +247,30 @@ impl PoolModal {
         let entity = app.entity.clone();
         let operation = app.pool_operation;
         let amount_str = app.pool_amount_input.clone();
-        let has_amount = !amount_str.is_empty() || !operation.requires_amount();
+        let has_amount = !amount_str.trim().is_empty() || !operation.requires_amount();
         let has_pool = app.selected_pool_id.is_some() || operation != PoolOperation::Join;
+        let disabled = !has_amount || !has_pool || app.pool_action_generating;
+        let button_label = if app.pool_action_generating {
+            "Generating..."
+        } else {
+            "Generate QR"
+        };
+
+        let mut generate_button = Button::new("btn-generate-pool-qr", button_label)
+            .variant(ButtonVariant::Primary)
+            .theme(crate::theme::button_theme_for_ui_theme(&theme))
+            .disabled(disabled)
+            .build();
+
+        if !disabled {
+            let generate_entity = entity.clone();
+            generate_button =
+                generate_button.on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    generate_entity.update(cx, |this, cx| {
+                        this.generate_pool_qr(cx);
+                    });
+                });
+        }
 
         div()
             .flex()
@@ -257,20 +293,7 @@ impl PoolModal {
                         }
                     }),
             )
-            .child(
-                Button::new("btn-generate-pool-qr", "Generate QR")
-                    .variant(ButtonVariant::Primary)
-                    .theme(crate::theme::button_theme_for_ui_theme(&theme))
-                    .disabled(!has_amount || !has_pool)
-                    .on_click({
-                        let entity = entity.clone();
-                        move |_window, cx| {
-                            entity.update(cx, |this, cx| {
-                                this.generate_pool_qr(cx);
-                            });
-                        }
-                    }),
-            )
+            .child(generate_button)
     }
 
     fn operation_icon(operation: PoolOperation) -> &'static str {

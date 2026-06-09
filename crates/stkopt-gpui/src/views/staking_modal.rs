@@ -51,6 +51,7 @@ impl StakingModal {
                     .border_1()
                     .border_color(theme.border)
                     .shadow_lg()
+                    .occlude()
                     .child(Self::render_header(operation, cx))
                     .child(Self::render_body(app, cx))
                     .child(Self::render_footer(app, cx)),
@@ -148,6 +149,7 @@ impl StakingModal {
                                         move |value: String, _window, cx| {
                                             entity.update(cx, |this, cx| {
                                                 this.staking_amount_input = value;
+                                                this.staking_action_message = None;
                                                 cx.notify();
                                             });
                                         }
@@ -235,6 +237,21 @@ impl StakingModal {
                 ),
         );
 
+        if let Some(ref message) = app.staking_action_message {
+            let bg = if app.staking_action_generating {
+                theme.info_token().subtle
+            } else {
+                theme.warning_token().subtle
+            };
+            body = body.child(
+                div().p_3().rounded_md().bg(bg).child(
+                    Text::new(message.clone())
+                        .size(TextSize::Sm)
+                        .color(theme.text_primary),
+                ),
+            );
+        }
+
         body
     }
 
@@ -310,7 +327,29 @@ impl StakingModal {
         let entity = app.entity.clone();
         let operation = app.staking_operation;
         let amount_str = app.staking_amount_input.clone();
-        let has_amount = !amount_str.is_empty() || !operation.requires_amount();
+        let has_amount = !amount_str.trim().is_empty() || !operation.requires_amount();
+        let disabled = !has_amount || app.staking_action_generating;
+        let button_label = if app.staking_action_generating {
+            "Generating..."
+        } else {
+            "Generate QR"
+        };
+
+        let mut generate_button = Button::new("btn-generate-qr", button_label)
+            .variant(ButtonVariant::Primary)
+            .theme(crate::theme::button_theme_for_ui_theme(&theme))
+            .disabled(disabled)
+            .build();
+
+        if !disabled {
+            let generate_entity = entity.clone();
+            generate_button =
+                generate_button.on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    generate_entity.update(cx, |this, cx| {
+                        this.generate_staking_qr(cx);
+                    });
+                });
+        }
 
         div()
             .flex()
@@ -333,20 +372,7 @@ impl StakingModal {
                         }
                     }),
             )
-            .child(
-                Button::new("btn-generate-qr", "Generate QR")
-                    .variant(ButtonVariant::Primary)
-                    .theme(crate::theme::button_theme_for_ui_theme(&theme))
-                    .disabled(!has_amount)
-                    .on_click({
-                        let entity = entity.clone();
-                        move |_window, cx| {
-                            entity.update(cx, |this, cx| {
-                                this.generate_staking_qr(cx);
-                            });
-                        }
-                    }),
-            )
+            .child(generate_button)
     }
 
     fn operation_icon(operation: StakingOperation) -> &'static str {

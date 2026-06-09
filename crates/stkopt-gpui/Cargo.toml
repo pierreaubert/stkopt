@@ -23,6 +23,7 @@ gpui-px = { version="0.5", features = ["gpui"] }
 # Async runtime
 tokio = { workspace = true, features = ["full"] }
 futures.workspace = true
+smol = "2"
 
 # Serialization
 serde.workspace = true

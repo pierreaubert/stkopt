@@ -7335,7 +7335,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "stkopt-chain"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "bs58",
@@ -7356,7 +7356,7 @@ dependencies = [
 
 [[package]]
 name = "stkopt-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "approx",
  "chrono",
@@ -7370,7 +7370,7 @@ dependencies = [
 
 [[package]]
 name = "stkopt-gpui"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -7391,6 +7391,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "smol",
  "stkopt-chain",
  "stkopt-core",
  "subxt",
@@ -7403,7 +7404,7 @@ dependencies = [
 
 [[package]]
 name = "stkopt-tui"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "base64 0.22.1",
  "chrono",
