@@ -226,6 +226,8 @@ pub enum Action {
     SetStakingHistory(Vec<StakingHistoryPoint>),
     /// Add a single staking history point (streaming).
     AddStakingHistoryPoint(StakingHistoryPoint),
+    /// Set the total number of eras expected for history loading progress.
+    SetHistoryTotalEras(u32),
     /// Start loading staking history.
     LoadStakingHistory,
     /// Cancel loading staking history.

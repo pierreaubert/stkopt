@@ -13,6 +13,15 @@ use subxt::utils::AccountId32;
 use tokio::sync::mpsc;
 
 const PEOPLE_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const MS_PER_DAY: u64 = 24 * 60 * 60 * 1000;
+
+fn eras_for_lookback_days(lookback_days: u32, era_duration_ms: u64) -> u32 {
+    if lookback_days == 0 || era_duration_ms == 0 {
+        return 1;
+    }
+    let lookback_ms = lookback_days as u64 * MS_PER_DAY;
+    lookback_ms.div_ceil(era_duration_ms).max(1) as u32
+}
 
 fn pool_nomination_apy(
     nominations: &stkopt_chain::PoolNominations,
@@ -96,7 +105,7 @@ pub enum ChainRequest {
     /// Load staking history.
     FetchHistory {
         account: AccountId32,
-        num_eras: u32,
+        lookback_days: u32,
         cancel_rx: tokio::sync::watch::Receiver<bool>,
     },
     /// Execute a staking operation (generates QR).
@@ -605,17 +614,14 @@ pub async fn chain_task(
 
             let points = points_map.get(&addr_bytes).copied().unwrap_or(0);
 
-            let validator_share = if total_points > 0 && points > 0 {
-                (era_reward as f64 * points as f64 / total_points as f64) as u128
+            let apy = if era_reward > 0 && total_points > 0 && points > 0 && total_stake > 0 {
+                let validator_share =
+                    (era_reward as f64 * points as f64 / total_points as f64) as u128;
+                let nominator_reward =
+                    ((validator_share as f64) * (1.0 - v.preferences.commission)) as u128;
+                Some(get_era_apy(nominator_reward, total_stake, era_duration_ms))
             } else {
-                0
-            };
-            let nominator_reward =
-                ((validator_share as f64) * (1.0 - v.preferences.commission)) as u128;
-            let apy = if total_stake > 0 {
-                get_era_apy(nominator_reward, total_stake, era_duration_ms)
-            } else {
-                0.0
+                None
             };
 
             let address_str = v.address.to_string();
@@ -630,7 +636,7 @@ pub async fn chain_task(
                 own_stake,
                 nominator_count,
                 points,
-                apy: Some(apy),
+                apy,
             })
         })
         .collect();
@@ -962,13 +968,13 @@ pub async fn chain_task(
             }
             ChainRequest::FetchHistory {
                 account,
-                num_eras,
+                lookback_days,
                 cancel_rx,
             } => {
                 tracing::info!(
-                    "Loading staking history for {} ({} eras)",
+                    "Loading staking history for {} (last {} days)",
                     account,
-                    num_eras
+                    lookback_days
                 );
 
                 let address = account.to_string();
@@ -980,17 +986,6 @@ pub async fn chain_task(
                         None
                     }
                 };
-
-                if let Some(ref db) = db
-                    && let Ok(cached) = db.get_history(network, &address, Some(num_eras))
-                    && !cached.is_empty()
-                {
-                    let filtered: Vec<_> = cached.into_iter().filter(|h| h.apy <= 0.50).collect();
-                    tracing::info!("Loaded {} cached history points (filtered)", filtered.len());
-                    for point in filtered {
-                        let _ = action_tx.send(Action::AddStakingHistoryPoint(point)).await;
-                    }
-                }
 
                 let current_era_info = match client.get_active_era().await {
                     Ok(Some(era)) => era,
@@ -1015,6 +1010,19 @@ pub async fn chain_task(
                         24 * 60 * 60 * 1000
                     }
                 };
+                let num_eras = eras_for_lookback_days(lookback_days, era_duration_ms);
+                let _ = action_tx.send(Action::SetHistoryTotalEras(num_eras)).await;
+
+                if let Some(ref db) = db
+                    && let Ok(cached) = db.get_history(network, &address, Some(num_eras))
+                    && !cached.is_empty()
+                {
+                    let filtered: Vec<_> = cached.into_iter().filter(|h| h.apy <= 0.50).collect();
+                    tracing::info!("Loaded {} cached history points (filtered)", filtered.len());
+                    for point in filtered {
+                        let _ = action_tx.send(Action::AddStakingHistoryPoint(point)).await;
+                    }
+                }
 
                 let user_bonded = match client.get_staking_ledger(&account).await {
                     Ok(Some(ledger)) => ledger.active,
@@ -1548,6 +1556,19 @@ mod tests {
         };
 
         assert_eq!(pool_nomination_apy(&nominations, &HashMap::new()), None);
+    }
+
+    #[test]
+    fn test_eras_for_lookback_days_uses_era_duration() {
+        assert_eq!(eras_for_lookback_days(30, MS_PER_DAY), 30);
+        assert_eq!(eras_for_lookback_days(30, 6 * 60 * 60 * 1000), 120);
+        assert_eq!(eras_for_lookback_days(1, 7 * 60 * 60 * 1000), 4);
+    }
+
+    #[test]
+    fn test_eras_for_lookback_days_never_returns_zero() {
+        assert_eq!(eras_for_lookback_days(0, MS_PER_DAY), 1);
+        assert_eq!(eras_for_lookback_days(30, 0), 1);
     }
 
     // --- build_tx_info tests ---

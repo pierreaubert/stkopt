@@ -439,7 +439,10 @@ fn render_validators(frame: &mut Frame, app: &mut App, area: Rect) {
             let stake_str = format_balance(v.total_stake, decimals);
             let own_str = format_balance(v.own_stake, decimals);
             let points_str = v.points.to_string();
-            let apy_str = format!("{:.2}%", v.apy.unwrap_or(0.0) * 100.0);
+            let apy_str = v
+                .apy
+                .map(|apy| format!("{:.2}%", apy * 100.0))
+                .unwrap_or_else(|| "n/a".to_string());
             let blocked_str = if v.blocked { "Yes" } else { "No" };
 
             Row::new(vec![
@@ -863,12 +866,19 @@ fn render_nominate(frame: &mut Frame, app: &mut App, area: Rect) {
             ),
             Span::raw(format!("({} validators)", result.selected.len())),
         ]));
-        info_lines.push(Line::from(format!(
-            "  Est. APY: {:.2}% - {:.2}% (avg {:.2}%)",
-            result.estimated_apy_min * 100.0,
-            result.estimated_apy_max * 100.0,
-            result.estimated_apy_avg * 100.0
-        )));
+        if result.estimated_apy_min == 0.0
+            && result.estimated_apy_max == 0.0
+            && result.estimated_apy_avg == 0.0
+        {
+            info_lines.push(Line::from("  Est. APY: n/a (chain APY unavailable)"));
+        } else {
+            info_lines.push(Line::from(format!(
+                "  Est. APY: {:.2}% - {:.2}% (avg {:.2}%)",
+                result.estimated_apy_min * 100.0,
+                result.estimated_apy_max * 100.0,
+                result.estimated_apy_avg * 100.0
+            )));
+        }
     } else {
         info_lines.push(Line::from(vec![
             Span::styled(
@@ -1351,7 +1361,10 @@ fn render_account_history(frame: &mut Frame, app: &App, area: Rect) {
         title_lines.push(Line::from(vec![
             Span::raw("Press "),
             Span::styled("l", Style::default().fg(pal.success).bold()),
-            Span::raw(" to load staking history"),
+            Span::raw(format!(
+                " to load staking history for the last {} days",
+                app.history.lookback_days
+            )),
         ]));
     } else {
         // Have data, not loading
@@ -1362,7 +1375,10 @@ fn render_account_history(frame: &mut Frame, app: &App, area: Rect) {
         title_lines.push(Line::from(vec![
             Span::raw("Press "),
             Span::styled("l", Style::default().fg(pal.success).bold()),
-            Span::raw(" to reload"),
+            Span::raw(format!(
+                " to reload the last {} days",
+                app.history.lookback_days
+            )),
         ]));
     }
 

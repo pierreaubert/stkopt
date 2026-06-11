@@ -14,10 +14,12 @@ All notable changes to `stkopt-tui` are documented here.
 - Suppressed noisy light-client tracing targets in the default TUI log filter.
 - Delayed the Connected UI state until startup validator and pool data have loaded.
 - Batched nomination-pool nomination lookups when enriching pool APY.
+- Account history loading now requests the last 30 days and converts that window to the correct number of eras for each network.
 
 ### Fixed
 
 - Fixed the Nominate tab `o` shortcut appearing to do nothing when light-client data has no APY values by falling back to low-commission active validators.
+- Fixed APY-unavailable nomination optimization feedback by focusing the first selected validator and showing unavailable APY as `n/a` instead of `0.00%`.
 - Fixed the Nominate tab `g` shortcut silently doing nothing by showing actionable messages for missing accounts, missing selections, or address encoding failures.
 - Fixed nomination QR payload failures so they are shown in the UI instead of only written to logs.
 

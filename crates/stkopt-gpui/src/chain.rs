@@ -1209,6 +1209,39 @@ impl ChainWorker {
         }
     }
 
+    async fn validator_apy_map_for_pools(&self, network: Network) -> HashMap<String, f64> {
+        if let Some(ref db) = self.db {
+            match db.get_cached_validators(network).await {
+                Ok(validators) => {
+                    let cached_map = validator_apy_map(&validators);
+                    if !cached_map.is_empty() {
+                        tracing::info!(
+                            "Using {} cached validator APY entries for pool APY calculation",
+                            cached_map.len()
+                        );
+                        return cached_map;
+                    }
+                }
+                Err(e) => tracing::debug!("Failed to load cached validators for pool APY: {}", e),
+            }
+        }
+
+        match self.fetch_validators_once(network).await {
+            Ok(validators) => {
+                let map = validator_apy_map(&validators);
+                tracing::info!(
+                    "Fetched {} validator APY entries for pool APY calculation",
+                    map.len()
+                );
+                map
+            }
+            Err(e) => {
+                tracing::warn!("Failed to fetch validators for pool APY calculation: {}", e);
+                HashMap::new()
+            }
+        }
+    }
+
     async fn handle_fetch_validators(
         &mut self,
         network: Network,
@@ -1242,20 +1275,41 @@ impl ChainWorker {
                     }
                 };
 
-                // Calculate network average APY for pool estimation
-                let network_apy = self.calculate_network_apy(client).await;
-                tracing::info!("Network average APY for pools: {:?}", network_apy);
+                let validator_apy_map = self.validator_apy_map_for_pools(network).await;
+                tracing::info!(
+                    "Built validator APY map with {} entries for pool APY calculation",
+                    validator_apy_map.len()
+                );
+
+                let max_pools_to_query = 30.min(pools.len());
+                let pool_ids: Vec<u32> = pools
+                    .iter()
+                    .take(max_pools_to_query)
+                    .map(|pool| pool.id)
+                    .collect();
+                let nominations_map: HashMap<u32, PoolNominations> =
+                    match client.get_pool_nominations_batch(&pool_ids).await {
+                        Ok(nominations) => nominations
+                            .into_iter()
+                            .map(|nominations| (nominations.pool_id, nominations))
+                            .collect(),
+                        Err(e) => {
+                            tracing::warn!("Failed to get batched pool nominations: {}", e);
+                            HashMap::new()
+                        }
+                    };
 
                 let enriched: Vec<PoolInfo> = pools
                     .iter()
-                    .map(|p| {
-                        // Pool APY = network APY * (1 - pool commission)
-                        let pool_apy = network_apy.map(|apy| {
-                            let commission = p.commission.unwrap_or(0.0);
-                            let after_commission = apy * (1.0 - commission);
-                            // Cap at realistic maximum
-                            after_commission.min(MAX_REALISTIC_APY)
-                        });
+                    .enumerate()
+                    .map(|(idx, p)| {
+                        let pool_apy = if idx < max_pools_to_query {
+                            nominations_map.get(&p.id).and_then(|nominations| {
+                                pool_nomination_apy(nominations, &validator_apy_map)
+                            })
+                        } else {
+                            None
+                        };
 
                         // Use metadata name if available, otherwise default
                         let name = metadata_map
@@ -1321,64 +1375,6 @@ impl ChainWorker {
             result = self.fetch_pools_once(network).await;
         }
         let _ = reply.send(result);
-    }
-
-    // === Helper Methods ===
-
-    /// Calculate network average APY based on era rewards and total staked.
-    async fn calculate_network_apy(&self, client: &ChainClient) -> Option<f64> {
-        // Get era info for duration
-        let era = match client.get_active_era().await {
-            Ok(Some(era)) => era,
-            _ => {
-                tracing::debug!("No active era for network APY calculation");
-                return None;
-            }
-        };
-        let query_era = era.index.saturating_sub(1);
-        let era_duration_ms = era.duration_ms;
-
-        // Get era reward
-        let era_reward = match client.get_era_validator_reward(query_era).await {
-            Ok(Some(reward)) => reward,
-            _ => {
-                tracing::debug!("No era reward for network APY calculation");
-                return None;
-            }
-        };
-
-        // Get total staked (direct point query, no iteration)
-        let total_staked = match client.get_era_total_stake_direct(query_era).await {
-            Ok(staked) => staked,
-            Err(e) => {
-                tracing::debug!("Failed to get era total staked for APY: {}", e);
-                return None;
-            }
-        };
-        if total_staked == 0 {
-            tracing::debug!("Total staked is 0, cannot calculate APY");
-            return None;
-        }
-
-        let apy = get_era_apy(era_reward, total_staked, era_duration_ms);
-        tracing::debug!(
-            "Network APY: {:.2}% (reward={}, staked={}, era_duration={}ms)",
-            apy * 100.0,
-            era_reward,
-            total_staked,
-            era_duration_ms
-        );
-
-        // Sanity check
-        if apy > MAX_REALISTIC_APY {
-            tracing::warn!(
-                "Network APY {:.2}% exceeds realistic maximum, data may be incomplete",
-                apy * 100.0
-            );
-            return None;
-        }
-
-        Some(apy)
     }
 
     // === Transaction Payload Handlers ===

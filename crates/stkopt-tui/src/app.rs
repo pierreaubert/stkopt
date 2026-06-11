@@ -280,6 +280,8 @@ pub struct HistoryState {
     pub points: Vec<StakingHistoryPoint>,
     /// Whether staking history is currently loading.
     pub loading: bool,
+    /// Number of days to load when requesting recent history.
+    pub lookback_days: u32,
     /// Total eras to load for history.
     pub total_eras: u32,
     /// Account for which history was loaded (to detect account changes).
@@ -289,6 +291,7 @@ pub struct HistoryState {
 impl HistoryState {
     fn new() -> Self {
         Self {
+            lookback_days: 30,
             total_eras: 30,
             ..Default::default()
         }
@@ -1398,6 +1401,9 @@ impl App {
                         self.selected_validators.insert(idx);
                     }
                 }
+                if let Some(first_selected) = self.selected_validators.iter().min().copied() {
+                    self.nominate_table_state.select(Some(first_selected));
+                }
                 self.nomination_status = if result.selected.is_empty() {
                     Some(
                         "No eligible validators found for the current optimizer filters."
@@ -1515,6 +1521,9 @@ impl App {
                         .unwrap_or(self.history.points.len());
                     self.history.points.insert(pos, point);
                 }
+            }
+            Action::SetHistoryTotalEras(total) => {
+                self.history.total_eras = total.max(1);
             }
             Action::LoadStakingHistory => {
                 // Manual load request (clear if needed and start loading)
@@ -1787,6 +1796,9 @@ impl App {
 mod tests {
     use super::*;
     use crate::log_buffer::{LogLevel, LogLine};
+    use crossterm::event::{KeyEventKind, KeyEventState, KeyModifiers};
+    use stkopt_chain::{AccountBalance, UnsignedPayload};
+    use stkopt_core::optimizer::ValidatorCandidate;
     use stkopt_core::types::PoolState;
 
     fn create_app() -> App {
@@ -2627,5 +2639,1434 @@ mod tests {
         app.validators = vec![];
         app.select_next();
         assert_eq!(app.validators_table_state.selected(), None);
+    }
+
+    // === handle_action ===
+
+    #[test]
+    fn test_handle_action_set_display_validators() {
+        let mut app = create_app();
+        app.loading.validators = true;
+        let validators = vec![make_validator(
+            "addr1",
+            Some("Alice"),
+            0.1,
+            false,
+            Some(0.15),
+        )];
+        app.handle_action(Action::SetDisplayValidators(validators));
+        assert_eq!(app.validators.len(), 1);
+        assert!(!app.loading.validators);
+        assert_eq!(app.validators_table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn test_handle_action_set_display_validators_empty() {
+        let mut app = create_app();
+        app.validators_table_state.select(Some(0));
+        app.handle_action(Action::SetDisplayValidators(vec![]));
+        assert_eq!(app.validators_table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn test_handle_action_set_display_pools() {
+        let mut app = create_app();
+        let pools = vec![make_pool(1, "Alpha", PoolState::Open, Some(0.12))];
+        app.handle_action(Action::SetDisplayPools(pools));
+        assert_eq!(app.pools.len(), 1);
+        assert_eq!(app.pools_table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn test_handle_action_set_watched_account() {
+        let mut app = create_app();
+        app.account_panel_focus = 1;
+        let account = AccountId32::from([1u8; 32]);
+        app.handle_action(Action::SetWatchedAccount(
+            account.clone(),
+            "addr".to_string(),
+        ));
+        assert_eq!(app.watched_account, Some(account));
+        assert!(app.account_status.is_none());
+        assert_eq!(app.account_panel_focus, 0);
+    }
+
+    #[test]
+    fn test_handle_action_clear_account() {
+        let mut app = create_app();
+        app.watched_account = Some(AccountId32::from([1u8; 32]));
+        app.account_status = Some(AccountStatus {
+            address: AccountId32::from([1u8; 32]),
+            balance: AccountBalance {
+                free: 0,
+                reserved: 0,
+                frozen: 0,
+            },
+            staking_ledger: None,
+            nominations: None,
+            pool_membership: None,
+        });
+        app.handle_action(Action::ClearAccount);
+        assert!(app.watched_account.is_none());
+        assert!(app.account_status.is_none());
+        assert!(app.account_input.is_empty());
+    }
+
+    #[test]
+    fn test_handle_action_set_optimization_result() {
+        let mut app = create_app();
+        app.validators = vec![
+            make_validator("addr1", Some("Alice"), 0.1, false, Some(0.15)),
+            make_validator("addr2", Some("Bob"), 0.1, false, Some(0.20)),
+        ];
+        let result = OptimizationResult {
+            selected: vec![ValidatorCandidate {
+                address: "addr1".to_string(),
+                commission: 0.1,
+                blocked: false,
+                apy: 0.15,
+                total_stake: 1_000_000,
+                nominator_count: 10,
+            }],
+            estimated_apy_min: 0.15,
+            estimated_apy_max: 0.15,
+            estimated_apy_avg: 0.15,
+        };
+        app.handle_action(Action::SetOptimizationResult(result));
+        assert!(app.selected_validators.contains(&0));
+        assert_eq!(app.nominate_table_state.selected(), Some(0));
+        assert!(app.optimization_result.is_some());
+        assert!(
+            app.nomination_status
+                .as_ref()
+                .unwrap()
+                .contains("Selected 1 validators")
+        );
+    }
+
+    #[test]
+    fn test_handle_action_set_optimization_result_empty() {
+        let mut app = create_app();
+        let result = OptimizationResult {
+            selected: vec![],
+            estimated_apy_min: 0.0,
+            estimated_apy_max: 0.0,
+            estimated_apy_avg: 0.0,
+        };
+        app.handle_action(Action::SetOptimizationResult(result));
+        assert!(app.selected_validators.is_empty());
+        assert_eq!(
+            app.nomination_status,
+            Some("No eligible validators found for the current optimizer filters.".to_string())
+        );
+    }
+
+    #[test]
+    fn test_handle_action_toggle_validator_selection_add() {
+        let mut app = create_app();
+        app.validators = vec![make_validator("addr1", None, 0.1, false, None)];
+        app.optimization_result = Some(OptimizationResult {
+            selected: vec![],
+            estimated_apy_min: 0.0,
+            estimated_apy_max: 0.0,
+            estimated_apy_avg: 0.0,
+        });
+        app.handle_action(Action::ToggleValidatorSelection(0));
+        assert!(app.selected_validators.contains(&0));
+        assert!(app.optimization_result.is_none());
+    }
+
+    #[test]
+    fn test_handle_action_toggle_validator_selection_remove() {
+        let mut app = create_app();
+        app.selected_validators.insert(0);
+        app.handle_action(Action::ToggleValidatorSelection(0));
+        assert!(!app.selected_validators.contains(&0));
+    }
+
+    #[test]
+    fn test_handle_action_toggle_validator_selection_max() {
+        let mut app = create_app();
+        app.validators = (0..17)
+            .map(|i| make_validator(&format!("addr{}", i), None, 0.1, false, None))
+            .collect();
+        for i in 0..16 {
+            app.selected_validators.insert(i);
+        }
+        app.handle_action(Action::ToggleValidatorSelection(16));
+        assert!(!app.selected_validators.contains(&16));
+        assert_eq!(app.selected_validators.len(), 16);
+    }
+
+    #[test]
+    fn test_handle_action_clear_nominations() {
+        let mut app = create_app();
+        app.selected_validators.insert(0);
+        app.optimization_result = Some(OptimizationResult {
+            selected: vec![],
+            estimated_apy_min: 0.0,
+            estimated_apy_max: 0.0,
+            estimated_apy_avg: 0.0,
+        });
+        app.handle_action(Action::ClearNominations);
+        assert!(app.selected_validators.is_empty());
+        assert!(app.optimization_result.is_none());
+    }
+
+    #[test]
+    fn test_handle_action_set_qr_data_some() {
+        let mut app = create_app();
+        app.qr.showing = false;
+        app.qr.frame = 5;
+        app.qr.modal_tab = 2;
+        app.handle_action(Action::SetQRData(Some(vec![1, 2, 3]), None));
+        assert!(app.qr.showing);
+        assert_eq!(app.qr.frame, 0);
+        assert_eq!(app.qr.modal_tab, 0);
+        assert_eq!(app.qr.data, Some(vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn test_handle_action_set_qr_data_none() {
+        let mut app = create_app();
+        app.qr.showing = true;
+        app.handle_action(Action::SetQRData(None, None));
+        assert!(!app.qr.showing);
+    }
+
+    #[test]
+    fn test_handle_action_set_pending_unsigned_tx() {
+        let mut app = create_app();
+        let pending = PendingUnsignedTx {
+            payload: UnsignedPayload {
+                call_data: vec![],
+                description: "test".to_string(),
+                metadata_hash: [0u8; 32],
+                genesis_hash: [0u8; 32],
+                block_hash: [0u8; 32],
+                spec_version: 0,
+                tx_version: 0,
+                nonce: 0,
+                era: stkopt_chain::Era::Immortal,
+                include_metadata_hash: false,
+                use_asset_payment: false,
+                extension_ids: vec![],
+            },
+            signer: AccountId32::from([0u8; 32]),
+        };
+        app.handle_action(Action::SetPendingUnsignedTx(Some(pending)));
+        assert!(app.qr.pending_unsigned.is_some());
+    }
+
+    #[test]
+    fn test_handle_action_start_stop_signature_scan() {
+        let mut app = create_app();
+        app.handle_action(Action::StartSignatureScan);
+        assert!(app.camera.scanning);
+        app.handle_action(Action::StopSignatureScan);
+        assert!(!app.camera.scanning);
+    }
+
+    #[test]
+    fn test_handle_action_qr_scan_failed() {
+        let mut app = create_app();
+        app.camera.scanning = true;
+        app.handle_action(Action::QrScanFailed("oops".to_string()));
+        assert!(!app.camera.scanning);
+        assert_eq!(app.camera.status, Some(CameraScanStatus::Error));
+        assert_eq!(app.nomination_status, Some("oops".to_string()));
+    }
+
+    #[test]
+    fn test_handle_action_update_scan_status_scanning() {
+        let mut app = create_app();
+        app.camera.frames_captured = 0;
+        app.handle_action(Action::UpdateScanStatus(QrScanStatus::Scanning));
+        assert_eq!(app.camera.frames_captured, 1);
+        assert_eq!(app.camera.status, Some(CameraScanStatus::Scanning));
+    }
+
+    #[test]
+    fn test_handle_action_update_scan_status_success() {
+        let mut app = create_app();
+        app.camera.frames_captured = 5;
+        app.handle_action(Action::UpdateScanStatus(QrScanStatus::Success));
+        assert_eq!(app.camera.frames_captured, 5);
+        assert_eq!(app.camera.status, Some(CameraScanStatus::Success));
+    }
+
+    #[test]
+    fn test_handle_action_update_camera_preview() {
+        let mut app = create_app();
+        app.handle_action(Action::UpdateCameraPreview(vec![1, 2], 100, 200, None));
+        assert_eq!(app.camera.preview, Some(vec![1, 2]));
+        assert_eq!(app.camera.preview_size, (100, 200));
+    }
+
+    #[test]
+    fn test_handle_action_set_tx_status() {
+        let mut app = create_app();
+        app.qr.pending_signed = Some(PendingTransaction {
+            description: "test".to_string(),
+            signed_extrinsic: vec![],
+            tx_hash: [0u8; 32],
+            status: TxSubmissionStatus::ReadyToSubmit,
+        });
+        app.handle_action(Action::SetTxStatus(TxSubmissionStatus::Submitting));
+        assert!(matches!(
+            app.qr.pending_signed.as_ref().unwrap().status,
+            TxSubmissionStatus::Submitting
+        ));
+    }
+
+    #[test]
+    fn test_handle_action_clear_pending_tx() {
+        let mut app = create_app();
+        app.qr.pending_signed = Some(PendingTransaction {
+            description: "test".to_string(),
+            signed_extrinsic: vec![],
+            tx_hash: [0u8; 32],
+            status: TxSubmissionStatus::ReadyToSubmit,
+        });
+        app.qr.pending_unsigned = Some(PendingUnsignedTx {
+            payload: UnsignedPayload {
+                call_data: vec![],
+                description: "test".to_string(),
+                metadata_hash: [0u8; 32],
+                genesis_hash: [0u8; 32],
+                block_hash: [0u8; 32],
+                spec_version: 0,
+                tx_version: 0,
+                nonce: 0,
+                era: stkopt_chain::Era::Immortal,
+                include_metadata_hash: false,
+                use_asset_payment: false,
+                extension_ids: vec![],
+            },
+            signer: AccountId32::from([0u8; 32]),
+        });
+        app.camera.scanning = true;
+        app.handle_action(Action::ClearPendingTx);
+        assert!(app.qr.pending_signed.is_none());
+        assert!(app.qr.pending_unsigned.is_none());
+        assert!(!app.camera.scanning);
+    }
+
+    #[test]
+    fn test_handle_action_set_staking_history() {
+        let mut app = create_app();
+        app.history.loading = true;
+        let points = vec![StakingHistoryPoint::new_without_date(1, 100, 1000, 0.15)];
+        app.handle_action(Action::SetStakingHistory(points));
+        assert_eq!(app.history.points.len(), 1);
+        assert!(!app.history.loading);
+    }
+
+    #[test]
+    fn test_handle_action_add_staking_history_point_new() {
+        let mut app = create_app();
+        let p1 = StakingHistoryPoint::new_without_date(5, 100, 1000, 0.15);
+        app.handle_action(Action::AddStakingHistoryPoint(p1));
+        assert_eq!(app.history.points.len(), 1);
+        assert_eq!(app.history.points[0].era, 5);
+    }
+
+    #[test]
+    fn test_handle_action_add_staking_history_point_duplicate() {
+        let mut app = create_app();
+        let p1 = StakingHistoryPoint::new_without_date(5, 100, 1000, 0.15);
+        let p2 = StakingHistoryPoint::new_without_date(5, 200, 2000, 0.20);
+        app.handle_action(Action::AddStakingHistoryPoint(p1));
+        app.handle_action(Action::AddStakingHistoryPoint(p2));
+        assert_eq!(app.history.points.len(), 1);
+        assert_eq!(app.history.points[0].reward, 200);
+    }
+
+    #[test]
+    fn test_handle_action_add_staking_history_point_sorted() {
+        let mut app = create_app();
+        let p1 = StakingHistoryPoint::new_without_date(10, 100, 1000, 0.15);
+        let p2 = StakingHistoryPoint::new_without_date(5, 200, 2000, 0.20);
+        app.handle_action(Action::AddStakingHistoryPoint(p1));
+        app.handle_action(Action::AddStakingHistoryPoint(p2));
+        assert_eq!(app.history.points.len(), 2);
+        assert_eq!(app.history.points[0].era, 5);
+        assert_eq!(app.history.points[1].era, 10);
+    }
+
+    #[test]
+    fn test_handle_action_load_staking_history() {
+        let mut app = create_app();
+        app.watched_account = Some(AccountId32::from([1u8; 32]));
+        app.history.points = vec![StakingHistoryPoint::new_without_date(1, 100, 1000, 0.15)];
+        app.history.loading = false;
+        app.handle_action(Action::LoadStakingHistory);
+        assert!(app.history.loading);
+        assert!(app.history.points.is_empty());
+        assert_eq!(
+            app.history.loaded_for,
+            Some(AccountId32::from([1u8; 32]).to_string())
+        );
+    }
+
+    #[test]
+    fn test_handle_action_cancel_loading_history() {
+        let mut app = create_app();
+        app.history.loading = true;
+        app.handle_action(Action::CancelLoadingHistory);
+        assert!(!app.history.loading);
+    }
+
+    #[test]
+    fn test_handle_action_history_loading_complete() {
+        let mut app = create_app();
+        app.history.loading = true;
+        app.handle_action(Action::HistoryLoadingComplete);
+        assert!(!app.history.loading);
+    }
+
+    #[test]
+    fn test_handle_action_switch_network() {
+        let mut app = create_app();
+        app.validators = vec![make_validator("addr1", None, 0.1, false, None)];
+        app.connection_status = ConnectionStatus::Connected;
+        app.current_era = Some(100);
+        app.handle_action(Action::SwitchNetwork(Network::Kusama));
+        assert_eq!(app.network, Network::Kusama);
+        assert_eq!(app.connection_status, ConnectionStatus::Disconnected);
+        assert!(app.current_era.is_none());
+        assert!(app.validators.is_empty());
+    }
+
+    #[test]
+    fn test_handle_action_set_rewards_destination() {
+        let mut app = create_app();
+        app.handle_action(Action::SetRewardsDestination(RewardDestination::Stash));
+        assert!(matches!(app.rewards_destination, RewardDestination::Stash));
+    }
+
+    #[test]
+    fn test_handle_action_select_pool_for_join() {
+        let mut app = create_app();
+        app.handle_action(Action::SelectPoolForJoin(3));
+        assert_eq!(app.selected_pool_for_join, Some(3));
+    }
+
+    #[test]
+    fn test_handle_action_update_connection_status() {
+        let mut app = create_app();
+        app.handle_action(Action::UpdateConnectionStatus(ConnectionStatus::Connected));
+        assert_eq!(app.connection_status, ConnectionStatus::Connected);
+    }
+
+    #[test]
+    fn test_handle_action_set_chain_info() {
+        let mut app = create_app();
+        app.loading.chain = true;
+        let info = ChainInfo {
+            chain_name: "Polkadot".to_string(),
+            spec_name: "polkadot".to_string(),
+            spec_version: 1000,
+            tx_version: 20,
+        };
+        app.handle_action(Action::SetChainInfo(info));
+        assert!(app.chain_info.is_some());
+        assert!(!app.loading.chain);
+    }
+
+    #[test]
+    fn test_handle_action_set_loading_progress_with_bytes() {
+        let mut app = create_app();
+        app.loading.start_time =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        app.handle_action(Action::SetLoadingProgress(
+            0.5,
+            Some(1_000_000),
+            Some(2_000_000),
+        ));
+        assert_eq!(app.loading.progress, 0.5);
+        assert_eq!(app.loading.bytes_loaded, 1_000_000);
+        assert!(app.loading.bandwidth.is_some());
+    }
+
+    #[test]
+    fn test_handle_action_set_loading_progress_no_bytes() {
+        let mut app = create_app();
+        app.handle_action(Action::SetLoadingProgress(0.5, None, None));
+        assert_eq!(app.loading.progress, 0.5);
+        assert_eq!(app.loading.bytes_loaded, 0);
+        assert!(app.loading.bandwidth.is_none());
+    }
+
+    // === handle_staking_key ===
+
+    #[test]
+    fn test_handle_staking_key_none_mode() {
+        let mut app = create_app();
+        app.input_mode = InputMode::Staking;
+        app.staking_input_mode = StakingInputMode::None;
+        let action = app.handle_staking_key(KeyEvent::from(KeyCode::Char('x')));
+        assert!(action.is_none());
+        assert_eq!(app.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn test_handle_staking_key_bond_digit_input() {
+        let mut app = create_app();
+        app.input_mode = InputMode::Staking;
+        app.staking_input_mode = StakingInputMode::Bond;
+        let action = app.handle_staking_key(KeyEvent::from(KeyCode::Char('1')));
+        assert!(action.is_none());
+        assert_eq!(app.staking_input_amount, "1");
+    }
+
+    #[test]
+    fn test_handle_staking_key_bond_decimal_input() {
+        let mut app = create_app();
+        app.input_mode = InputMode::Staking;
+        app.staking_input_mode = StakingInputMode::Bond;
+        let action = app.handle_staking_key(KeyEvent::from(KeyCode::Char('.')));
+        assert!(action.is_none());
+        assert_eq!(app.staking_input_amount, ".");
+    }
+
+    #[test]
+    fn test_handle_staking_key_bond_backspace() {
+        let mut app = create_app();
+        app.input_mode = InputMode::Staking;
+        app.staking_input_mode = StakingInputMode::Bond;
+        app.staking_input_amount = "12".to_string();
+        let action = app.handle_staking_key(KeyEvent::from(KeyCode::Backspace));
+        assert!(action.is_none());
+        assert_eq!(app.staking_input_amount, "1");
+    }
+
+    #[test]
+    fn test_handle_staking_key_bond_escape() {
+        let mut app = create_app();
+        app.input_mode = InputMode::Staking;
+        app.staking_input_mode = StakingInputMode::Bond;
+        app.staking_input_amount = "10".to_string();
+        let action = app.handle_staking_key(KeyEvent::from(KeyCode::Esc));
+        assert!(action.is_none());
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.staking_input_mode, StakingInputMode::None);
+        assert!(app.staking_input_amount.is_empty());
+    }
+
+    #[test]
+    fn test_handle_staking_key_bond_enter_valid() {
+        let mut app = create_app();
+        app.input_mode = InputMode::Staking;
+        app.staking_input_mode = StakingInputMode::Bond;
+        app.staking_input_amount = "1".to_string();
+        let action = app.handle_staking_key(KeyEvent::from(KeyCode::Enter));
+        assert!(matches!(
+            action,
+            Some(Action::GenerateBondQR {
+                value: 10_000_000_000
+            })
+        ));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.staking_input_mode, StakingInputMode::None);
+    }
+
+    #[test]
+    fn test_handle_staking_key_bond_enter_invalid() {
+        let mut app = create_app();
+        app.input_mode = InputMode::Staking;
+        app.staking_input_mode = StakingInputMode::Bond;
+        app.staking_input_amount = "abc".to_string();
+        let action = app.handle_staking_key(KeyEvent::from(KeyCode::Enter));
+        assert!(action.is_none());
+        // Input mode stays Staking so user can correct the amount
+        assert_eq!(app.input_mode, InputMode::Staking);
+    }
+
+    #[test]
+    fn test_handle_staking_key_pool_join_digit_input() {
+        let mut app = create_app();
+        app.input_mode = InputMode::Staking;
+        app.staking_input_mode = StakingInputMode::PoolJoin;
+        let action = app.handle_staking_key(KeyEvent::from(KeyCode::Char('5')));
+        assert!(action.is_none());
+        assert_eq!(app.pool_input_amount, "5");
+    }
+
+    #[test]
+    fn test_handle_staking_key_pool_join_backspace() {
+        let mut app = create_app();
+        app.input_mode = InputMode::Staking;
+        app.staking_input_mode = StakingInputMode::PoolJoin;
+        app.pool_input_amount = "50".to_string();
+        let action = app.handle_staking_key(KeyEvent::from(KeyCode::Backspace));
+        assert!(action.is_none());
+        assert_eq!(app.pool_input_amount, "5");
+    }
+
+    #[test]
+    fn test_handle_staking_key_pool_join_enter_with_pool() {
+        let mut app = create_app();
+        app.input_mode = InputMode::Staking;
+        app.staking_input_mode = StakingInputMode::PoolJoin;
+        app.pool_input_amount = "1".to_string();
+        app.selected_pool_for_join = Some(0);
+        app.pools = vec![make_pool(42, "Alpha", PoolState::Open, None)];
+        let action = app.handle_staking_key(KeyEvent::from(KeyCode::Enter));
+        assert!(matches!(
+            action,
+            Some(Action::GeneratePoolJoinQR {
+                pool_id: 42,
+                amount: 10_000_000_000
+            })
+        ));
+    }
+
+    #[test]
+    fn test_handle_staking_key_pool_join_enter_no_pool() {
+        let mut app = create_app();
+        app.input_mode = InputMode::Staking;
+        app.staking_input_mode = StakingInputMode::PoolJoin;
+        app.pool_input_amount = "1".to_string();
+        app.selected_pool_for_join = None;
+        let action = app.handle_staking_key(KeyEvent::from(KeyCode::Enter));
+        assert!(action.is_none());
+    }
+
+    #[test]
+    fn test_handle_staking_key_set_payee_escape() {
+        let mut app = create_app();
+        app.input_mode = InputMode::Staking;
+        app.staking_input_mode = StakingInputMode::SetPayee;
+        let action = app.handle_staking_key(KeyEvent::from(KeyCode::Esc));
+        assert!(action.is_none());
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.staking_input_mode, StakingInputMode::None);
+    }
+
+    #[test]
+    fn test_handle_staking_key_set_payee_cycle() {
+        let mut app = create_app();
+        app.input_mode = InputMode::Staking;
+        app.staking_input_mode = StakingInputMode::SetPayee;
+        app.rewards_destination = RewardDestination::Staked;
+        let action = app.handle_staking_key(KeyEvent::from(KeyCode::Char('r')));
+        assert!(matches!(
+            action,
+            Some(Action::SetRewardsDestination(RewardDestination::Stash))
+        ));
+    }
+
+    #[test]
+    fn test_handle_staking_key_set_payee_enter() {
+        let mut app = create_app();
+        app.input_mode = InputMode::Staking;
+        app.staking_input_mode = StakingInputMode::SetPayee;
+        app.rewards_destination = RewardDestination::Staked;
+        let action = app.handle_staking_key(KeyEvent::from(KeyCode::Enter));
+        assert!(matches!(
+            action,
+            Some(Action::GenerateSetPayeeQR {
+                destination: RewardDestination::Staked
+            })
+        ));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.staking_input_mode, StakingInputMode::None);
+    }
+
+    // === confirm_staking_operation ===
+
+    #[test]
+    fn test_confirm_staking_operation_bond() {
+        let mut app = create_app();
+        app.staking_input_mode = StakingInputMode::Bond;
+        app.staking_input_amount = "1".to_string();
+        let action = app.confirm_staking_operation();
+        assert!(matches!(
+            action,
+            Some(Action::GenerateBondQR {
+                value: 10_000_000_000
+            })
+        ));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.staking_input_amount.is_empty());
+    }
+
+    #[test]
+    fn test_confirm_staking_operation_unbond() {
+        let mut app = create_app();
+        app.staking_input_mode = StakingInputMode::Unbond;
+        app.staking_input_amount = "2".to_string();
+        let action = app.confirm_staking_operation();
+        assert!(matches!(
+            action,
+            Some(Action::GenerateUnbondQR {
+                value: 20_000_000_000
+            })
+        ));
+    }
+
+    #[test]
+    fn test_confirm_staking_operation_bond_extra() {
+        let mut app = create_app();
+        app.staking_input_mode = StakingInputMode::BondExtra;
+        app.staking_input_amount = "0.5".to_string();
+        let action = app.confirm_staking_operation();
+        assert!(matches!(
+            action,
+            Some(Action::GenerateBondExtraQR {
+                value: 5_000_000_000
+            })
+        ));
+    }
+
+    #[test]
+    fn test_confirm_staking_operation_pool_join() {
+        let mut app = create_app();
+        app.staking_input_mode = StakingInputMode::PoolJoin;
+        app.pool_input_amount = "1".to_string();
+        app.selected_pool_for_join = Some(0);
+        app.pools = vec![make_pool(7, "Alpha", PoolState::Open, None)];
+        let action = app.confirm_staking_operation();
+        assert!(matches!(
+            action,
+            Some(Action::GeneratePoolJoinQR {
+                pool_id: 7,
+                amount: 10_000_000_000
+            })
+        ));
+    }
+
+    #[test]
+    fn test_confirm_staking_operation_pool_join_no_pool() {
+        let mut app = create_app();
+        app.staking_input_mode = StakingInputMode::PoolJoin;
+        app.pool_input_amount = "1".to_string();
+        app.selected_pool_for_join = None;
+        let action = app.confirm_staking_operation();
+        assert!(action.is_none());
+    }
+
+    #[test]
+    fn test_confirm_staking_operation_pool_bond_extra() {
+        let mut app = create_app();
+        app.staking_input_mode = StakingInputMode::PoolBondExtra;
+        app.pool_input_amount = "1".to_string();
+        let action = app.confirm_staking_operation();
+        assert!(matches!(
+            action,
+            Some(Action::GeneratePoolBondExtraQR {
+                amount: 10_000_000_000
+            })
+        ));
+    }
+
+    #[test]
+    fn test_confirm_staking_operation_pool_unbond() {
+        let mut app = create_app();
+        app.staking_input_mode = StakingInputMode::PoolUnbond;
+        app.pool_input_amount = "1".to_string();
+        let action = app.confirm_staking_operation();
+        assert!(matches!(
+            action,
+            Some(Action::GeneratePoolUnbondQR {
+                amount: 10_000_000_000
+            })
+        ));
+    }
+
+    #[test]
+    fn test_confirm_staking_operation_invalid_amount() {
+        let mut app = create_app();
+        app.staking_input_mode = StakingInputMode::Bond;
+        app.staking_input_amount = "invalid".to_string();
+        let action = app.confirm_staking_operation();
+        assert!(action.is_none());
+    }
+
+    // === maybe_auto_load_history ===
+
+    #[test]
+    fn test_maybe_auto_load_history_should_load() {
+        let mut app = create_app();
+        app.watched_account = Some(AccountId32::from([1u8; 32]));
+        app.history.loading = false;
+        app.history.points.clear();
+        let action = app.maybe_auto_load_history();
+        assert!(matches!(action, Some(Action::LoadStakingHistory)));
+        assert!(app.history.loading);
+        assert_eq!(
+            app.history.loaded_for,
+            Some(AccountId32::from([1u8; 32]).to_string())
+        );
+    }
+
+    #[test]
+    fn test_maybe_auto_load_history_already_loaded_same_account() {
+        let mut app = create_app();
+        let account = AccountId32::from([1u8; 32]);
+        app.watched_account = Some(account.clone());
+        app.history.loading = false;
+        app.history.loaded_for = Some(account.to_string());
+        app.history.points = vec![StakingHistoryPoint::new_without_date(1, 100, 1000, 0.15)];
+        let action = app.maybe_auto_load_history();
+        assert!(action.is_none());
+    }
+
+    #[test]
+    fn test_maybe_auto_load_history_different_account() {
+        let mut app = create_app();
+        app.watched_account = Some(AccountId32::from([2u8; 32]));
+        app.history.loading = false;
+        app.history.loaded_for = Some(AccountId32::from([1u8; 32]).to_string());
+        app.history.points = vec![StakingHistoryPoint::new_without_date(1, 100, 1000, 0.15)];
+        let action = app.maybe_auto_load_history();
+        assert!(matches!(action, Some(Action::LoadStakingHistory)));
+    }
+
+    #[test]
+    fn test_maybe_auto_load_history_already_loading() {
+        let mut app = create_app();
+        app.watched_account = Some(AccountId32::from([1u8; 32]));
+        app.history.loading = true;
+        let action = app.maybe_auto_load_history();
+        assert!(action.is_none());
+    }
+
+    #[test]
+    fn test_maybe_auto_load_history_no_account() {
+        let mut app = create_app();
+        app.watched_account = None;
+        let action = app.maybe_auto_load_history();
+        assert!(action.is_none());
+    }
+
+    #[test]
+    fn test_maybe_auto_load_history_empty_points() {
+        let mut app = create_app();
+        app.watched_account = Some(AccountId32::from([1u8; 32]));
+        app.history.loading = false;
+        app.history.points.clear();
+        app.history.loaded_for = Some("other".to_string());
+        let action = app.maybe_auto_load_history();
+        assert!(matches!(action, Some(Action::LoadStakingHistory)));
+    }
+
+    // === KeyEvent helpers ===
+
+    fn key_char(c: char) -> KeyEvent {
+        KeyEvent {
+            code: KeyCode::Char(c),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    fn key_code(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    // === handle_normal_key ===
+
+    #[test]
+    fn test_handle_normal_key_quit() {
+        let mut app = create_app();
+        app.handle_normal_key(key_char('q'));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn test_handle_normal_key_next_view() {
+        let mut app = create_app();
+        let action = app.handle_normal_key(key_code(KeyCode::Tab));
+        assert!(action.is_none());
+        assert_eq!(app.current_view, View::AccountChanges);
+    }
+
+    #[test]
+    fn test_handle_normal_key_prev_view() {
+        let mut app = create_app();
+        let action = app.handle_normal_key(key_code(KeyCode::BackTab));
+        assert!(action.is_none());
+        assert_eq!(app.current_view, View::Pools);
+    }
+
+    #[test]
+    fn test_handle_normal_key_view_numbers() {
+        let mut app = create_app();
+        app.handle_normal_key(key_char('5'));
+        assert_eq!(app.current_view, View::Validators);
+        app.handle_normal_key(key_char('2'));
+        assert_eq!(app.current_view, View::AccountChanges);
+    }
+
+    #[test]
+    fn test_handle_normal_key_account_history_auto_load() {
+        let mut app = create_app();
+        app.watched_account = Some(AccountId32::from([0u8; 32]));
+        let action = app.handle_normal_key(key_char('3'));
+        assert_eq!(app.current_view, View::AccountHistory);
+        assert!(matches!(action, Some(Action::LoadStakingHistory)));
+        assert!(app.history.loading);
+    }
+
+    #[test]
+    fn test_handle_normal_key_search_toggle() {
+        let mut app = create_app();
+        app.current_view = View::Validators;
+        app.handle_normal_key(key_char('/'));
+        assert_eq!(app.input_mode, InputMode::Searching);
+        assert!(app.search_query.is_empty());
+    }
+
+    #[test]
+    fn test_handle_normal_key_sort_menu() {
+        let mut app = create_app();
+        app.current_view = View::Validators;
+        app.handle_normal_key(key_char('s'));
+        assert_eq!(app.input_mode, InputMode::SortMenu);
+    }
+
+    #[test]
+    fn test_handle_normal_key_strategy_menu() {
+        let mut app = create_app();
+        app.current_view = View::Nominate;
+        app.handle_normal_key(key_char('t'));
+        assert_eq!(app.input_mode, InputMode::StrategyMenu);
+    }
+
+    #[test]
+    fn test_handle_normal_key_toggle_blocked() {
+        let mut app = create_app();
+        app.current_view = View::Validators;
+        app.show_blocked = true;
+        app.handle_normal_key(key_char('b'));
+        assert!(!app.show_blocked);
+    }
+
+    #[test]
+    fn test_handle_normal_key_reverse_sort_validators() {
+        let mut app = create_app();
+        app.current_view = View::Validators;
+        app.validator_sort_asc = false;
+        app.handle_normal_key(key_char('S'));
+        assert!(app.validator_sort_asc);
+    }
+
+    #[test]
+    fn test_handle_normal_key_enter_account() {
+        let mut app = create_app();
+        app.current_view = View::AccountStatus;
+        app.handle_normal_key(key_char('a'));
+        assert_eq!(app.input_mode, InputMode::EnteringAccount);
+        assert!(app.account_input.is_empty());
+    }
+
+    #[test]
+    fn test_handle_normal_key_staking_bond() {
+        let mut app = create_app();
+        app.current_view = View::AccountChanges;
+        app.watched_account = Some(AccountId32::from([0u8; 32]));
+        app.handle_normal_key(key_char('b'));
+        assert_eq!(app.input_mode, InputMode::Staking);
+        assert_eq!(app.staking_input_mode, StakingInputMode::Bond);
+    }
+
+    #[test]
+    fn test_handle_normal_key_pool_join() {
+        let mut app = create_app();
+        app.current_view = View::Pools;
+        app.watched_account = Some(AccountId32::from([0u8; 32]));
+        app.pools = vec![make_pool(1, "Alpha", PoolState::Open, None)];
+        app.pools_table_state.select(Some(0));
+        let action = app.handle_normal_key(key_char('j'));
+        assert_eq!(app.input_mode, InputMode::Staking);
+        assert_eq!(app.staking_input_mode, StakingInputMode::PoolJoin);
+        assert_eq!(app.selected_pool_for_join, Some(0));
+        assert!(matches!(action, Some(Action::SelectPoolForJoin(0))));
+    }
+
+    #[test]
+    fn test_handle_normal_key_pool_join_no_selection() {
+        let mut app = create_app();
+        app.current_view = View::Pools;
+        app.watched_account = Some(AccountId32::from([0u8; 32]));
+        app.pools = vec![make_pool(1, "Alpha", PoolState::Open, None)];
+        let action = app.handle_normal_key(key_char('j'));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(action.is_none());
+    }
+
+    #[test]
+    fn test_handle_normal_key_generate_nomination_qr() {
+        let mut app = create_app();
+        app.current_view = View::Nominate;
+        let action = app.handle_normal_key(key_char('g'));
+        assert!(matches!(action, Some(Action::GenerateNominationQR)));
+    }
+
+    #[test]
+    fn test_handle_normal_key_help() {
+        let mut app = create_app();
+        app.handle_normal_key(key_char('?'));
+        assert!(app.showing_help);
+    }
+
+    #[test]
+    fn test_handle_normal_key_help_esc() {
+        let mut app = create_app();
+        app.showing_help = true;
+        app.handle_normal_key(key_code(KeyCode::Esc));
+        assert!(!app.showing_help);
+    }
+
+    #[test]
+    fn test_handle_normal_key_qr_modal_esc() {
+        let mut app = create_app();
+        app.qr.showing = true;
+        app.qr.data = Some(vec![1, 2, 3]);
+        let action = app.handle_normal_key(key_code(KeyCode::Esc));
+        assert!(!app.qr.showing);
+        assert!(app.qr.data.is_none());
+        assert!(action.is_none());
+    }
+
+    #[test]
+    fn test_handle_normal_key_qr_modal_esc_while_scanning() {
+        let mut app = create_app();
+        app.qr.showing = true;
+        app.camera.scanning = true;
+        let action = app.handle_normal_key(key_code(KeyCode::Esc));
+        assert!(!app.qr.showing);
+        assert!(matches!(action, Some(Action::StopSignatureScan)));
+    }
+
+    #[test]
+    fn test_handle_normal_key_network_switch() {
+        let mut app = create_app();
+        let action = app.handle_normal_key(key_char('n'));
+        assert!(matches!(
+            action,
+            Some(Action::SwitchNetwork(Network::Kusama))
+        ));
+    }
+
+    #[test]
+    fn test_handle_normal_key_clear_account() {
+        let mut app = create_app();
+        app.current_view = View::AccountStatus;
+        let action = app.handle_normal_key(key_char('c'));
+        assert!(matches!(action, Some(Action::ClearAccount)));
+    }
+
+    #[test]
+    fn test_handle_normal_key_run_optimization() {
+        let mut app = create_app();
+        app.current_view = View::Nominate;
+        let action = app.handle_normal_key(key_char('o'));
+        assert!(matches!(action, Some(Action::RunOptimization)));
+    }
+
+    #[test]
+    fn test_handle_normal_key_load_history() {
+        let mut app = create_app();
+        app.current_view = View::AccountHistory;
+        app.watched_account = Some(AccountId32::from([0u8; 32]));
+        let action = app.handle_normal_key(key_char('l'));
+        assert!(matches!(action, Some(Action::LoadStakingHistory)));
+    }
+
+    #[test]
+    fn test_handle_normal_key_cancel_history() {
+        let mut app = create_app();
+        app.current_view = View::AccountHistory;
+        app.history.loading = true;
+        let action = app.handle_normal_key(key_char('c'));
+        assert!(matches!(action, Some(Action::CancelLoadingHistory)));
+    }
+
+    #[test]
+    fn test_handle_normal_key_unknown() {
+        let mut app = create_app();
+        let action = app.handle_normal_key(key_char('z'));
+        assert!(action.is_none());
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn test_handle_normal_key_address_book_enter_no_selection() {
+        let mut app = create_app();
+        app.current_view = View::AccountStatus;
+        app.account_panel_focus = 1;
+        let action = app.handle_normal_key(key_code(KeyCode::Enter));
+        assert!(action.is_none());
+    }
+
+    // === handle_search_key ===
+
+    #[test]
+    fn test_handle_search_key_char_input() {
+        let mut app = create_app();
+        app.input_mode = InputMode::Searching;
+        app.handle_search_key(key_char('a'));
+        app.handle_search_key(key_char('b'));
+        assert_eq!(app.search_query, "ab");
+    }
+
+    #[test]
+    fn test_handle_search_key_backspace() {
+        let mut app = create_app();
+        app.input_mode = InputMode::Searching;
+        app.search_query = "ab".to_string();
+        app.handle_search_key(key_code(KeyCode::Backspace));
+        assert_eq!(app.search_query, "a");
+    }
+
+    #[test]
+    fn test_handle_search_key_enter() {
+        let mut app = create_app();
+        app.input_mode = InputMode::Searching;
+        app.handle_search_key(key_code(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn test_handle_search_key_esc() {
+        let mut app = create_app();
+        app.input_mode = InputMode::Searching;
+        app.search_query = "test".to_string();
+        app.handle_search_key(key_code(KeyCode::Esc));
+        assert_eq!(app.input_mode, InputMode::Normal);
+    }
+
+    // === handle_sort_menu_key ===
+
+    #[test]
+    fn test_handle_sort_menu_key_valid_validator() {
+        let mut app = create_app();
+        app.input_mode = InputMode::SortMenu;
+        app.current_view = View::Validators;
+        app.handle_sort_menu_key(key_char('n'));
+        assert_eq!(app.validator_sort, ValidatorSortField::Name);
+        assert_eq!(app.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn test_handle_sort_menu_key_valid_pool() {
+        let mut app = create_app();
+        app.input_mode = InputMode::SortMenu;
+        app.current_view = View::Pools;
+        app.handle_sort_menu_key(key_char('i'));
+        assert_eq!(app.pool_sort, PoolSortField::Id);
+        assert_eq!(app.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn test_handle_sort_menu_key_invalid() {
+        let mut app = create_app();
+        app.input_mode = InputMode::SortMenu;
+        app.current_view = View::Validators;
+        app.handle_sort_menu_key(key_char('z'));
+        assert_eq!(app.input_mode, InputMode::SortMenu);
+    }
+
+    #[test]
+    fn test_handle_sort_menu_key_esc() {
+        let mut app = create_app();
+        app.input_mode = InputMode::SortMenu;
+        app.handle_sort_menu_key(key_code(KeyCode::Esc));
+        assert_eq!(app.input_mode, InputMode::Normal);
+    }
+
+    // === handle_strategy_menu_key ===
+
+    #[test]
+    fn test_handle_strategy_menu_key_up_down() {
+        let mut app = create_app();
+        app.input_mode = InputMode::StrategyMenu;
+        app.strategy_index = 1;
+        app.handle_strategy_menu_key(key_code(KeyCode::Up));
+        assert_eq!(app.strategy_index, 0);
+        app.handle_strategy_menu_key(key_code(KeyCode::Up));
+        assert_eq!(app.strategy_index, 0); // clamped at 0
+        app.handle_strategy_menu_key(key_code(KeyCode::Down));
+        assert_eq!(app.strategy_index, 1);
+        app.handle_strategy_menu_key(key_code(KeyCode::Down));
+        assert_eq!(app.strategy_index, 2);
+        app.handle_strategy_menu_key(key_code(KeyCode::Down));
+        assert_eq!(app.strategy_index, 2); // clamped at 2
+    }
+
+    #[test]
+    fn test_handle_strategy_menu_key_enter() {
+        let mut app = create_app();
+        app.input_mode = InputMode::StrategyMenu;
+        app.strategy_index = 1;
+        let action = app.handle_strategy_menu_key(key_code(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(matches!(
+            action,
+            Some(Action::RunOptimizationWithStrategy(1))
+        ));
+    }
+
+    #[test]
+    fn test_handle_strategy_menu_key_number() {
+        let mut app = create_app();
+        app.input_mode = InputMode::StrategyMenu;
+        let action = app.handle_strategy_menu_key(key_char('2'));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.strategy_index, 1);
+        assert!(matches!(
+            action,
+            Some(Action::RunOptimizationWithStrategy(1))
+        ));
+    }
+
+    #[test]
+    fn test_handle_strategy_menu_key_esc() {
+        let mut app = create_app();
+        app.input_mode = InputMode::StrategyMenu;
+        app.handle_strategy_menu_key(key_code(KeyCode::Esc));
+        assert_eq!(app.input_mode, InputMode::Normal);
+    }
+
+    // === handle_input_key ===
+
+    #[test]
+    fn test_handle_input_key_char() {
+        let mut app = create_app();
+        app.input_mode = InputMode::EnteringAccount;
+        app.handle_input_key(key_char('1'));
+        assert_eq!(app.account_input, "1");
+    }
+
+    #[test]
+    fn test_handle_input_key_backspace() {
+        let mut app = create_app();
+        app.input_mode = InputMode::EnteringAccount;
+        app.account_input = "12".to_string();
+        app.handle_input_key(key_code(KeyCode::Backspace));
+        assert_eq!(app.account_input, "1");
+    }
+
+    #[test]
+    fn test_handle_input_key_enter_valid() {
+        let mut app = create_app();
+        app.input_mode = InputMode::EnteringAccount;
+        app.account_input = "5C4hrfjw9DjXZTzV3MwzrrAr9P1MJhSrvWGWqi1eSuyUpnhM".to_string();
+        let action = app.handle_input_key(key_code(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(matches!(action, Some(Action::SetWatchedAccount(_, _))));
+        assert!(app.validation_error.is_none());
+    }
+
+    #[test]
+    fn test_handle_input_key_enter_invalid() {
+        let mut app = create_app();
+        app.input_mode = InputMode::EnteringAccount;
+        app.account_input = "bad".to_string();
+        let action = app.handle_input_key(key_code(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::EnteringAccount);
+        assert!(action.is_none());
+        assert!(app.validation_error.is_some());
+    }
+
+    #[test]
+    fn test_handle_input_key_esc() {
+        let mut app = create_app();
+        app.input_mode = InputMode::EnteringAccount;
+        app.account_input = "test".to_string();
+        app.validation_error = Some("err".to_string());
+        app.handle_input_key(key_code(KeyCode::Esc));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.account_input.is_empty());
+        assert!(app.validation_error.is_none());
+    }
+
+    // === validate_account_input ===
+
+    #[test]
+    fn test_validate_account_input_empty() {
+        let app = create_app();
+        assert_eq!(
+            app.validate_account_input(),
+            Err("Please enter an address".to_string())
+        );
+    }
+
+    #[test]
+    fn test_validate_account_input_too_short() {
+        let mut app = create_app();
+        app.account_input = "12".to_string();
+        assert_eq!(
+            app.validate_account_input(),
+            Err("Address is too short (minimum 3 characters)".to_string())
+        );
+    }
+
+    #[test]
+    fn test_validate_account_input_no_digit_prefix() {
+        let mut app = create_app();
+        app.account_input = "abc".to_string();
+        assert_eq!(
+            app.validate_account_input(),
+            Err("Address should start with a network prefix (0-9)".to_string())
+        );
+    }
+
+    #[test]
+    fn test_validate_account_input_invalid_ss58() {
+        let mut app = create_app();
+        app.account_input =
+            "123456789012345678901234567890123456789012345678901234567890".to_string();
+        let result = app.validate_account_input();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("Invalid address"));
+    }
+
+    #[test]
+    fn test_validate_account_input_valid() {
+        let mut app = create_app();
+        app.account_input = "5C4hrfjw9DjXZTzV3MwzrrAr9P1MJhSrvWGWqi1eSuyUpnhM".to_string();
+        let result = app.validate_account_input();
+        assert!(result.is_ok());
+    }
+
+    // === handle_qr_modal_key ===
+
+    #[test]
+    fn test_handle_qr_modal_key_esc() {
+        let mut app = create_app();
+        app.qr.showing = true;
+        app.qr.data = Some(vec![1]);
+        app.qr.modal_tab = 1;
+        app.handle_qr_modal_key(key_code(KeyCode::Esc));
+        assert!(!app.qr.showing);
+        assert_eq!(app.qr.modal_tab, 0);
+    }
+
+    #[test]
+    fn test_handle_qr_modal_key_tab_forward() {
+        let mut app = create_app();
+        app.qr.showing = true;
+        app.qr.pending_signed = None;
+        app.qr.modal_tab = 0;
+        app.handle_qr_modal_key(key_code(KeyCode::Tab));
+        assert_eq!(app.qr.modal_tab, 1);
+    }
+
+    #[test]
+    fn test_handle_qr_modal_key_backtab_backward() {
+        let mut app = create_app();
+        app.qr.showing = true;
+        app.qr.pending_signed = None;
+        app.qr.modal_tab = 0;
+        app.handle_qr_modal_key(key_code(KeyCode::BackTab));
+        assert_eq!(app.qr.modal_tab, 2);
+    }
+
+    #[test]
+    fn test_handle_qr_modal_key_s_start_scan() {
+        let mut app = create_app();
+        app.qr.showing = true;
+        app.qr.pending_unsigned = Some(PendingUnsignedTx {
+            payload: UnsignedPayload {
+                call_data: vec![],
+                description: "test".to_string(),
+                metadata_hash: [0u8; 32],
+                genesis_hash: [0u8; 32],
+                block_hash: [0u8; 32],
+                nonce: 0,
+                spec_version: 0,
+                tx_version: 0,
+                era: stkopt_chain::Era::Immortal,
+                include_metadata_hash: false,
+                use_asset_payment: false,
+                extension_ids: vec![],
+            },
+            signer: AccountId32::from([0u8; 32]),
+        });
+        app.qr.pending_signed = None;
+        let action = app.handle_qr_modal_key(key_char('s'));
+        assert_eq!(app.qr.modal_tab, 2);
+        assert!(matches!(
+            app.camera.status,
+            Some(CameraScanStatus::Initializing)
+        ));
+        assert!(matches!(action, Some(Action::StartSignatureScan)));
+    }
+
+    #[test]
+    fn test_handle_qr_modal_key_enter_submit() {
+        let mut app = create_app();
+        app.qr.showing = true;
+        app.qr.pending_signed = Some(PendingTransaction {
+            description: "test".to_string(),
+            signed_extrinsic: vec![],
+            tx_hash: [0u8; 32],
+            status: TxSubmissionStatus::ReadyToSubmit,
+        });
+        app.qr.modal_tab = 3;
+        let action = app.handle_qr_modal_key(key_code(KeyCode::Enter));
+        assert!(matches!(action, Some(Action::SubmitTransaction)));
+    }
+
+    // === handle_qr_tab_change ===
+
+    #[test]
+    fn test_handle_qr_tab_change_to_scan() {
+        let mut app = create_app();
+        app.qr.modal_tab = 2;
+        app.qr.pending_unsigned = Some(PendingUnsignedTx {
+            payload: UnsignedPayload {
+                call_data: vec![],
+                description: "test".to_string(),
+                metadata_hash: [0u8; 32],
+                genesis_hash: [0u8; 32],
+                block_hash: [0u8; 32],
+                nonce: 0,
+                spec_version: 0,
+                tx_version: 0,
+                era: stkopt_chain::Era::Immortal,
+                include_metadata_hash: false,
+                use_asset_payment: false,
+                extension_ids: vec![],
+            },
+            signer: AccountId32::from([0u8; 32]),
+        });
+        app.camera.scanning = false;
+        let action = app.handle_qr_tab_change();
+        assert!(matches!(action, Some(Action::StartSignatureScan)));
+        assert!(matches!(
+            app.camera.status,
+            Some(CameraScanStatus::Initializing)
+        ));
+    }
+
+    #[test]
+    fn test_handle_qr_tab_change_from_scan() {
+        let mut app = create_app();
+        app.qr.modal_tab = 1;
+        app.camera.scanning = true;
+        let action = app.handle_qr_tab_change();
+        assert!(matches!(action, Some(Action::StopSignatureScan)));
+        assert!(app.camera.status.is_none());
+    }
+
+    #[test]
+    fn test_handle_qr_tab_change_no_op() {
+        let mut app = create_app();
+        app.qr.modal_tab = 0;
+        app.camera.scanning = false;
+        let action = app.handle_qr_tab_change();
+        assert!(action.is_none());
     }
 }

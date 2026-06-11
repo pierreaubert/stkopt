@@ -340,3 +340,131 @@ fn connection_mode_config_from_value(value: &str) -> Option<ConnectionModeConfig
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        connection_mode_config_from_value, connection_mode_config_value, network_config_from_value,
+        network_config_value,
+    };
+    use crate::persistence::{ConnectionModeConfig, NetworkConfig};
+
+    // ── network_config_value ────────────────────────────────────────────
+
+    #[test]
+    fn test_network_config_value_polkadot() {
+        assert_eq!(network_config_value(NetworkConfig::Polkadot), "polkadot");
+    }
+
+    #[test]
+    fn test_network_config_value_kusama() {
+        assert_eq!(network_config_value(NetworkConfig::Kusama), "kusama");
+    }
+
+    #[test]
+    fn test_network_config_value_westend() {
+        assert_eq!(network_config_value(NetworkConfig::Westend), "westend");
+    }
+
+    #[test]
+    fn test_network_config_value_paseo() {
+        assert_eq!(network_config_value(NetworkConfig::Paseo), "paseo");
+    }
+
+    #[test]
+    fn test_network_config_value_custom() {
+        assert_eq!(network_config_value(NetworkConfig::Custom), "custom");
+    }
+
+    // ── network_config_from_value ───────────────────────────────────────
+
+    #[test]
+    fn test_network_config_from_value_polkadot() {
+        assert_eq!(
+            network_config_from_value("polkadot"),
+            Some(NetworkConfig::Polkadot)
+        );
+    }
+
+    #[test]
+    fn test_network_config_from_value_kusama() {
+        assert_eq!(
+            network_config_from_value("kusama"),
+            Some(NetworkConfig::Kusama)
+        );
+    }
+
+    #[test]
+    fn test_network_config_from_value_westend() {
+        assert_eq!(
+            network_config_from_value("westend"),
+            Some(NetworkConfig::Westend)
+        );
+    }
+
+    #[test]
+    fn test_network_config_from_value_paseo() {
+        assert_eq!(network_config_from_value("paseo"), None);
+    }
+
+    #[test]
+    fn test_network_config_from_value_custom() {
+        assert_eq!(network_config_from_value("custom"), None);
+    }
+
+    #[test]
+    fn test_network_config_from_value_unknown() {
+        assert_eq!(network_config_from_value("unknown"), None);
+    }
+
+    #[test]
+    fn test_network_config_from_value_empty() {
+        assert_eq!(network_config_from_value(""), None);
+    }
+
+    // ── connection_mode_config_value ────────────────────────────────────
+
+    #[test]
+    fn test_connection_mode_config_value_light_client() {
+        assert_eq!(
+            connection_mode_config_value(ConnectionModeConfig::LightClient),
+            "light-client"
+        );
+    }
+
+    #[test]
+    fn test_connection_mode_config_value_rpc() {
+        assert_eq!(
+            connection_mode_config_value(ConnectionModeConfig::Rpc),
+            "rpc"
+        );
+    }
+
+    // ── connection_mode_config_from_value ───────────────────────────────
+
+    #[test]
+    fn test_connection_mode_config_from_value_light_client() {
+        assert_eq!(
+            connection_mode_config_from_value("light-client"),
+            Some(ConnectionModeConfig::LightClient)
+        );
+    }
+
+    #[test]
+    fn test_connection_mode_config_from_value_rpc() {
+        assert_eq!(
+            connection_mode_config_from_value("rpc"),
+            Some(ConnectionModeConfig::Rpc)
+        );
+    }
+
+    #[test]
+    fn test_connection_mode_config_from_value_unknown() {
+        assert_eq!(connection_mode_config_from_value("unknown"), None);
+    }
+
+    #[test]
+    fn test_connection_mode_config_from_value_empty() {
+        assert_eq!(connection_mode_config_from_value(""), None);
+    }
+}

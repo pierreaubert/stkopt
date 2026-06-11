@@ -136,7 +136,7 @@ fn optimize_nomination(
         )
     } else {
         Some(format!(
-            "APY is unavailable; selected {} low-commission active validators by stake.",
+            "APY is unavailable from chain data; optimized {} active validators by commission and stake.",
             fallback.selected.len()
         ))
     };
@@ -410,7 +410,7 @@ async fn main() -> Result<()> {
                         let _ = history_cancel_tx.send(false);
                         let _ = request_tx.send(ChainRequest::FetchHistory {
                             account: account.clone(),
-                            num_eras: app.history.total_eras,
+                            lookback_days: app.history.lookback_days,
                             cancel_rx: history_cancel_rx.clone(),
                         }).await;
                         // Mark history as loading (will be handled by LoadStakingHistory action in app)
@@ -720,7 +720,7 @@ async fn main() -> Result<()> {
                             let _ = history_cancel_tx.send(false);
                             let _ = request_tx.send(ChainRequest::FetchHistory {
                                 account: account.clone(),
-                                num_eras: app.history.total_eras,
+                                lookback_days: app.history.lookback_days,
                                 cancel_rx: history_cancel_rx.clone(),
                             }).await;
                         }

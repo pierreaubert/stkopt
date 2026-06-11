@@ -385,12 +385,133 @@ pub fn decode_qr_from_image(image_data: &[u8]) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
+
+    struct MockBitGrid;
+
+    impl rqrr::BitGrid for MockBitGrid {
+        fn size(&self) -> usize {
+            1
+        }
+        fn bit(&self, _y: usize, _x: usize) -> bool {
+            false
+        }
+    }
+
+    // --- downsample_grayscale ---
 
     #[test]
-    fn test_decode_qr_from_image() {
-        // This test would require a sample QR code image
-        // For now, just verify the function compiles and handles errors
+    fn test_downsample_grayscale_same_size() {
+        let src = vec![10, 20, 30, 40];
+        let dst = downsample_grayscale(&src, 2, 2, 2, 2);
+        assert_eq!(dst, src);
+    }
+
+    #[test]
+    fn test_downsample_grayscale_2x2_to_1x1() {
+        let src = vec![10, 20, 30, 40];
+        let dst = downsample_grayscale(&src, 2, 2, 1, 1);
+        assert_eq!(dst, vec![10]); // nearest-neighbor picks (0,0)
+    }
+
+    #[test]
+    fn test_downsample_grayscale_empty_source() {
+        let src: Vec<u8> = vec![];
+        let dst = downsample_grayscale(&src, 0, 0, 2, 2);
+        assert_eq!(dst, vec![128, 128, 128, 128]);
+    }
+
+    #[test]
+    fn test_downsample_grayscale_larger_destination() {
+        let src = vec![42];
+        let dst = downsample_grayscale(&src, 1, 1, 3, 3);
+        assert_eq!(dst, vec![42; 9]);
+    }
+
+    #[test]
+    fn test_downsample_grayscale_known_values() {
+        // 4x4 grid with distinct values
+        let src: Vec<u8> = (0..16).collect();
+        let dst = downsample_grayscale(&src, 4, 4, 2, 2);
+        // Nearest-neighbor mapping:
+        // dst (0,0) -> src (0,0) = 0
+        // dst (1,0) -> src (2,0) = 2
+        // dst (0,1) -> src (0,2) = 8
+        // dst (1,1) -> src (2,2) = 10
+        assert_eq!(dst, vec![0, 2, 8, 10]);
+    }
+
+    // --- extract_qr_bounds ---
+
+    #[test]
+    fn test_extract_qr_bounds_square_center() {
+        let grid = rqrr::Grid {
+            grid: MockBitGrid,
+            bounds: [
+                rqrr::Point { x: 25, y: 25 },
+                rqrr::Point { x: 75, y: 25 },
+                rqrr::Point { x: 75, y: 75 },
+                rqrr::Point { x: 25, y: 75 },
+            ],
+        };
+        let bounds = extract_qr_bounds(&grid, 100, 100);
+        assert_eq!(
+            bounds,
+            [(0.25, 0.25), (0.75, 0.25), (0.75, 0.75), (0.25, 0.75),]
+        );
+    }
+
+    #[test]
+    fn test_extract_qr_bounds_corners() {
+        let grid = rqrr::Grid {
+            grid: MockBitGrid,
+            bounds: [
+                rqrr::Point { x: 0, y: 0 },
+                rqrr::Point { x: 100, y: 0 },
+                rqrr::Point { x: 100, y: 100 },
+                rqrr::Point { x: 0, y: 100 },
+            ],
+        };
+        let bounds = extract_qr_bounds(&grid, 100, 100);
+        assert_eq!(bounds, [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0),]);
+    }
+
+    // --- decode_qr_from_image ---
+
+    #[test]
+    fn test_decode_qr_from_image_empty() {
         let result = decode_qr_from_image(&[]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decode_qr_from_image_invalid_format() {
+        let result = decode_qr_from_image(b"not-an-image");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Failed to load image"));
+    }
+
+    #[test]
+    fn test_decode_qr_from_image_no_qr() {
+        let img = image::DynamicImage::new_luma8(10, 10);
+        let mut buf = Vec::new();
+        img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap();
+        let result = decode_qr_from_image(&buf);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "No QR code found in image");
+    }
+
+    #[test]
+    fn test_decode_qr_from_image_valid_qr() {
+        let code = qrcode::QrCode::new(b"stkopt-test").unwrap();
+        let qr_img = code.render::<image::Luma<u8>>().build();
+        let img = image::DynamicImage::ImageLuma8(qr_img);
+        let mut buf = Vec::new();
+        img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap();
+        let result = decode_qr_from_image(&buf);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), b"stkopt-test");
     }
 }
