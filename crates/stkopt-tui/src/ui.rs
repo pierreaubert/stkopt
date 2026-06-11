@@ -29,6 +29,16 @@ fn truncate_str(s: &str, max_chars: usize) -> String {
     }
 }
 
+/// Safely truncate an address for display, showing `prefix...suffix`.
+/// Falls back to the full address if it is too short to slice.
+fn truncate_address(addr: &str, prefix: usize, suffix: usize) -> String {
+    if addr.len() > prefix + suffix {
+        format!("{}...{}", &addr[..prefix], &addr[addr.len() - suffix..])
+    } else {
+        addr.to_string()
+    }
+}
+
 /// Render the entire UI.
 pub fn render(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::vertical([
@@ -187,14 +197,12 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
 
     // Build chain info display
     let chain_display = if let Some(info) = &app.chain_info {
-        let style = if info.validated {
-            Style::default().fg(p.success)
-        } else {
-            Style::default().fg(p.warning)
-        };
         vec![
             Span::raw("  │  "),
-            Span::styled(format!("{} v{}", info.spec_name, info.spec_version), style),
+            Span::styled(
+                format!("{} v{}", info.spec_name, info.spec_version),
+                Style::default().fg(p.success),
+            ),
         ]
     } else {
         vec![]
@@ -345,10 +353,11 @@ fn format_balance(balance: u128, decimals: u8) -> String {
     let divisor = 10u128.pow(decimals as u32);
     let whole = balance / divisor;
     let frac = (balance % divisor) / 10u128.pow(decimals.saturating_sub(2) as u32);
-    if whole >= 1_000_000 {
-        format!("{:.2}M", whole as f64 / 1_000_000.0)
-    } else if whole >= 1_000 {
-        format!("{:.2}K", whole as f64 / 1_000.0)
+    let value = balance as f64 / divisor as f64;
+    if value >= 1_000_000.0 {
+        format!("{:.2}M", value / 1_000_000.0)
+    } else if value >= 1_000.0 {
+        format!("{:.2}K", value / 1_000.0)
     } else {
         format!("{}.{:02}", whole, frac)
     }
@@ -423,11 +432,7 @@ fn render_validators(frame: &mut Frame, app: &mut App, area: Rect) {
             let addr_display = if is_wide {
                 v.address.clone()
             } else {
-                format!(
-                    "{}...{}",
-                    &v.address[..6],
-                    &v.address[v.address.len() - 6..]
-                )
+                truncate_address(&v.address, 6, 6)
             };
             let name_display = truncate_str(v.name.as_deref().unwrap_or("-"), 20);
             let commission_str = format!("{:.1}%", v.commission * 100.0);
@@ -932,11 +937,7 @@ fn render_nominate(frame: &mut Frame, app: &mut App, area: Rect) {
             let addr_display = if is_wide {
                 v.address.clone()
             } else {
-                format!(
-                    "{}...{}",
-                    &v.address[..6],
-                    &v.address[v.address.len() - 6..]
-                )
+                truncate_address(&v.address, 6, 6)
             };
             let name_display = truncate_str(v.name.as_deref().unwrap_or("-"), 16);
             let commission_str = format!("{:.1}%", v.commission * 100.0);
@@ -1254,22 +1255,6 @@ fn render_account_status(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(status_para, left_area);
 
     // --- Right Panel: Address Book ---
-    // Hardcoded list for now
-    let known_addresses: Vec<(&str, &str)> = vec![
-        (
-            "Polkadot Treasury",
-            "13UVJyLnbVp9RBZYFwCNuGnK87JYJ2nb7jMwaVe4vQ2UNCzN",
-        ),
-        (
-            "Polkadot Fellowship",
-            "16SpacegeUTft9v3ts27CEC3tJaxgvE4uZeCctThFH3Vb24p",
-        ),
-        (
-            "Snowbridge",
-            "13cKp89Nt7t1hZVWnqhKW9LY7Udhxk2BmLwKi3snVgUAjZGE",
-        ),
-    ];
-
     let mut address_rows = Vec::new();
     // Add user account
     if let Some(account) = &app.watched_account {
@@ -1280,7 +1265,7 @@ fn render_account_status(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     // Add known addresses
-    for (name, addr) in &known_addresses {
+    for (name, addr) in crate::app::KNOWN_ADDRESSES {
         address_rows.push(Row::new(vec![Cell::from(*name), Cell::from(*addr)]));
     }
 
@@ -1739,115 +1724,6 @@ fn render_history_table(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(table, area);
 }
 
-/// Render ASCII graph of APY history.
-#[allow(dead_code)]
-fn render_apy_graph(frame: &mut Frame, app: &App, area: Rect) {
-    let pal = &app.palette;
-    let inner = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(pal.border))
-        .title(" APY % (30 day history) ");
-
-    let inner_area = inner.inner(area);
-    frame.render_widget(inner, area);
-
-    if app.history.points.is_empty() || inner_area.height < 3 {
-        return;
-    }
-
-    let graph_height = inner_area.height.saturating_sub(1) as usize; // Leave room for x-axis
-    let graph_width = inner_area.width.saturating_sub(6) as usize; // Leave room for y-axis labels
-
-    // Get APY values
-    let apys: Vec<f64> = app.history.points.iter().map(|p| p.apy * 100.0).collect();
-
-    if apys.is_empty() {
-        return;
-    }
-
-    let min_apy = apys.iter().cloned().fold(f64::INFINITY, f64::min);
-    let max_apy = apys.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let range = (max_apy - min_apy).max(0.1); // Avoid division by zero
-
-    // Build graph lines
-    let mut lines = Vec::new();
-
-    // Y-axis labels and graph bars
-    for row in 0..graph_height {
-        let y_value = max_apy - (row as f64 / graph_height as f64) * range;
-        let y_label = format!("{:>4.1}│", y_value);
-
-        let mut line_spans = vec![Span::styled(y_label, Style::default().fg(pal.muted))];
-
-        // Determine how many data points per column
-        let points_per_col = (apys.len() as f64 / graph_width as f64).max(1.0);
-
-        for col in 0..graph_width {
-            let start_idx = (col as f64 * points_per_col) as usize;
-            let end_idx = ((col + 1) as f64 * points_per_col) as usize;
-
-            // Average APY for this column
-            let col_apys: Vec<f64> =
-                apys[start_idx.min(apys.len())..end_idx.min(apys.len())].to_vec();
-
-            if col_apys.is_empty() {
-                line_spans.push(Span::raw(" "));
-                continue;
-            }
-
-            let avg_apy = col_apys.iter().sum::<f64>() / col_apys.len() as f64;
-            let normalized = (avg_apy - min_apy) / range;
-            let bar_height = (normalized * graph_height as f64) as usize;
-
-            // Determine if this row should have a bar
-            let row_from_bottom = graph_height - 1 - row;
-            let ch = if row_from_bottom < bar_height {
-                '█'
-            } else if row_from_bottom == bar_height && normalized > 0.0 {
-                '▄'
-            } else {
-                ' '
-            };
-
-            let color = if avg_apy >= 15.0 {
-                pal.graph_high
-            } else if avg_apy >= 10.0 {
-                pal.graph_mid
-            } else {
-                pal.graph_low
-            };
-
-            line_spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
-        }
-
-        lines.push(Line::from(line_spans));
-    }
-
-    // X-axis
-    let x_axis = format!("    └{}", "─".repeat(graph_width));
-    lines.push(Line::from(Span::styled(
-        x_axis,
-        Style::default().fg(pal.muted),
-    )));
-
-    // Era labels
-    if let (Some(first), Some(last)) = (app.history.points.first(), app.history.points.last()) {
-        let era_label = format!(
-            "     Era {:<10} {:>width$}",
-            first.era,
-            last.era,
-            width = graph_width - 10
-        );
-        lines.push(Line::from(Span::styled(
-            era_label,
-            Style::default().fg(pal.muted),
-        )));
-    }
-
-    let paragraph = Paragraph::new(lines);
-    frame.render_widget(paragraph, inner_area);
-}
-
 /// Render history statistics.
 fn render_history_stats(frame: &mut Frame, app: &App, area: Rect) {
     let pal = &app.palette;
@@ -2248,7 +2124,8 @@ fn grayscale_to_braille(pixels: &[u8], width: usize, height: usize, threshold: u
                 }
             }
 
-            line.push(char::from_u32(braille).unwrap_or(' '));
+            // braille is always valid Unicode (0x2800 base + 8-bit flags)
+            line.push(char::from_u32(braille).unwrap());
         }
 
         lines.push(line);
@@ -2776,7 +2653,7 @@ fn render_help_modal(frame: &mut Frame, app: &App) {
 
     // Calculate centered modal area
     let modal_width = 55.min(area.width.saturating_sub(4));
-    let modal_height = 33.min(area.height.saturating_sub(4));
+    let modal_height = 48.min(area.height.saturating_sub(4));
     let modal_x = (area.width.saturating_sub(modal_width)) / 2;
     let modal_y = (area.height.saturating_sub(modal_height)) / 2;
     let modal_area = Rect::new(modal_x, modal_y, modal_width, modal_height);
@@ -2806,12 +2683,16 @@ fn render_help_modal(frame: &mut Frame, app: &App) {
             Span::styled("Previous tab", desc_style),
         ]),
         Line::from(vec![
-            Span::styled("  1-4       ", key_style),
+            Span::styled("  1-6       ", key_style),
             Span::styled("Jump to tab", desc_style),
         ]),
         Line::from(vec![
             Span::styled("  ↑/k ↓/j   ", key_style),
             Span::styled("Navigate list", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  n         ", key_style),
+            Span::styled("Next network", desc_style),
         ]),
         Line::from(vec![
             Span::styled("  ?         ", key_style),
@@ -2830,6 +2711,56 @@ fn render_help_modal(frame: &mut Frame, app: &App) {
             Span::styled("  c         ", key_style),
             Span::styled("Clear account", desc_style),
         ]),
+        Line::from(vec![
+            Span::styled("  ←/→       ", key_style),
+            Span::styled("Switch panel", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Enter     ", key_style),
+            Span::styled("Select address book entry", desc_style),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Account Changes Tab",
+            Style::default().fg(pal.primary).bold(),
+        )),
+        Line::from(vec![
+            Span::styled("  b         ", key_style),
+            Span::styled("Bond", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  u         ", key_style),
+            Span::styled("Unbond", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  +         ", key_style),
+            Span::styled("Bond extra", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  r         ", key_style),
+            Span::styled("Set payee", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  w         ", key_style),
+            Span::styled("Withdraw unbonded", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  x         ", key_style),
+            Span::styled("Chill", desc_style),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Account History Tab",
+            Style::default().fg(pal.primary).bold(),
+        )),
+        Line::from(vec![
+            Span::styled("  l         ", key_style),
+            Span::styled("Load history", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  c         ", key_style),
+            Span::styled("Cancel loading", desc_style),
+        ]),
         Line::from(""),
         Line::from(Span::styled(
             "  Nominate Tab",
@@ -2838,6 +2769,10 @@ fn render_help_modal(frame: &mut Frame, app: &App) {
         Line::from(vec![
             Span::styled("  o         ", key_style),
             Span::styled("Run optimization", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  t         ", key_style),
+            Span::styled("Strategy menu", desc_style),
         ]),
         Line::from(vec![
             Span::styled("  Space     ", key_style),
@@ -2850,6 +2785,52 @@ fn render_help_modal(frame: &mut Frame, app: &App) {
         Line::from(vec![
             Span::styled("  g         ", key_style),
             Span::styled("Generate QR code", desc_style),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Validators / Pools",
+            Style::default().fg(pal.primary).bold(),
+        )),
+        Line::from(vec![
+            Span::styled("  /         ", key_style),
+            Span::styled("Search", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  s         ", key_style),
+            Span::styled("Sort menu", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  S         ", key_style),
+            Span::styled("Reverse sort", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  b         ", key_style),
+            Span::styled("Toggle blocked (Validators)", desc_style),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Pool Operations",
+            Style::default().fg(pal.primary).bold(),
+        )),
+        Line::from(vec![
+            Span::styled("  j         ", key_style),
+            Span::styled("Join pool", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  J         ", key_style),
+            Span::styled("Bond extra to pool", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  U         ", key_style),
+            Span::styled("Unbond from pool", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  C         ", key_style),
+            Span::styled("Claim pool rewards", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  W         ", key_style),
+            Span::styled("Withdraw unbonded pool", desc_style),
         ]),
         Line::from(""),
         Line::from(Span::styled(

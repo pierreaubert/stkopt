@@ -71,20 +71,20 @@ impl QrModal {
             .flex()
             .items_center()
             .justify_between()
-            .p_4()
+            .p_3()
             .border_b_1()
             .border_color(theme.border)
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .child(Text::new("📱").size(TextSize::Lg))
+                    .gap_1()
+                    .child(Text::new("📱").size(TextSize::Xl))
                     .child(Heading::h2("Sign Transaction").into_any_element()),
             )
             .child(
                 Text::new(description)
-                    .size(TextSize::Sm)
+                    .size(TextSize::Xs)
                     .color(theme.text_secondary),
             )
     }
@@ -105,8 +105,8 @@ impl QrModal {
                 div()
                     .id(SharedString::from(format!("qr-tab-{:?}", tab)))
                     .flex_1()
-                    .px_4()
-                    .py_3()
+                    .px_3()
+                    .py_2()
                     .cursor_pointer()
                     .text_center()
                     .border_b_2()
@@ -130,7 +130,7 @@ impl QrModal {
                     })
                     .child(
                         Text::new(tab.label())
-                            .size(TextSize::Sm)
+                            .size(TextSize::Xs)
                             .color(if is_selected {
                                 theme.text_primary
                             } else {
@@ -151,7 +151,7 @@ impl QrModal {
 
         div()
             .min_h(px(300.0))
-            .p_4()
+            .p_3()
             .flex()
             .flex_col()
             .items_center()
@@ -174,11 +174,11 @@ impl QrModal {
                     .flex()
                     .flex_col()
                     .items_center()
-                    .gap_4()
+                    .gap_3()
                     .child(qr_element)
                     .child(
                         Text::new("Scan this QR code with Polkadot Vault")
-                            .size(TextSize::Sm)
+                            .size(TextSize::Xs)
                             .color(theme.text_secondary),
                     )
                     .child(
@@ -190,7 +190,7 @@ impl QrModal {
                     .flex()
                     .flex_col()
                     .items_center()
-                    .gap_4()
+                    .gap_3()
                     .child(
                         div()
                             .w(px(250.0))
@@ -210,7 +210,7 @@ impl QrModal {
                     )
                     .child(
                         Text::new(format!("Payload size: {} bytes", qr_data.len()))
-                            .size(TextSize::Sm)
+                            .size(TextSize::Xs)
                             .color(theme.text_secondary),
                     ),
             }
@@ -306,7 +306,7 @@ impl QrModal {
         let entity = app.entity.clone();
         let is_scanning = app.qr_reader.is_some();
 
-        let mut content = div().flex().flex_col().items_center().gap_4();
+        let mut content = div().flex().flex_col().items_center().gap_3();
 
         // Camera preview area
         let preview_area = if let Some(ref preview) = app.camera_preview {
@@ -325,7 +325,7 @@ impl QrModal {
                 .justify_center()
                 .child(
                     Text::new("Camera Preview")
-                        .size(TextSize::Sm)
+                        .size(TextSize::Xs)
                         .color(theme.text_muted),
                 )
         };
@@ -334,7 +334,7 @@ impl QrModal {
 
         content = content.child(
             Text::new("Scan the signature QR from Polkadot Vault")
-                .size(TextSize::Sm)
+                .size(TextSize::Xs)
                 .color(theme.text_secondary),
         );
 
@@ -410,7 +410,7 @@ impl QrModal {
         let theme = cx.theme();
         let entity = app.entity.clone();
 
-        let mut content = div().flex().flex_col().items_center().gap_4();
+        let mut content = div().flex().flex_col().items_center().gap_3();
 
         if let Some(ref status) = app.tx_status_message {
             let bg = match app.tx_status {
@@ -421,21 +421,21 @@ impl QrModal {
             };
 
             content = content.child(
-                div().p_4().rounded_lg().bg(bg).child(
+                div().p_3().rounded_lg().bg(bg).child(
                     Text::new(status.clone())
-                        .size(TextSize::Sm)
+                        .size(TextSize::Xs)
                         .color(theme.text_primary),
                 ),
             );
         } else {
             content = content.child(
                 div()
-                    .p_4()
+                    .p_3()
                     .rounded_lg()
                     .bg(theme.warning_token().subtle)
                     .child(
                         Text::new("Scan the signed QR code first")
-                            .size(TextSize::Sm)
+                            .size(TextSize::Xs)
                             .color(theme.text_secondary),
                     ),
             );
@@ -471,7 +471,7 @@ impl QrModal {
             .flex()
             .items_center()
             .justify_between()
-            .p_4()
+            .p_3()
             .border_t_1()
             .border_color(theme.border)
             .child(

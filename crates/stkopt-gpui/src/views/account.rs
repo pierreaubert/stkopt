@@ -32,17 +32,17 @@ impl AccountSection {
         let mut content = div()
             .flex()
             .flex_col()
-            .gap_4()
+            .gap_3()
             .child(Heading::h3("Watch Account"))
             .child(
                 Text::new("Enter a Polkadot address to monitor staking activity")
-                    .size(TextSize::Sm)
+                    .size(TextSize::Xs)
                     .color(theme.text_secondary),
             )
             .child(
                 div()
                     .flex()
-                    .gap_3()
+                    .gap_2()
                     .child(
                         Input::new("account-input")
                             .placeholder("Enter address (e.g., 15oF4u...)")
@@ -77,6 +77,7 @@ impl AccountSection {
                         Button::new("btn-watch", "Watch")
                             .variant(ButtonVariant::Primary)
                             .theme(crate::theme::button_theme_for_ui_theme(&theme))
+                            .disabled(app.connection_status != ConnectionStatus::Connected)
                             .on_click({
                                 let entity = entity.clone();
                                 move |_window, cx| {
@@ -136,7 +137,7 @@ impl AccountSection {
         if let Some(ref error) = app.account_error {
             content = content.child(
                 Text::new(error.clone())
-                    .size(TextSize::Sm)
+                    .size(TextSize::Xs)
                     .color(theme.error),
             );
         }
@@ -161,7 +162,7 @@ impl AccountSection {
                     div()
                         .flex()
                         .flex_col()
-                        .gap_4()
+                        .gap_3()
                         .child(
                             div()
                                 .flex()
@@ -174,7 +175,7 @@ impl AccountSection {
                             div()
                                 .flex()
                                 .flex_col()
-                                .gap_2()
+                                .gap_1()
                                 .child(detail_row("Address", addr_display, &theme))
                                 .child(detail_row("Network", network_label.to_string(), &theme))
                                 .child(detail_row("Status", status.to_string(), &theme)),
@@ -209,29 +210,29 @@ impl AccountSection {
             div()
                 .flex()
                 .items_center()
-                .px_4()
-                .py_3()
+                .px_3()
+                .py_2()
                 .bg(theme.surface)
                 .border_b_1()
                 .border_color(theme.border)
                 .child(
                     div().flex_1().child(
                         Text::new("Address")
-                            .size(TextSize::Sm)
+                            .size(TextSize::Xs)
                             .weight(TextWeight::Semibold),
                     ),
                 )
                 .child(
                     div().w(px(100.0)).child(
                         Text::new("Network")
-                            .size(TextSize::Sm)
+                            .size(TextSize::Xs)
                             .weight(TextWeight::Semibold),
                     ),
                 )
                 .child(
                     div().w(px(80.0)).child(
                         Text::new("Actions")
-                            .size(TextSize::Sm)
+                            .size(TextSize::Xs)
                             .weight(TextWeight::Semibold),
                     ),
                 ),
@@ -251,8 +252,8 @@ impl AccountSection {
                 div()
                     .flex()
                     .items_center()
-                    .px_4()
-                    .py_2()
+                    .px_3()
+                    .py_1()
                     .bg(row_bg)
                     .border_b_1()
                     .border_color(theme.border)
@@ -261,10 +262,10 @@ impl AccountSection {
                             .flex_1()
                             .flex()
                             .items_center()
-                            .gap_2()
+                            .gap_1()
                             .child(
                                 Text::new(truncate_address(&address))
-                                    .size(TextSize::Sm)
+                                    .size(TextSize::Xs)
                                     .weight(if is_active { TextWeight::Semibold } else { TextWeight::Normal }),
                             )
                             .when(is_active, |el| {
@@ -274,19 +275,20 @@ impl AccountSection {
                     .child(
                         div()
                             .w(px(100.0))
-                            .child(Text::new(entry.network.symbol()).size(TextSize::Sm).color(theme.text_secondary)),
+                            .child(Text::new(entry.network.symbol()).size(TextSize::Xs).color(theme.text_secondary)),
                     )
                     .child(
                         div()
                             .w(px(80.0))
                             .flex()
-                            .gap_2()
+                            .gap_1()
                             .child({
                                 let entity = entity.clone();
                                 let addr = address.clone();
                                 Button::new(SharedString::from(format!("watch-{}", i)), "Watch")
                                     .variant(ButtonVariant::Secondary)
-                                    .size(ButtonSize::Sm)
+                                    .size(ButtonSize::Xs)
+                                    .disabled(app.connection_status != ConnectionStatus::Connected)
                                     .on_click(move |_window, cx| {
                                         let addr = addr.clone();
                                         entity.update(cx, |this, cx| {
@@ -329,7 +331,7 @@ impl AccountSection {
                                 let addr = address.clone();
                                 Button::new(SharedString::from(format!("remove-{}", i)), "X")
                                     .variant(ButtonVariant::Secondary)
-                                    .size(ButtonSize::Sm)
+                                    .size(ButtonSize::Xs)
                                     .on_click(move |_window, cx| {
                                         let addr = addr.clone();
                                         entity.update(cx, |this, cx| {
@@ -347,7 +349,7 @@ impl AccountSection {
                 div()
                     .flex()
                     .flex_col()
-                    .gap_4()
+                    .gap_3()
                     .child(Heading::h3("Saved Accounts"))
                     .child(list),
             )
@@ -364,17 +366,17 @@ fn detail_row(
         .flex()
         .items_center()
         .justify_between()
-        .py_2()
+        .py_1()
         .border_b_1()
         .border_color(theme.border)
         .child(
             Text::new(label)
-                .size(TextSize::Sm)
+                .size(TextSize::Xs)
                 .color(theme.text_secondary),
         )
         .child(
             Text::new(value)
-                .size(TextSize::Sm)
+                .size(TextSize::Xs)
                 .weight(TextWeight::Medium),
         )
 }

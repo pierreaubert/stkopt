@@ -43,7 +43,7 @@ impl HistorySection {
             if is_loading { "Loading..." } else { "Refresh" },
         )
         .variant(ButtonVariant::Secondary)
-        .size(ButtonSize::Sm)
+        .size(ButtonSize::Xs)
         .disabled(!has_account || is_loading)
         .on_click({
             let entity = entity.clone();
@@ -69,7 +69,7 @@ impl HistorySection {
             .child(
                 div()
                     .flex()
-                    .gap_4()
+                    .gap_3()
                     .child(stat_card("Total Rewards", total_rewards, &theme))
                     .child(stat_card_success("Average APY", avg_apy, &theme))
                     .child(stat_card("Eras Tracked", eras_count, &theme)),
@@ -82,11 +82,11 @@ impl HistorySection {
                     .flex_col()
                     .items_center()
                     .justify_center()
-                    .gap_2()
-                    .child(Text::new("⏳").size(TextSize::Xl))
+                    .gap_1()
+                    .child(Text::new("⏳").size(TextSize::Lg))
                     .child(
                         Text::new("Loading staking history...")
-                            .size(TextSize::Md)
+                            .size(TextSize::Xs)
                             .color(theme.text_secondary),
                     )
                     .into_any_element()
@@ -131,18 +131,18 @@ impl HistorySection {
                 div()
                     .flex()
                     .flex_col()
-                    .gap_3()
+                    .gap_2()
                     .child(Heading::h3("APY Trend"))
                     .child(
                         div()
                             .w(px(chart_width))
                             .flex()
                             .flex_col()
-                            .gap_2()
+                            .gap_1()
                             .child(
                                 div()
                                     .flex()
-                                    .gap_3()
+                                    .gap_2()
                                     .child(render_y_axis_labels(&y_ticks, theme, plot_height))
                                     .child(render_apy_plot(
                                         chart_points,
@@ -156,7 +156,7 @@ impl HistorySection {
                             .child(
                                 div()
                                     .flex()
-                                    .gap_3()
+                                    .gap_2()
                                     .child(div().w(px(Y_AXIS_WIDTH)))
                                     .child(render_x_axis_labels(&x_tick_labels, theme, plot_width)),
                             ),
@@ -173,16 +173,16 @@ impl HistorySection {
                 .flex_col()
                 .items_center()
                 .justify_center()
-                .gap_2()
-                .child(Text::new("📊").size(TextSize::Xl))
+                .gap_1()
+                .child(Text::new("📊").size(TextSize::Lg))
                 .child(
                     Text::new("No history data")
-                        .size(TextSize::Md)
+                        .size(TextSize::Xs)
                         .color(theme.text_secondary),
                 )
                 .child(
                     Text::new("Connect to a network and watch an account to see staking history")
-                        .size(TextSize::Sm)
+                        .size(TextSize::Xs)
                         .color(theme.text_secondary),
                 )
                 .into_any_element();
@@ -195,43 +195,43 @@ impl HistorySection {
             div()
                 .flex()
                 .items_center()
-                .px_4()
-                .py_3()
+                .px_3()
+                .py_2()
                 .bg(theme.surface)
                 .border_b_1()
                 .border_color(theme.border)
                 .child(
                     div().w(px(80.0)).child(
                         Text::new("Era")
-                            .size(TextSize::Sm)
+                            .size(TextSize::Xs)
                             .weight(TextWeight::Semibold),
                     ),
                 )
                 .child(
                     div().w(px(100.0)).child(
                         Text::new("Date")
-                            .size(TextSize::Sm)
+                            .size(TextSize::Xs)
                             .weight(TextWeight::Semibold),
                     ),
                 )
                 .child(
                     div().flex_1().child(
                         Text::new("Staked")
-                            .size(TextSize::Sm)
+                            .size(TextSize::Xs)
                             .weight(TextWeight::Semibold),
                     ),
                 )
                 .child(
                     div().w(px(120.0)).child(
                         Text::new("Rewards")
-                            .size(TextSize::Sm)
+                            .size(TextSize::Xs)
                             .weight(TextWeight::Semibold),
                     ),
                 )
                 .child(
                     div().w(px(80.0)).child(
                         Text::new("APY")
-                            .size(TextSize::Sm)
+                            .size(TextSize::Xs)
                             .weight(TextWeight::Semibold),
                     ),
                 ),
@@ -260,41 +260,41 @@ impl HistorySection {
                 div()
                     .flex()
                     .items_center()
-                    .px_4()
-                    .py_2()
+                    .px_3()
+                    .py_1()
                     .bg(row_bg)
                     .border_b_1()
                     .border_color(theme.border)
                     .child(
                         div().w(px(80.0)).child(
                             Text::new(format!("#{}", point.era))
-                                .size(TextSize::Sm)
+                                .size(TextSize::Xs)
                                 .color(theme.text_secondary),
                         ),
                     )
                     .child(
                         div().w(px(100.0)).child(
                             Text::new(date_str)
-                                .size(TextSize::Sm)
+                                .size(TextSize::Xs)
                                 .color(theme.text_secondary),
                         ),
                     )
                     .child(
                         div()
                             .flex_1()
-                            .child(Text::new(staked_str).size(TextSize::Sm)),
+                            .child(Text::new(staked_str).size(TextSize::Xs)),
                     )
                     .child(
                         div().w(px(120.0)).child(
                             Text::new(rewards_str)
-                                .size(TextSize::Sm)
+                                .size(TextSize::Xs)
                                 .color(theme.success),
                         ),
                     )
                     .child(
                         div()
                             .w(px(80.0))
-                            .child(Text::new(apy_str).size(TextSize::Sm).color(apy_color)),
+                            .child(Text::new(apy_str).size(TextSize::Xs).color(apy_color)),
                     ),
             );
         }
@@ -302,12 +302,12 @@ impl HistorySection {
         // Show count if more history exists
         if app.staking_history.len() > 30 {
             list = list.child(
-                div().px_4().py_3().child(
+                div().px_3().py_2().child(
                     Text::new(format!(
                         "Showing last 30 of {} eras",
                         app.staking_history.len()
                     ))
-                    .size(TextSize::Sm)
+                    .size(TextSize::Xs)
                     .color(theme.text_secondary),
                 ),
             );
@@ -658,10 +658,10 @@ fn stat_card(
             .min_w(px(150.0))
             .child(
                 Text::new(label)
-                    .size(TextSize::Sm)
+                    .size(TextSize::Xs)
                     .color(theme.text_secondary),
             )
-            .child(Text::new(value).size(TextSize::Lg).weight(TextWeight::Bold)),
+            .child(Text::new(value).size(TextSize::Xl).weight(TextWeight::Bold)),
     )
 }
 
@@ -678,12 +678,12 @@ fn stat_card_success(
             .min_w(px(150.0))
             .child(
                 Text::new(label)
-                    .size(TextSize::Sm)
+                    .size(TextSize::Xs)
                     .color(theme.text_secondary),
             )
             .child(
                 Text::new(value)
-                    .size(TextSize::Lg)
+                    .size(TextSize::Xl)
                     .weight(TextWeight::Bold)
                     .color(theme.success),
             ),

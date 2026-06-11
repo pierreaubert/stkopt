@@ -360,21 +360,16 @@ fn extract_account_bytes(value: Option<&Value<u32>>) -> Option<[u8; 32]> {
 /// Check if judgements contain a positive judgement (Reasonable, KnownGood).
 fn has_positive_judgement(judgements: &Value<u32>) -> bool {
     // Judgements is a BoundedVec of (RegistrarIndex, Judgement)
-    for i in 0..100 {
-        if let Some(judgement_tuple) = judgements.at(i) {
-            // Second element is the Judgement enum
-            if let Some(judgement) = judgement_tuple.at(1) {
-                // Positive judgements
-                if judgement.at("Reasonable").is_some()
-                    || judgement.at("KnownGood").is_some()
-                    || judgement.at("LowQuality").is_some()
-                {
-                    return true;
-                }
+    let mut i = 0;
+    while let Some(judgement_tuple) = judgements.at(i) {
+        // Second element is the Judgement enum
+        if let Some(judgement) = judgement_tuple.at(1) {
+            // Positive judgements
+            if judgement.at("Reasonable").is_some() || judgement.at("KnownGood").is_some() {
+                return true;
             }
-        } else {
-            break;
         }
+        i += 1;
     }
     false
 }

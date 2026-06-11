@@ -1,6 +1,7 @@
 //! Chain query implementations.
 
 pub mod account;
+pub mod decode_helpers;
 pub mod era;
 pub mod identity;
 pub mod pools;

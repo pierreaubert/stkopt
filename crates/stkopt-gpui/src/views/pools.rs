@@ -5,7 +5,7 @@ use gpui::*;
 use gpui_ui_kit::theme::ThemeExt;
 use gpui_ui_kit::*;
 
-use crate::app::{PoolOperation, StkoptApp};
+use crate::app::{ConnectionStatus, PoolOperation, StkoptApp};
 use crate::gpui_tokio::Tokio;
 
 pub struct PoolsSection;
@@ -28,7 +28,8 @@ impl PoolsSection {
                     .child(
                         Button::new("btn-refresh-pools", "Refresh")
                             .variant(ButtonVariant::Secondary)
-                            .size(ButtonSize::Sm)
+                            .size(ButtonSize::Xs)
+                            .disabled(app.connection_status != ConnectionStatus::Connected)
                             .on_click({
                                 let entity = entity.clone();
                                 move |_window, cx| {
@@ -52,7 +53,7 @@ impl PoolsSection {
             )
             .child(
                 Text::new("Join a nomination pool to stake with smaller amounts")
-                    .size(TextSize::Md)
+                    .size(TextSize::Xs)
                     .color(theme.text_secondary),
             )
             .child(Self::render_pool_list(app, &theme, &entity))
@@ -70,16 +71,16 @@ impl PoolsSection {
                 .flex_col()
                 .items_center()
                 .justify_center()
-                .gap_2()
-                .child(Text::new("🏊").size(TextSize::Xl))
+                .gap_1()
+                .child(Text::new("🏊").size(TextSize::Lg))
                 .child(
                     Text::new("No pools loaded")
-                        .size(TextSize::Md)
+                        .size(TextSize::Xs)
                         .color(theme.text_secondary),
                 )
                 .child(
                     Text::new("Connect to a network to view nomination pools")
-                        .size(TextSize::Sm)
+                        .size(TextSize::Xs)
                         .color(theme.text_secondary),
                 )
                 .into_any_element();
@@ -92,48 +93,48 @@ impl PoolsSection {
             div()
                 .flex()
                 .items_center()
-                .px_4()
-                .py_3()
+                .px_3()
+                .py_2()
                 .bg(theme.surface)
                 .border_b_1()
                 .border_color(theme.border)
                 .child(
                     div().w(px(50.0)).child(
                         Text::new("ID")
-                            .size(TextSize::Sm)
+                            .size(TextSize::Xs)
                             .weight(TextWeight::Semibold),
                     ),
                 )
                 .child(
                     div().flex_1().child(
                         Text::new("Pool Name")
-                            .size(TextSize::Sm)
+                            .size(TextSize::Xs)
                             .weight(TextWeight::Semibold),
                     ),
                 )
                 .child(
                     div().w(px(100.0)).child(
                         Text::new("Members")
-                            .size(TextSize::Sm)
+                            .size(TextSize::Xs)
                             .weight(TextWeight::Semibold),
                     ),
                 )
                 .child(
                     div().w(px(120.0)).child(
                         Text::new("Total Bonded")
-                            .size(TextSize::Sm)
+                            .size(TextSize::Xs)
                             .weight(TextWeight::Semibold),
                     ),
                 )
                 .child(
                     div().w(px(80.0)).child(
                         Text::new("State")
-                            .size(TextSize::Sm)
+                            .size(TextSize::Xs)
                             .weight(TextWeight::Semibold),
                     ),
                 )
                 .child(
-                    div().w(px(70.0)).child(Text::new("").size(TextSize::Sm)), // Actions column header
+                    div().w(px(70.0)).child(Text::new("").size(TextSize::Xs)), // Actions column header
                 ),
         );
 
@@ -164,37 +165,37 @@ impl PoolsSection {
                 div()
                     .flex()
                     .items_center()
-                    .px_4()
-                    .py_2()
+                    .px_3()
+                    .py_1()
                     .bg(row_bg)
                     .border_b_1()
                     .border_color(theme.border)
                     .child(
                         div().w(px(50.0)).child(
                             Text::new(format!("#{}", pool.id))
-                                .size(TextSize::Sm)
+                                .size(TextSize::Xs)
                                 .color(theme.text_secondary),
                         ),
                     )
                     .child(
                         div()
                             .flex_1()
-                            .child(Text::new(pool.name.clone()).size(TextSize::Sm)),
+                            .child(Text::new(pool.name.clone()).size(TextSize::Xs)),
                     )
                     .child(
                         div()
                             .w(px(100.0))
-                            .child(Text::new(format!("{}", pool.member_count)).size(TextSize::Sm)),
+                            .child(Text::new(format!("{}", pool.member_count)).size(TextSize::Xs)),
                     )
                     .child(
                         div()
                             .w(px(120.0))
-                            .child(Text::new(bonded_str).size(TextSize::Sm)),
+                            .child(Text::new(bonded_str).size(TextSize::Xs)),
                     )
                     .child(
                         div()
                             .w(px(80.0))
-                            .child(Text::new(state_str).size(TextSize::Sm).color(state_color)),
+                            .child(Text::new(state_str).size(TextSize::Xs).color(state_color)),
                     )
                     .child(
                         div().w(px(70.0)).child(

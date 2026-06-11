@@ -14,6 +14,22 @@ use stkopt_chain::{ChainInfo, RewardDestination};
 use stkopt_core::{ConnectionStatus, Network, OptimizationResult};
 use subxt::utils::AccountId32;
 
+/// Known address book entries (name, address).
+pub const KNOWN_ADDRESSES: &[(&str, &str)] = &[
+    (
+        "Polkadot Treasury",
+        "13UVJyLnbVp9RBZYFwCNuGnK87JYJ2nb7jMwaVe4vQ2UNCzN",
+    ),
+    (
+        "Polkadot Fellowship",
+        "16SpacegeUTft9v3ts27CEC3tJaxgvE4uZeCctThFH3Vb24p",
+    ),
+    (
+        "Snowbridge",
+        "13cKp89Nt7t1hZVWnqhKW9LY7Udhxk2BmLwKi3snVgUAjZGE",
+    ),
+];
+
 /// Camera scan status for visual feedback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CameraScanStatus {
@@ -412,6 +428,41 @@ pub struct App {
     pub selected_pool_for_join: Option<usize>,
 }
 
+/// Direction for cycling selection.
+enum Direction {
+    Previous,
+    Next,
+}
+
+/// Cycle a list selection, wrapping around at the ends.
+fn cycle_selection(current: Option<usize>, len: usize, direction: Direction) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    Some(match direction {
+        Direction::Previous => match current {
+            Some(i) => {
+                if i == 0 {
+                    len - 1
+                } else {
+                    i - 1
+                }
+            }
+            None => 0,
+        },
+        Direction::Next => match current {
+            Some(i) => {
+                if i >= len - 1 {
+                    0
+                } else {
+                    i + 1
+                }
+            }
+            None => 0,
+        },
+    })
+}
+
 impl App {
     /// Create a new application instance.
     pub fn new(network: Network, log_buffer: LogBuffer, theme: Theme) -> Self {
@@ -680,7 +731,7 @@ impl App {
             KeyCode::Char('4') => self.current_view = View::Nominate,
             KeyCode::Char('5') => self.current_view = View::Validators,
             KeyCode::Char('6') => self.current_view = View::Pools,
-            KeyCode::Char('n') => self.next_network(),
+            KeyCode::Char('n') => return self.next_network(),
             KeyCode::Char('a')
                 if self.current_view == View::AccountStatus || self.show_account_prompt =>
             {
@@ -1194,12 +1245,6 @@ impl App {
         }
     }
 
-    /// Parse the account input as SS58 address (legacy method for backward compatibility).
-    #[allow(dead_code)]
-    fn parse_account_input(&self) -> Option<AccountId32> {
-        self.validate_account_input().ok()
-    }
-
     /// Switch to next view.
     fn next_view(&mut self) -> Option<Action> {
         let views = View::all();
@@ -1250,15 +1295,14 @@ impl App {
     }
 
     /// Switch to next network.
-    fn next_network(&mut self) {
+    fn next_network(&mut self) -> Option<Action> {
         let networks = Network::all();
         let current_idx = networks
             .iter()
             .position(|n| *n == self.network)
             .unwrap_or(0);
         let next_idx = (current_idx + 1) % networks.len();
-        self.network = networks[next_idx];
-        self.connection_status = ConnectionStatus::Disconnected;
+        Some(Action::SwitchNetwork(networks[next_idx]))
     }
 
     /// Get tick count for animations.
@@ -1521,76 +1565,49 @@ impl App {
             | Action::GeneratePoolWithdrawQR => {
                 // Handled in main.rs
             }
-            Action::Quit => {
-                self.should_quit = true;
-            }
         }
     }
 
     /// Get the number of entries in the address book.
     pub fn address_book_len(&self) -> usize {
-        // 1 for "My Account" if set, plus 3 hardcoded entries
         let my_account = if self.watched_account.is_some() { 1 } else { 0 };
-        my_account + 3
+        my_account + KNOWN_ADDRESSES.len()
     }
 
     /// Move selection up in the current list.
     pub fn select_previous(&mut self) {
         match self.current_view {
-            View::Validators if !self.validators.is_empty() => {
-                let i = match self.validators_table_state.selected() {
-                    Some(i) => {
-                        if i == 0 {
-                            self.validators.len() - 1
-                        } else {
-                            i - 1
-                        }
-                    }
-                    None => 0,
-                };
-                self.validators_table_state.select(Some(i));
+            View::Validators => {
+                let sel = cycle_selection(
+                    self.validators_table_state.selected(),
+                    self.validators.len(),
+                    Direction::Previous,
+                );
+                self.validators_table_state.select(sel);
             }
-            View::Pools if !self.pools.is_empty() => {
-                let i = match self.pools_table_state.selected() {
-                    Some(i) => {
-                        if i == 0 {
-                            self.pools.len() - 1
-                        } else {
-                            i - 1
-                        }
-                    }
-                    None => 0,
-                };
-                self.pools_table_state.select(Some(i));
+            View::Pools => {
+                let sel = cycle_selection(
+                    self.pools_table_state.selected(),
+                    self.pools.len(),
+                    Direction::Previous,
+                );
+                self.pools_table_state.select(sel);
             }
-            View::Nominate if !self.validators.is_empty() => {
-                let i = match self.nominate_table_state.selected() {
-                    Some(i) => {
-                        if i == 0 {
-                            self.validators.len() - 1
-                        } else {
-                            i - 1
-                        }
-                    }
-                    None => 0,
-                };
-                self.nominate_table_state.select(Some(i));
+            View::Nominate => {
+                let sel = cycle_selection(
+                    self.nominate_table_state.selected(),
+                    self.validators.len(),
+                    Direction::Previous,
+                );
+                self.nominate_table_state.select(sel);
             }
             View::AccountStatus if self.account_panel_focus == 1 => {
-                let len = self.address_book_len();
-                if len > 0 {
-                    let i = match self.address_book_state.selected() {
-                        Some(i) => {
-                            if i == 0 {
-                                len - 1
-                            } else {
-                                i - 1
-                            }
-                        }
-                        None => 0,
-                    };
-                    self.address_book_state.select(Some(i));
-                }
+                let sel = cycle_selection(
+                    self.address_book_state.selected(),
+                    self.address_book_len(),
+                    Direction::Previous,
+                );
+                self.address_book_state.select(sel);
             }
             _ => {}
         }
@@ -1704,60 +1721,37 @@ impl App {
     /// Move selection down in the current list.
     pub fn select_next(&mut self) {
         match self.current_view {
-            View::Validators if !self.validators.is_empty() => {
-                let i = match self.validators_table_state.selected() {
-                    Some(i) => {
-                        if i >= self.validators.len() - 1 {
-                            0
-                        } else {
-                            i + 1
-                        }
-                    }
-                    None => 0,
-                };
-                self.validators_table_state.select(Some(i));
+            View::Validators => {
+                let sel = cycle_selection(
+                    self.validators_table_state.selected(),
+                    self.validators.len(),
+                    Direction::Next,
+                );
+                self.validators_table_state.select(sel);
             }
-            View::Pools if !self.pools.is_empty() => {
-                let i = match self.pools_table_state.selected() {
-                    Some(i) => {
-                        if i >= self.pools.len() - 1 {
-                            0
-                        } else {
-                            i + 1
-                        }
-                    }
-                    None => 0,
-                };
-                self.pools_table_state.select(Some(i));
+            View::Pools => {
+                let sel = cycle_selection(
+                    self.pools_table_state.selected(),
+                    self.pools.len(),
+                    Direction::Next,
+                );
+                self.pools_table_state.select(sel);
             }
-            View::Nominate if !self.validators.is_empty() => {
-                let i = match self.nominate_table_state.selected() {
-                    Some(i) => {
-                        if i >= self.validators.len() - 1 {
-                            0
-                        } else {
-                            i + 1
-                        }
-                    }
-                    None => 0,
-                };
-                self.nominate_table_state.select(Some(i));
+            View::Nominate => {
+                let sel = cycle_selection(
+                    self.nominate_table_state.selected(),
+                    self.validators.len(),
+                    Direction::Next,
+                );
+                self.nominate_table_state.select(sel);
             }
             View::AccountStatus if self.account_panel_focus == 1 => {
-                let len = self.address_book_len();
-                if len > 0 {
-                    let i = match self.address_book_state.selected() {
-                        Some(i) => {
-                            if i >= len - 1 {
-                                0
-                            } else {
-                                i + 1
-                            }
-                        }
-                        None => 0,
-                    };
-                    self.address_book_state.select(Some(i));
-                }
+                let sel = cycle_selection(
+                    self.address_book_state.selected(),
+                    self.address_book_len(),
+                    Direction::Next,
+                );
+                self.address_book_state.select(sel);
             }
             _ => {}
         }

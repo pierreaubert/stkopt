@@ -241,7 +241,4 @@ pub enum Action {
     ValidateAccount(String),
     /// Clear the validation error message.
     ClearValidationError,
-    /// Quit the application.
-    #[allow(dead_code)]
-    Quit,
 }

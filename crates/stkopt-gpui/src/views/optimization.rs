@@ -28,13 +28,13 @@ impl OptimizationSection {
             .child(Heading::h1("Optimization"))
             .child(
                 Text::new("Automatically select validators based on your preferences")
-                    .size(TextSize::Md)
+                    .size(TextSize::Xs)
                     .color(theme.text_secondary),
             )
             .child(
                 div()
                     .flex()
-                    .gap_4()
+                    .gap_3()
                     .child(Badge::new(format!(
                         "{} validators available",
                         validator_count
@@ -52,9 +52,9 @@ impl OptimizationSection {
                     div()
                         .flex()
                         .flex_col()
-                        .gap_4()
+                        .gap_3()
                         .child(Heading::h3("Selection Strategy"))
-                        .child(div().flex().flex_col().gap_3().children(
+                        .child(div().flex().flex_col().gap_2().children(
                             SelectionStrategy::all().iter().map(|strategy| {
                                 let strategy_value = *strategy;
                                 let is_selected = strategy_value == current_strategy;
@@ -81,21 +81,21 @@ impl OptimizationSection {
                     div()
                         .flex()
                         .flex_col()
-                        .gap_4()
+                        .gap_3()
                         .child(Heading::h3("Parameters"))
                         .child(
                             div()
                                 .flex()
                                 .flex_wrap()
-                                .gap_4()
+                                .gap_3()
                                 .child(
                                     div()
                                         .flex()
                                         .flex_col()
-                                        .gap_2()
+                                        .gap_1()
                                         .child(
                                             Text::new("Max Validators (1-16)")
-                                                .size(TextSize::Sm)
+                                                .size(TextSize::Xs)
                                                 .color(theme.text_secondary),
                                         )
                                         .child(
@@ -123,10 +123,10 @@ impl OptimizationSection {
                                     div()
                                         .flex()
                                         .flex_col()
-                                        .gap_2()
+                                        .gap_1()
                                         .child(
                                             Text::new("Max Commission (0-100%)")
-                                                .size(TextSize::Sm)
+                                                .size(TextSize::Xs)
                                                 .color(theme.text_secondary),
                                         )
                                         .child(
@@ -156,12 +156,12 @@ impl OptimizationSection {
             .child(
                 div()
                     .flex()
-                    .gap_3()
+                    .gap_2()
                     .child(
                         Button::new("btn-optimize", "Run Optimization")
                             .variant(ButtonVariant::Primary)
                             .theme(crate::theme::button_theme_for_ui_theme(&theme))
-                            .size(ButtonSize::Lg)
+                            .size(ButtonSize::Md)
                             .disabled(validator_count == 0)
                             .on_click(move |_window, cx| {
                                 entity.update(cx, |this, cx| {
@@ -182,7 +182,7 @@ impl OptimizationSection {
                     .child(
                         Button::new("btn-clear", "Clear Selection")
                             .variant(ButtonVariant::Secondary)
-                            .size(ButtonSize::Lg)
+                            .size(ButtonSize::Md)
                             .disabled(selected_count == 0)
                             .on_click(move |_window, cx| {
                                 entity2.update(cx, |this, cx| {
@@ -196,7 +196,7 @@ impl OptimizationSection {
                         Button::new("btn-generate-qr", "Nominate Validators")
                             .variant(ButtonVariant::Primary)
                             .theme(crate::theme::button_theme_for_ui_theme(&theme))
-                            .size(ButtonSize::Lg)
+                            .size(ButtonSize::Md)
                             .disabled(selected_count == 0)
                             .on_click({
                                 let entity3 = app.entity.clone();
@@ -231,7 +231,7 @@ impl OptimizationSection {
                 .justify_center()
                 .child(
                     Text::new("Run optimization to select validators")
-                        .size(TextSize::Sm)
+                        .size(TextSize::Xs)
                         .color(theme.text_secondary),
                 )
                 .into_any_element();
@@ -244,36 +244,36 @@ impl OptimizationSection {
             div()
                 .flex()
                 .items_center()
-                .px_4()
-                .py_3()
+                .px_3()
+                .py_2()
                 .bg(theme.surface)
                 .border_b_1()
                 .border_color(theme.border)
                 .child(
                     div().w(px(40.0)).child(
                         Text::new("#")
-                            .size(TextSize::Sm)
+                            .size(TextSize::Xs)
                             .weight(TextWeight::Semibold),
                     ),
                 )
                 .child(
                     div().flex_1().child(
                         Text::new("Selected Validator")
-                            .size(TextSize::Sm)
+                            .size(TextSize::Xs)
                             .weight(TextWeight::Semibold),
                     ),
                 )
                 .child(
                     div().w(px(100.0)).child(
                         Text::new("Commission")
-                            .size(TextSize::Sm)
+                            .size(TextSize::Xs)
                             .weight(TextWeight::Semibold),
                     ),
                 )
                 .child(
                     div().w(px(80.0)).child(
                         Text::new("APY")
-                            .size(TextSize::Sm)
+                            .size(TextSize::Xs)
                             .weight(TextWeight::Semibold),
                     ),
                 ),
@@ -301,28 +301,28 @@ impl OptimizationSection {
                     div()
                         .flex()
                         .items_center()
-                        .px_4()
-                        .py_2()
+                        .px_3()
+                        .py_1()
                         .bg(row_bg)
                         .border_b_1()
                         .border_color(theme.border)
                         .child(
                             div().w(px(40.0)).child(
                                 Text::new(format!("{}", i + 1))
-                                    .size(TextSize::Sm)
+                                    .size(TextSize::Xs)
                                     .color(theme.text_secondary),
                             ),
                         )
-                        .child(div().flex_1().child(Text::new(name).size(TextSize::Sm)))
+                        .child(div().flex_1().child(Text::new(name).size(TextSize::Xs)))
                         .child(
                             div()
                                 .w(px(100.0))
-                                .child(Text::new(commission_str).size(TextSize::Sm)),
+                                .child(Text::new(commission_str).size(TextSize::Xs)),
                         )
                         .child(
                             div()
                                 .w(px(80.0))
-                                .child(Text::new(apy_str).size(TextSize::Sm).color(theme.success)),
+                                .child(Text::new(apy_str).size(TextSize::Xs).color(theme.success)),
                         ),
                 );
             }
@@ -332,8 +332,8 @@ impl OptimizationSection {
         if let Some(avg_apy) = app.optimization_result {
             list = list.child(
                 div()
-                    .px_4()
-                    .py_3()
+                    .px_3()
+                    .py_2()
                     .bg(theme.surface_hover)
                     .flex()
                     .items_center()
@@ -343,12 +343,12 @@ impl OptimizationSection {
                             "{} validators selected",
                             app.selected_validators.len()
                         ))
-                        .size(TextSize::Sm)
+                        .size(TextSize::Xs)
                         .weight(TextWeight::Semibold),
                     )
                     .child(
                         Text::new(format!("Estimated avg APY: {}", format_apy_ratio(avg_apy)))
-                            .size(TextSize::Sm)
+                            .size(TextSize::Xs)
                             .weight(TextWeight::Semibold)
                             .color(theme.success),
                     ),
@@ -380,8 +380,8 @@ where
         .id(SharedString::from(format!("strategy-{}", title)))
         .flex()
         .items_start()
-        .gap_3()
-        .p_3()
+        .gap_2()
+        .p_2()
         .rounded_md()
         .border_1()
         .border_color(border)
@@ -416,7 +416,7 @@ where
                 .gap_1()
                 .child(
                     Text::new(title)
-                        .size(TextSize::Sm)
+                        .size(TextSize::Xs)
                         .weight(TextWeight::Medium),
                 )
                 .child(

@@ -412,15 +412,19 @@ fn basic_validator_conversion(validators: &[stkopt_chain::ValidatorInfo]) -> Vec
 }
 
 /// Convert an unsigned payload to a transaction payload ready for QR display.
-fn make_transaction_payload(payload: UnsignedPayload, signer: AccountId32) -> TransactionPayload {
-    let qr_data = encode_for_qr(&payload, &signer);
+fn make_transaction_payload(
+    payload: UnsignedPayload,
+    signer: AccountId32,
+) -> Result<TransactionPayload, String> {
+    let qr_data = encode_for_qr(&payload, &signer)
+        .map_err(|e| format!("Failed to encode transaction QR: {}", e))?;
     let description = payload.description.clone();
-    TransactionPayload {
+    Ok(TransactionPayload {
         qr_data,
         unsigned_payload: payload,
         signer,
         description,
-    }
+    })
 }
 
 /// Transaction submission result.
@@ -1221,7 +1225,7 @@ impl ChainWorker {
                 if let Some(ref db) = self.db
                     && let Err(e) = db.set_cached_pools(network, enriched.clone()).await
                 {
-                    tracing::warn!("Failed to cache pools: {}", e);
+                    tracing::warn!("Failed to cache pools: {:?}", e);
                 }
 
                 Ok(enriched)
@@ -1331,8 +1335,8 @@ impl ChainWorker {
             client
                 .create_bond_payload(&signer, value, true)
                 .await
-                .map(|p| make_transaction_payload(p, signer))
                 .map_err(|e| format!("Failed to create bond payload: {}", e))
+                .and_then(|p| make_transaction_payload(p, signer))
         } else {
             Err("Not connected".to_string())
         };
@@ -1349,8 +1353,8 @@ impl ChainWorker {
             client
                 .create_unbond_payload(&signer, value, true)
                 .await
-                .map(|p| make_transaction_payload(p, signer))
                 .map_err(|e| format!("Failed to create unbond payload: {}", e))
+                .and_then(|p| make_transaction_payload(p, signer))
         } else {
             Err("Not connected".to_string())
         };
@@ -1367,8 +1371,8 @@ impl ChainWorker {
             client
                 .create_bond_extra_payload(&signer, value, true)
                 .await
-                .map(|p| make_transaction_payload(p, signer))
                 .map_err(|e| format!("Failed to create bond_extra payload: {}", e))
+                .and_then(|p| make_transaction_payload(p, signer))
         } else {
             Err("Not connected".to_string())
         };
@@ -1385,8 +1389,8 @@ impl ChainWorker {
             client
                 .create_rebond_payload(&signer, value, true)
                 .await
-                .map(|p| make_transaction_payload(p, signer))
                 .map_err(|e| format!("Failed to create rebond payload: {}", e))
+                .and_then(|p| make_transaction_payload(p, signer))
         } else {
             Err("Not connected".to_string())
         };
@@ -1403,8 +1407,8 @@ impl ChainWorker {
             client
                 .create_set_payee_payload(&signer, destination, true)
                 .await
-                .map(|p| make_transaction_payload(p, signer))
                 .map_err(|e| format!("Failed to create set_payee payload: {}", e))
+                .and_then(|p| make_transaction_payload(p, signer))
         } else {
             Err("Not connected".to_string())
         };
@@ -1421,8 +1425,8 @@ impl ChainWorker {
             client
                 .create_withdraw_unbonded_payload(&signer, 0, true)
                 .await
-                .map(|p| make_transaction_payload(p, signer))
                 .map_err(|e| format!("Failed to create withdraw_unbonded payload: {}", e))
+                .and_then(|p| make_transaction_payload(p, signer))
         } else {
             Err("Not connected".to_string())
         };
@@ -1438,8 +1442,8 @@ impl ChainWorker {
             client
                 .create_chill_payload(&signer, true)
                 .await
-                .map(|p| make_transaction_payload(p, signer))
                 .map_err(|e| format!("Failed to create chill payload: {}", e))
+                .and_then(|p| make_transaction_payload(p, signer))
         } else {
             Err("Not connected".to_string())
         };
@@ -1456,8 +1460,8 @@ impl ChainWorker {
             client
                 .create_nominate_payload(&signer, &targets, true)
                 .await
-                .map(|p| make_transaction_payload(p, signer))
                 .map_err(|e| format!("Failed to create nominate payload: {}", e))
+                .and_then(|p| make_transaction_payload(p, signer))
         } else {
             Err("Not connected".to_string())
         };
@@ -1477,8 +1481,8 @@ impl ChainWorker {
             client
                 .create_pool_join_payload(&signer, pool_id, amount, true)
                 .await
-                .map(|p| make_transaction_payload(p, signer))
                 .map_err(|e| format!("Failed to create pool_join payload: {}", e))
+                .and_then(|p| make_transaction_payload(p, signer))
         } else {
             Err("Not connected".to_string())
         };
@@ -1495,8 +1499,8 @@ impl ChainWorker {
             client
                 .create_pool_bond_extra_payload(&signer, amount, true)
                 .await
-                .map(|p| make_transaction_payload(p, signer))
                 .map_err(|e| format!("Failed to create pool_bond_extra payload: {}", e))
+                .and_then(|p| make_transaction_payload(p, signer))
         } else {
             Err("Not connected".to_string())
         };
@@ -1512,8 +1516,8 @@ impl ChainWorker {
             client
                 .create_pool_claim_payload(&signer, true)
                 .await
-                .map(|p| make_transaction_payload(p, signer))
                 .map_err(|e| format!("Failed to create pool_claim payload: {}", e))
+                .and_then(|p| make_transaction_payload(p, signer))
         } else {
             Err("Not connected".to_string())
         };
@@ -1531,8 +1535,8 @@ impl ChainWorker {
             client
                 .create_pool_unbond_payload(&signer, &signer, amount, true)
                 .await
-                .map(|p| make_transaction_payload(p, signer))
                 .map_err(|e| format!("Failed to create pool_unbond payload: {}", e))
+                .and_then(|p| make_transaction_payload(p, signer))
         } else {
             Err("Not connected".to_string())
         };
@@ -1549,8 +1553,8 @@ impl ChainWorker {
             client
                 .create_pool_withdraw_payload(&signer, &signer, 0, true)
                 .await
-                .map(|p| make_transaction_payload(p, signer))
                 .map_err(|e| format!("Failed to create pool_withdraw payload: {}", e))
+                .and_then(|p| make_transaction_payload(p, signer))
         } else {
             Err("Not connected".to_string())
         };

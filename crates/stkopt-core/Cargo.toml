@@ -10,6 +10,7 @@ serde_json = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
 directories = { workspace = true, optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock"], optional = true }
+rand = "0.8"
 
 [features]
 default = []

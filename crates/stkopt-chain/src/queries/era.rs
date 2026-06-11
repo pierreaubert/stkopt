@@ -38,6 +38,9 @@ impl ChainClient {
             .unwrap_or(0) as u64;
 
         let era_duration_ms = self.get_era_duration_ms().await?;
+        // NOTE: SystemTime is used here because we need an absolute wall-clock
+        // timestamp to compare with the on-chain era start time. This is an
+        // approximation; local clock skew relative to the chain may affect accuracy.
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| {

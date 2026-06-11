@@ -81,37 +81,14 @@ pub fn select_validators(
     let selected: Vec<ValidatorCandidate> = match criteria.strategy {
         SelectionStrategy::TopApy => filtered.into_iter().take(criteria.target_count).collect(),
         SelectionStrategy::RandomFromTop => {
+            use rand::seq::SliceRandom;
+
             // Select from top 10% (but at least 3x target_count to have meaningful diversity)
             let top_count = (filtered.len() / 10).max(criteria.target_count * 3);
-            let top: Vec<_> = filtered.into_iter().take(top_count).collect();
+            let mut top: Vec<_> = filtered.into_iter().take(top_count).collect();
 
-            // Fisher-Yates shuffle with time-based seed for true randomness
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-            use std::time::{SystemTime, UNIX_EPOCH};
-
-            let mut indices: Vec<usize> = (0..top.len()).collect();
-
-            // Seed from current time for different results each run
-            let seed = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
-
-            // Fisher-Yates shuffle with seeded pseudo-random
-            for i in (1..indices.len()).rev() {
-                let mut hasher = DefaultHasher::new();
-                (seed, i).hash(&mut hasher);
-                let j = (hasher.finish() as usize) % (i + 1);
-                indices.swap(i, j);
-            }
-
-            let selected: Vec<_> = indices
-                .into_iter()
-                .take(criteria.target_count)
-                .filter_map(|idx| top.get(idx).cloned())
-                .collect();
-            selected
+            top.shuffle(&mut rand::thread_rng());
+            top.into_iter().take(criteria.target_count).collect()
         }
         SelectionStrategy::DiversifyByStake => {
             // Take top half by APY, bottom half by stake (to support smaller validators)
@@ -119,13 +96,11 @@ pub fn select_validators(
             let remaining = criteria.target_count - half;
 
             let mut selected: Vec<_> = filtered.iter().take(half).cloned().collect();
-            let already_selected: std::collections::HashSet<_> =
-                selected.iter().map(|v| v.address.clone()).collect();
 
             // Sort remaining by stake ascending (lower stake first)
             let mut by_stake: Vec<_> = filtered
                 .iter()
-                .filter(|v| !already_selected.contains(&v.address))
+                .filter(|v| !selected.iter().any(|s| s.address == v.address))
                 .cloned()
                 .collect();
             by_stake.sort_by_key(|v| v.total_stake);

@@ -54,7 +54,7 @@ pub fn get_nominator_apy(
     invested: Balance,
     era_duration_ms: u64,
 ) -> f64 {
-    let nominator_share = (total_reward as f64 * (1.0 - commission)) as Balance;
+    let nominator_share = ((total_reward as f64) * (1.0 - commission)).round() as Balance;
     get_era_apy(nominator_share, invested, era_duration_ms)
 }
 
@@ -116,8 +116,8 @@ mod tests {
 
         let apy = get_era_apy(reward, invested, era_duration_ms);
 
-        // With daily 1% compound interest, APY should be about 3678% (e^365.24 - 1)
-        // But with discrete compounding: (1.01)^365.24 - 1 ≈ 37.78
+        // With daily 1% discrete compound interest, APY should be about 3778%
+        // (1.01)^365.24 - 1 ≈ 37.78
         assert!(apy > 30.0 && apy < 40.0);
     }
 

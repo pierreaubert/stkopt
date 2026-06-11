@@ -1,7 +1,8 @@
 //! Terminal event handling.
 
 use color_eyre::Result;
-use crossterm::event::{self, Event as CrosstermEvent, KeyEvent, KeyEventKind};
+use crossterm::event::{Event as CrosstermEvent, EventStream, KeyEvent, KeyEventKind};
+use futures::StreamExt;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -12,9 +13,6 @@ pub enum Event {
     Tick,
     /// Keyboard input.
     Key(KeyEvent),
-    /// Terminal resize (width, height).
-    #[allow(dead_code)]
-    Resize(u16, u16),
 }
 
 /// Event handler that polls for terminal events.
@@ -35,6 +33,7 @@ impl EventHandler {
         let event_tx = tx.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tick_rate);
+            let mut event_stream = EventStream::new();
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
@@ -42,25 +41,24 @@ impl EventHandler {
                             break;
                         }
                     }
-                    _ = tokio::task::spawn_blocking(|| {
-                        event::poll(Duration::from_millis(50))
-                    }) => {
-                        if let Ok(true) = event::poll(Duration::ZERO)
-                            && let Ok(evt) = event::read()
-                        {
-                            let event = match evt {
-                                CrosstermEvent::Key(key) if key.kind == KeyEventKind::Press => {
-                                    Some(Event::Key(key))
+                    maybe_event = event_stream.next() => {
+                        match maybe_event {
+                            Some(Ok(evt)) => {
+                                let event = match evt {
+                                    CrosstermEvent::Key(key) if key.kind == KeyEventKind::Press => {
+                                        Some(Event::Key(key))
+                                    }
+                                    CrosstermEvent::Key(_) => None, // Ignore Release/Repeat
+                                    // Resize is handled automatically by ratatui
+                                    _ => None,
+                                };
+                                if let Some(event) = event
+                                    && event_tx.send(event).is_err()
+                                {
+                                    break;
                                 }
-                                CrosstermEvent::Key(_) => None, // Ignore Release/Repeat
-                                CrosstermEvent::Resize(w, h) => Some(Event::Resize(w, h)),
-                                _ => None,
-                            };
-                            if let Some(event) = event
-                                && event_tx.send(event).is_err()
-                            {
-                                break;
                             }
+                            Some(Err(_)) | None => break,
                         }
                     }
                 }

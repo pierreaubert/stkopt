@@ -23,7 +23,7 @@ gpui-px = { version="0.5", features = ["gpui"] }
 # Async runtime
 tokio = { workspace = true, features = ["full"] }
 futures.workspace = true
-smol = "2"
+rand = "0.8"
 
 # Serialization
 serde.workspace = true
@@ -46,7 +46,6 @@ directories.workspace = true
 hex = "0.4"
 rusqlite = { workspace = true, features = ["bundled"] }
 nokhwa = { version = "0.10.10", features = ["input-native"] }
-image = { version = "0.25.9", default-features = false, features = ["jpeg", "png"] }
 rqrr = "0.10.0"
 qrcode = "0.14"
 chrono = "0.4.42"

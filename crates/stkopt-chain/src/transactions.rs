@@ -34,6 +34,8 @@ pub struct UnsignedPayload {
     pub include_metadata_hash: bool,
     /// Whether to use ChargeAssetTxPayment (Asset Hub) instead of ChargeTransactionPayment.
     pub use_asset_payment: bool,
+    /// Ordered extension identifiers from runtime metadata.
+    pub extension_ids: Vec<String>,
 }
 
 /// Transaction era (mortality).
@@ -58,10 +60,10 @@ impl ChainClient {
         let call_data = client.tx().call_data(&call)?;
 
         let metadata = client.metadata();
-        let extensions: Vec<_> = (0..=5)
-            .find_map(|v| metadata.extrinsic().transaction_extensions_by_version(v))
-            .map(|iter| iter.collect())
-            .unwrap_or_default();
+        let extensions: Vec<_> = metadata
+            .extrinsic()
+            .transaction_extensions_to_use_for_encoding()
+            .collect();
 
         let include_metadata_hash = extensions
             .iter()
@@ -85,6 +87,11 @@ impl ChainClient {
             (Era::Immortal, genesis_hash)
         };
 
+        let extension_ids: Vec<String> = extensions
+            .iter()
+            .map(|e| e.identifier().to_string())
+            .collect();
+
         Ok(UnsignedPayload {
             call_data,
             description,
@@ -97,6 +104,7 @@ impl ChainClient {
             era,
             include_metadata_hash,
             use_asset_payment,
+            extension_ids,
         })
     }
 
@@ -404,9 +412,9 @@ impl ChainClient {
         .await
     }
 
-    /// Get account nonce from Asset Hub (for transactions).
+    /// Get account nonce from the relay chain (for staking transactions).
     async fn get_account_nonce(&self, account: &AccountId32) -> Result<u64, ChainError> {
-        Self::fetch_nonce(self.client(), account).await
+        Self::fetch_nonce(self.relay_client(), account).await
     }
 
     /// Fetch nonce from a client.
@@ -455,7 +463,10 @@ impl ChainClient {
 /// it before signing. We always include the full payload in the QR.
 ///
 /// Reference: https://github.com/maciejhirsz/uos
-pub fn encode_for_qr(payload: &UnsignedPayload, signer: &AccountId32) -> Vec<u8> {
+pub fn encode_for_qr(
+    payload: &UnsignedPayload,
+    signer: &AccountId32,
+) -> Result<Vec<u8>, ChainError> {
     let mut qr_payload = Vec::new();
 
     // Substrate prefix
@@ -465,7 +476,7 @@ pub fn encode_for_qr(payload: &UnsignedPayload, signer: &AccountId32) -> Vec<u8>
     qr_payload.push(0x01);
 
     // Build the signing payload
-    let signing_payload = build_signing_payload(payload);
+    let signing_payload = build_signing_payload(payload)?;
 
     // Command byte: UOS V2 (includes genesis hash)
     // 0x02 = Mortal V2
@@ -495,95 +506,116 @@ pub fn encode_for_qr(payload: &UnsignedPayload, signer: &AccountId32) -> Vec<u8>
     );
 
     // Return raw binary data - Polkadot Vault expects UOS binary format
-    qr_payload
+    Ok(qr_payload)
+}
+
+/// Encode the "extra" data for a single transaction extension.
+fn encode_extension_extra(
+    out: &mut Vec<u8>,
+    id: &str,
+    payload: &UnsignedPayload,
+) -> Result<(), ChainError> {
+    match id {
+        "CheckNonZeroSender" | "CheckSpecVersion" | "CheckTxVersion" | "CheckGenesis"
+        | "CheckWeight" | "PrevalidateAttests" => {
+            // Nothing to encode
+        }
+        "CheckMortality" => match payload.era {
+            Era::Immortal => out.push(0x00),
+            Era::Mortal { period, phase } => {
+                out.extend_from_slice(&encode_mortal_era(period, phase));
+            }
+        },
+        "CheckNonce" => {
+            out.extend_from_slice(&compact_encode(payload.nonce));
+        }
+        "ChargeTransactionPayment" => {
+            out.push(0x00); // tip = 0, compact encoded
+        }
+        "ChargeAssetTxPayment" => {
+            out.push(0x00); // tip = 0, compact encoded
+            out.push(0x00); // None = native asset
+        }
+        "CheckMetadataHash" => {
+            if payload.include_metadata_hash {
+                // mode = 0 means disabled (no metadata hash verification)
+                out.push(0x00);
+            }
+        }
+        other => {
+            return Err(ChainError::InvalidData(format!(
+                "Unknown transaction extension '{}': cannot encode extra data. This runtime requires an update to the transaction builder.",
+                other
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Encode the "additional_signed" data for a single transaction extension.
+fn encode_extension_additional_signed(
+    out: &mut Vec<u8>,
+    id: &str,
+    payload: &UnsignedPayload,
+) -> Result<(), ChainError> {
+    match id {
+        "CheckNonZeroSender"
+        | "CheckNonce"
+        | "CheckWeight"
+        | "ChargeTransactionPayment"
+        | "ChargeAssetTxPayment"
+        | "PrevalidateAttests" => {
+            // Nothing to encode
+        }
+        "CheckSpecVersion" => {
+            out.extend_from_slice(&payload.spec_version.to_le_bytes());
+        }
+        "CheckTxVersion" => {
+            out.extend_from_slice(&payload.tx_version.to_le_bytes());
+        }
+        "CheckGenesis" => {
+            out.extend_from_slice(&payload.genesis_hash);
+        }
+        "CheckMortality" => {
+            out.extend_from_slice(&payload.block_hash);
+        }
+        "CheckMetadataHash" => {
+            if payload.include_metadata_hash {
+                // When mode = 0, this is None
+                out.push(0x00); // None encoding
+            }
+        }
+        other => {
+            return Err(ChainError::InvalidData(format!(
+                "Unknown transaction extension '{}': cannot encode additional signed data. This runtime requires an update to the transaction builder.",
+                other
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Build the signing payload (the data that gets signed).
-///
-/// Polkadot relay chain uses these signed extensions in order:
-/// 1. CheckNonZeroSender - Encode: (), AdditionalSigned: ()
-/// 2. CheckSpecVersion - Encode: (), AdditionalSigned: spec_version
-/// 3. CheckTxVersion - Encode: (), AdditionalSigned: tx_version
-/// 4. CheckGenesis - Encode: (), AdditionalSigned: genesis_hash
-/// 5. CheckMortality - Encode: Era, AdditionalSigned: block_hash
-/// 6. CheckNonce - Encode: nonce (compact), AdditionalSigned: ()
-/// 7. CheckWeight - Encode: (), AdditionalSigned: ()
-/// 8. ChargeTransactionPayment - Encode: tip (compact), AdditionalSigned: ()
-/// 9. PrevalidateAttests - Encode: (), AdditionalSigned: ()
-/// 10. CheckMetadataHash - Encode: mode (u8), AdditionalSigned: Option<hash>
+/// Dynamically encodes extensions based on runtime metadata.
 ///
 /// Signing payload = call ++ extras ++ additional_signed
-fn build_signing_payload(payload: &UnsignedPayload) -> Vec<u8> {
+fn build_signing_payload(payload: &UnsignedPayload) -> Result<Vec<u8>, ChainError> {
     let mut data = Vec::new();
 
-    // Call data with compact length prefix
-    data.extend_from_slice(&compact_encode(payload.call_data.len() as u64));
+    // Subxt signs raw call data followed by signed-extension extra and implicit data.
     data.extend_from_slice(&payload.call_data);
 
-    // === Encoded Extras (in extension order) ===
-
-    // 1. CheckNonZeroSender: nothing
-    // 2. CheckSpecVersion: nothing
-    // 3. CheckTxVersion: nothing
-    // 4. CheckGenesis: nothing
-
-    // 5. CheckMortality: Era encoding
-    match payload.era {
-        Era::Immortal => data.push(0x00),
-        Era::Mortal { period, phase } => {
-            let encoded = encode_mortal_era(period, phase);
-            data.extend_from_slice(&encoded);
-        }
+    // Encoded Extras (in extension order from metadata)
+    for id in &payload.extension_ids {
+        encode_extension_extra(&mut data, id, payload)?;
     }
 
-    // 6. CheckNonce: nonce (compact encoded)
-    data.extend_from_slice(&compact_encode(payload.nonce));
-
-    // 7. CheckWeight: nothing
-
-    // 8. ChargeTransactionPayment / ChargeAssetTxPayment
-    data.push(0x00); // tip = 0, compact encoded
-    if payload.use_asset_payment {
-        // ChargeAssetTxPayment expects Option<AssetId>
-        // None = 0x00 (pay in native asset)
-        data.push(0x00);
+    // Additional Signed Data (in extension order from metadata)
+    for id in &payload.extension_ids {
+        encode_extension_additional_signed(&mut data, id, payload)?;
     }
 
-    // 9. PrevalidateAttests: nothing (PhantomData)
-
-    // 10. CheckMetadataHash: mode (u8)
-    if payload.include_metadata_hash {
-        // mode = 0 means disabled (no metadata hash verification)
-        data.push(0x00);
-    }
-
-    // === Additional Signed Data (in extension order) ===
-
-    // 1. CheckNonZeroSender: nothing
-    // 2. CheckSpecVersion: spec_version (u32 le)
-    data.extend_from_slice(&payload.spec_version.to_le_bytes());
-
-    // 3. CheckTxVersion: tx_version (u32 le)
-    data.extend_from_slice(&payload.tx_version.to_le_bytes());
-
-    // 4. CheckGenesis: genesis_hash (32 bytes)
-    data.extend_from_slice(&payload.genesis_hash);
-
-    // 5. CheckMortality: block_hash (32 bytes) - mortality checkpoint
-    data.extend_from_slice(&payload.block_hash);
-
-    // 6. CheckNonce: nothing
-    // 7. CheckWeight: nothing
-    // 8. ChargeTransactionPayment: nothing
-    // 9. PrevalidateAttests: nothing
-
-    // 10. CheckMetadataHash: Option<[u8;32]>
-    if payload.include_metadata_hash {
-        // When mode = 0, this is None
-        data.push(0x00); // None encoding
-    }
-
-    data
+    Ok(data)
 }
 
 /// Encode mortal era (simplified).
@@ -628,27 +660,6 @@ pub struct SignedExtrinsic {
     pub description: String,
     /// Hash of the extrinsic (blake2-256).
     pub hash: [u8; 32],
-}
-
-/// Transaction submission result.
-#[derive(Debug, Clone)]
-pub enum TxStatus {
-    /// Transaction is in the pool, waiting to be included.
-    InPool,
-    /// Transaction was included in a block.
-    InBlock {
-        block_hash: [u8; 32],
-        block_number: u32,
-    },
-    /// Transaction was finalized.
-    Finalized {
-        block_hash: [u8; 32],
-        block_number: u32,
-    },
-    /// Transaction was dropped from the pool.
-    Dropped(String),
-    /// Transaction was invalid.
-    Invalid(String),
 }
 
 /// Decode a signed transaction response from Polkadot Vault QR code.
@@ -796,7 +807,7 @@ pub fn build_signed_extrinsic(
     payload: &UnsignedPayload,
     signer: &AccountId32,
     decoded_sig: &DecodedSignature,
-) -> SignedExtrinsic {
+) -> Result<SignedExtrinsic, ChainError> {
     let mut extrinsic = Vec::new();
 
     // Build the extrinsic body first (without length prefix)
@@ -819,41 +830,9 @@ pub fn build_signed_extrinsic(
     body.push(sig_variant);
     body.extend_from_slice(&decoded_sig.signature);
 
-    // Extra: signed extensions (same order as signing payload)
-
-    // 1. CheckNonZeroSender: nothing
-    // 2. CheckSpecVersion: nothing (only in additional_signed)
-    // 3. CheckTxVersion: nothing (only in additional_signed)
-    // 4. CheckGenesis: nothing (only in additional_signed)
-
-    // 5. CheckMortality: Era encoding
-    match payload.era {
-        Era::Immortal => body.push(0x00),
-        Era::Mortal { period, phase } => {
-            let encoded = encode_mortal_era(period, phase);
-            body.extend_from_slice(&encoded);
-        }
-    }
-
-    // 6. CheckNonce: nonce (compact encoded)
-    body.extend_from_slice(&compact_encode(payload.nonce));
-
-    // 7. CheckWeight: nothing
-
-    // 8. ChargeTransactionPayment / ChargeAssetTxPayment: tip = 0
-    body.push(0x00); // tip = 0, compact encoded
-    if payload.use_asset_payment {
-        // ChargeAssetTxPayment expects Option<AssetId>
-        // None = 0x00 (pay in native asset)
-        body.push(0x00);
-    }
-
-    // 9. PrevalidateAttests: nothing (PhantomData)
-
-    // 10. CheckMetadataHash: mode (u8)
-    if payload.include_metadata_hash {
-        // mode = 0 means disabled
-        body.push(0x00);
+    // Extra: signed extensions (in runtime metadata order)
+    for id in &payload.extension_ids {
+        encode_extension_extra(&mut body, id, payload)?;
     }
 
     // Call data
@@ -880,11 +859,11 @@ pub fn build_signed_extrinsic(
         payload.call_data.len()
     );
 
-    SignedExtrinsic {
+    Ok(SignedExtrinsic {
         encoded: extrinsic,
         description: payload.description.clone(),
         hash,
-    }
+    })
 }
 
 /// Blake2-256 hash using sp-crypto-hashing.
@@ -912,6 +891,16 @@ mod tests {
             },
             include_metadata_hash: false,
             use_asset_payment: false,
+            extension_ids: vec![
+                "CheckNonZeroSender".to_string(),
+                "CheckSpecVersion".to_string(),
+                "CheckTxVersion".to_string(),
+                "CheckGenesis".to_string(),
+                "CheckMortality".to_string(),
+                "CheckNonce".to_string(),
+                "CheckWeight".to_string(),
+                "ChargeTransactionPayment".to_string(),
+            ],
         }
     }
 
@@ -998,7 +987,7 @@ mod tests {
         let payload = make_test_payload();
         let signer = make_test_signer();
 
-        let qr_data = encode_for_qr(&payload, &signer);
+        let qr_data = encode_for_qr(&payload, &signer).unwrap();
 
         // Check UOS header
         assert_eq!(qr_data[0], 0x53); // 'S' for Substrate
@@ -1020,7 +1009,7 @@ mod tests {
         payload.era = Era::Immortal;
         let signer = make_test_signer();
 
-        let qr_data = encode_for_qr(&payload, &signer);
+        let qr_data = encode_for_qr(&payload, &signer).unwrap();
 
         // Check UOS header
         assert_eq!(qr_data[0], 0x53); // 'S' for Substrate
@@ -1034,7 +1023,7 @@ mod tests {
         payload.include_metadata_hash = true;
         let signer = make_test_signer();
 
-        let qr_data = encode_for_qr(&payload, &signer);
+        let qr_data = encode_for_qr(&payload, &signer).unwrap();
 
         // Should be larger due to metadata hash extension
         assert!(!qr_data.is_empty());
@@ -1046,7 +1035,7 @@ mod tests {
         payload.use_asset_payment = true;
         let signer = make_test_signer();
 
-        let qr_data = encode_for_qr(&payload, &signer);
+        let qr_data = encode_for_qr(&payload, &signer).unwrap();
 
         // Should be larger due to asset payment extension
         assert!(!qr_data.is_empty());
@@ -1168,7 +1157,7 @@ mod tests {
             sig_type: SignatureType::Sr25519,
         };
 
-        let signed = build_signed_extrinsic(&payload, &signer, &decoded_sig);
+        let signed = build_signed_extrinsic(&payload, &signer, &decoded_sig).unwrap();
 
         // Check basic structure
         assert!(!signed.encoded.is_empty());
@@ -1196,7 +1185,7 @@ mod tests {
             sig_type: SignatureType::Sr25519,
         };
 
-        let signed = build_signed_extrinsic(&payload, &signer, &decoded_sig);
+        let signed = build_signed_extrinsic(&payload, &signer, &decoded_sig).unwrap();
 
         assert!(!signed.encoded.is_empty());
     }
@@ -1211,7 +1200,7 @@ mod tests {
             sig_type: SignatureType::Sr25519,
         };
 
-        let signed = build_signed_extrinsic(&payload, &signer, &decoded_sig);
+        let signed = build_signed_extrinsic(&payload, &signer, &decoded_sig).unwrap();
 
         assert!(!signed.encoded.is_empty());
     }
@@ -1226,7 +1215,7 @@ mod tests {
             sig_type: SignatureType::Sr25519,
         };
 
-        let signed = build_signed_extrinsic(&payload, &signer, &decoded_sig);
+        let signed = build_signed_extrinsic(&payload, &signer, &decoded_sig).unwrap();
 
         assert!(!signed.encoded.is_empty());
     }
@@ -1240,8 +1229,8 @@ mod tests {
             sig_type: SignatureType::Sr25519,
         };
 
-        let signed1 = build_signed_extrinsic(&payload, &signer, &decoded_sig);
-        let signed2 = build_signed_extrinsic(&payload, &signer, &decoded_sig);
+        let signed1 = build_signed_extrinsic(&payload, &signer, &decoded_sig).unwrap();
+        let signed2 = build_signed_extrinsic(&payload, &signer, &decoded_sig).unwrap();
 
         // Same inputs should produce same hash
         assert_eq!(signed1.hash, signed2.hash);
@@ -1261,8 +1250,8 @@ mod tests {
             sig_type: SignatureType::Sr25519,
         };
 
-        let signed1 = build_signed_extrinsic(&payload, &signer, &decoded_sig1);
-        let signed2 = build_signed_extrinsic(&payload, &signer, &decoded_sig2);
+        let signed1 = build_signed_extrinsic(&payload, &signer, &decoded_sig1).unwrap();
+        let signed2 = build_signed_extrinsic(&payload, &signer, &decoded_sig2).unwrap();
 
         // Different signatures should produce different hashes
         assert_ne!(signed1.hash, signed2.hash);
@@ -1289,54 +1278,12 @@ mod tests {
             sig_type: SignatureType::Sr25519,
         };
 
-        let signed = build_signed_extrinsic(&payload, &signer, &decoded_sig);
+        let signed = build_signed_extrinsic(&payload, &signer, &decoded_sig).unwrap();
         let signed_clone = signed.clone();
 
         assert_eq!(signed.encoded, signed_clone.encoded);
         assert_eq!(signed.description, signed_clone.description);
         assert_eq!(signed.hash, signed_clone.hash);
-    }
-
-    #[test]
-    fn test_tx_status_variants() {
-        // Just verify we can create all variants
-        let _in_pool = TxStatus::InPool;
-        let _in_block = TxStatus::InBlock {
-            block_hash: [0; 32],
-            block_number: 100,
-        };
-        let _finalized = TxStatus::Finalized {
-            block_hash: [0; 32],
-            block_number: 100,
-        };
-        let _dropped = TxStatus::Dropped("reason".to_string());
-        let _invalid = TxStatus::Invalid("error".to_string());
-    }
-
-    #[test]
-    fn test_tx_status_clone() {
-        let status = TxStatus::InBlock {
-            block_hash: [0xAB; 32],
-            block_number: 12345,
-        };
-        let status_clone = status.clone();
-
-        match (status, status_clone) {
-            (
-                TxStatus::InBlock {
-                    block_hash: h1,
-                    block_number: n1,
-                },
-                TxStatus::InBlock {
-                    block_hash: h2,
-                    block_number: n2,
-                },
-            ) => {
-                assert_eq!(h1, h2);
-                assert_eq!(n1, n2);
-            }
-            _ => panic!("Clone mismatch"),
-        }
     }
 
     #[test]
@@ -1357,11 +1304,15 @@ mod tests {
     #[test]
     fn test_build_signing_payload_structure() {
         let payload = make_test_payload();
-        let signing_payload = build_signing_payload(&payload);
+        let signing_payload = build_signing_payload(&payload).unwrap();
 
-        // Should start with compact-encoded call length
+        // Should start with raw call data, matching Subxt's V4 signer payload.
+        assert!(signing_payload.starts_with(&payload.call_data));
         let call_len_encoded = compact_encode(payload.call_data.len() as u64);
-        assert!(signing_payload.starts_with(&call_len_encoded));
+        assert_ne!(
+            &signing_payload[..call_len_encoded.len()],
+            call_len_encoded.as_slice()
+        );
 
         // Should contain spec_version somewhere in the payload
         let spec_bytes = payload.spec_version.to_le_bytes();
@@ -1370,11 +1321,30 @@ mod tests {
     }
 
     #[test]
+    fn test_unknown_transaction_extension_returns_error() {
+        let mut payload = make_test_payload();
+        payload
+            .extension_ids
+            .push("NewRuntimeExtension".to_string());
+        let signer = make_test_signer();
+        let decoded_sig = DecodedSignature {
+            signature: [0xCD; 64],
+            sig_type: SignatureType::Sr25519,
+        };
+
+        let qr_err = encode_for_qr(&payload, &signer).unwrap_err();
+        assert!(matches!(qr_err, ChainError::InvalidData(_)));
+
+        let signed_err = build_signed_extrinsic(&payload, &signer, &decoded_sig).unwrap_err();
+        assert!(matches!(signed_err, ChainError::InvalidData(_)));
+    }
+
+    #[test]
     fn test_encode_for_qr_roundtrip_signer() {
         let payload = make_test_payload();
         let signer = make_test_signer();
 
-        let qr_data = encode_for_qr(&payload, &signer);
+        let qr_data = encode_for_qr(&payload, &signer).unwrap();
 
         // Extract signer from QR data (bytes 3-35)
         let extracted_signer: [u8; 32] = qr_data[3..35].try_into().unwrap();

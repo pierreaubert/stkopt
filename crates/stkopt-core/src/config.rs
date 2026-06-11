@@ -11,7 +11,7 @@
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::types::Network;
 
@@ -441,15 +441,17 @@ pub fn save_address_book(book: &AddressBook) -> Result<(), ConfigError> {
 }
 
 /// Backup a corrupted config file for debugging.
-pub fn backup_corrupted_config(path: &PathBuf) -> Result<(), ConfigError> {
+pub fn backup_corrupted_config(path: &Path) -> Result<(), ConfigError> {
     if let Some(parent) = path.parent() {
         let backup_path = parent.join(format!(
             "config.backup.{}",
             chrono::Utc::now().format("%Y%m%d_%H%M%S")
         ));
         fs::copy(path, &backup_path)?;
+        Ok(())
+    } else {
+        Err(ConfigError::Other("path has no parent".into()))
     }
-    Ok(())
 }
 
 #[cfg(test)]

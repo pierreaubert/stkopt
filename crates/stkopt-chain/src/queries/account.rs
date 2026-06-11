@@ -1,5 +1,6 @@
 //! Account-related chain queries.
 
+use super::decode_helpers::extract_account_id;
 use crate::ChainClient;
 use crate::error::ChainError;
 use stkopt_core::{Balance, EraIndex};
@@ -171,27 +172,24 @@ impl ChainClient {
         // Parse unlocking chunks
         let mut unlocking = Vec::new();
         if let Some(unlocking_val) = decoded.at("unlocking") {
-            for i in 0..32 {
-                // Max unlocking chunks
-                if let Some(chunk) = unlocking_val.at(i) {
-                    let chunk_value = chunk
-                        .at("value")
-                        .and_then(|v: &Value<u32>| v.as_u128())
-                        .unwrap_or(0);
-                    let chunk_era = chunk
-                        .at("era")
-                        .and_then(|v: &Value<u32>| v.as_u128())
-                        .unwrap_or(0) as u32;
+            let mut i = 0;
+            while let Some(chunk) = unlocking_val.at(i) {
+                let chunk_value = chunk
+                    .at("value")
+                    .and_then(|v: &Value<u32>| v.as_u128())
+                    .unwrap_or(0);
+                let chunk_era = chunk
+                    .at("era")
+                    .and_then(|v: &Value<u32>| v.as_u128())
+                    .unwrap_or(0) as u32;
 
-                    if chunk_value > 0 {
-                        unlocking.push(UnlockChunk {
-                            value: chunk_value,
-                            era: chunk_era,
-                        });
-                    }
-                } else {
-                    break;
+                if chunk_value > 0 {
+                    unlocking.push(UnlockChunk {
+                        value: chunk_value,
+                        era: chunk_era,
+                    });
                 }
+                i += 1;
             }
         }
 
@@ -236,15 +234,12 @@ impl ChainClient {
 
         let mut targets = Vec::new();
         if let Some(targets_val) = decoded.at("targets") {
-            for i in 0..16 {
-                // Max nominations
-                if let Some(target) = targets_val.at(i) {
-                    if let Some(account) = extract_account_id(target) {
-                        targets.push(account);
-                    }
-                } else {
-                    break;
+            let mut i = 0;
+            while let Some(target) = targets_val.at(i) {
+                if let Some(account) = extract_account_id(target) {
+                    targets.push(account);
                 }
+                i += 1;
             }
         }
 
@@ -300,22 +295,20 @@ impl ChainClient {
         let mut unbonding_eras = Vec::new();
         if let Some(unbonding_val) = decoded.at("unbonding_eras") {
             // BTreeMap is serialized as array of [key, value] pairs
-            for i in 0..32 {
-                if let Some(pair) = unbonding_val.at(i) {
-                    let era = pair
-                        .at(0)
-                        .and_then(|v: &Value<u32>| v.as_u128())
-                        .unwrap_or(0) as u32;
-                    let amount = pair
-                        .at(1)
-                        .and_then(|v: &Value<u32>| v.as_u128())
-                        .unwrap_or(0);
-                    if amount > 0 {
-                        unbonding_eras.push((era, amount));
-                    }
-                } else {
-                    break;
+            let mut i = 0;
+            while let Some(pair) = unbonding_val.at(i) {
+                let era = pair
+                    .at(0)
+                    .and_then(|v: &Value<u32>| v.as_u128())
+                    .unwrap_or(0) as u32;
+                let amount = pair
+                    .at(1)
+                    .and_then(|v: &Value<u32>| v.as_u128())
+                    .unwrap_or(0);
+                if amount > 0 {
+                    unbonding_eras.push((era, amount));
                 }
+                i += 1;
             }
         }
 
@@ -326,23 +319,35 @@ impl ChainClient {
             last_recorded_reward_counter,
         }))
     }
-}
 
-/// Extract an AccountId from a dynamic Value.
-fn extract_account_id(value: &Value<u32>) -> Option<AccountId32> {
-    let mut bytes = Vec::with_capacity(32);
-    for i in 0..32 {
-        if let Some(byte_val) = value.at(i)
-            && let Some(byte) = byte_val.as_u128()
-        {
-            bytes.push(byte as u8);
-        }
-    }
+    /// Get the number of slashing spans for a stash account.
+    pub async fn get_slashing_spans(&self, stash: &AccountId32) -> Result<u32, ChainError> {
+        let storage_query = subxt::dynamic::storage(
+            "Staking",
+            "SlashingSpans",
+            vec![Value::from_bytes(stash.clone())],
+        );
 
-    if bytes.len() == 32 {
-        let arr: [u8; 32] = bytes.try_into().ok()?;
-        Some(AccountId32::from(arr))
-    } else {
-        None
+        let result: Option<DecodedValueThunk> = self
+            .client()
+            .storage()
+            .at_latest()
+            .await?
+            .fetch(&storage_query)
+            .await?;
+
+        let Some(value) = result else {
+            return Ok(0);
+        };
+
+        let decoded = value.to_value()?;
+
+        // SlashingSpans = { span_index, last_start, last_nonzero_punish, prior }
+        let span_index = decoded
+            .at("span_index")
+            .and_then(|v: &Value<u32>| v.as_u128())
+            .unwrap_or(0) as u32;
+
+        Ok(span_index.saturating_add(1))
     }
 }

@@ -126,11 +126,7 @@ impl ChainClient {
 
         let validators: Vec<ValidatorInfo> = validators_map.into_values().collect();
 
-        if validators.is_empty() {
-            Err(ChainError::InvalidData("No validators found".into()))
-        } else {
-            Ok(validators)
-        }
+        Ok(validators)
     }
 
     /// Get validator preferences for a single validator.
@@ -231,11 +227,18 @@ impl ChainClient {
     /// Note: Session.Validators lives on the relay chain, not Asset Hub.
     /// This method queries the relay chain if available.
     pub async fn get_session_validators(&self) -> Result<Vec<AccountId32>, ChainError> {
+        if !self.has_relay_connection() {
+            return Err(ChainError::Connection(
+                "Relay chain not connected. Session validators require a relay chain connection."
+                    .into(),
+            ));
+        }
+
         // Session.Validators is on the relay chain, not Asset Hub
         let storage_query = subxt::dynamic::storage("Session", "Validators", ());
 
         let result: Option<DecodedValueThunk> = self
-            .relay_client() // Use relay chain, not Asset Hub
+            .relay_client()
             .storage()
             .at_latest()
             .await?
@@ -251,25 +254,25 @@ impl ChainClient {
         let mut validators = Vec::new();
 
         // Session.Validators is a Vec<AccountId32>
-        for i in 0..2000 {
-            if let Some(account_val) = decoded.at(i) {
-                let mut bytes = Vec::with_capacity(32);
-                for k in 0..32 {
-                    if let Some(b_val) = account_val.at(k)
-                        && let Some(b) = b_val.as_u128()
-                    {
-                        bytes.push(b as u8);
-                    }
+        let mut i = 0;
+        while let Some(account_val) = decoded.at(i) {
+            let mut bytes = Vec::with_capacity(32);
+            let mut k = 0;
+            while let Some(b_val) = account_val.at(k) {
+                if let Some(b) = b_val.as_u128() {
+                    bytes.push(b as u8);
                 }
-                if bytes.len() == 32 {
-                    let arr: [u8; 32] = bytes
-                        .try_into()
-                        .expect("Validator address byte array should always be 32 bytes");
-                    validators.push(AccountId32::from(arr));
-                }
-            } else {
-                break;
+                k += 1;
             }
+            if bytes.len() == 32 {
+                let arr: [u8; 32] = bytes.try_into().map_err(|_| {
+                    ChainError::InvalidData(
+                        "Validator address byte array is not 32 bytes".to_string(),
+                    )
+                })?;
+                validators.push(AccountId32::from(arr));
+            }
+            i += 1;
         }
 
         tracing::info!(
@@ -396,73 +399,37 @@ impl ChainClient {
 
         let mut validators = Vec::new();
 
-        // individual is a BTreeMap, which encodes as a sequence of (Key, Value) tuples
-        // The structure from scale-value is:
-        // individual = Composite([
-        //   Composite([AccountId_wrapper, points, ...]),  // entry 0 (key, value, next_entry...)
-        //   ...
-        // ])
-        // Each entry contains (AccountId nested 4 levels, points at index 1)
+        // individual is a BTreeMap<AccountId32, u32>, which decodes as a
+        // Composite sequence of (key, value) tuple entries.
         if let Some(individual) = decoded.at("individual") {
-            // Recursively find all account IDs (32-byte sequences) and point values (u32)
-            // The structure from scale-value is deeply nested, so we traverse recursively.
-            fn find_accounts_and_points(
-                val: &Value<u32>,
-                accounts: &mut Vec<[u8; 32]>,
-                points: &mut Vec<u32>,
-                depth: usize,
-            ) {
-                if depth > 10 {
-                    return;
-                }
-
-                // Check if this is a 32-byte sequence (AccountId)
-                let mut bytes = Vec::new();
-                for k in 0..32 {
-                    if let Some(b_val) = val.at(k) {
-                        if let Some(b) = b_val.as_u128() {
-                            bytes.push(b as u8);
+            let mut i = 0;
+            while let Some(entry) = individual.at(i) {
+                i += 1;
+                // Each entry is a tuple (AccountId32, u32)
+                let account_id = entry.at(0).and_then(|v| {
+                    let mut bytes = [0u8; 32];
+                    let mut k = 0;
+                    while let Some(b) = v.at(k).and_then(|b| b.as_u128()) {
+                        bytes[k] = b as u8;
+                        k += 1;
+                        if k >= 32 {
+                            break;
                         }
+                    }
+                    if k == 32 {
+                        Some(AccountId32::from(bytes))
                     } else {
-                        break;
+                        None
                     }
-                }
-                if bytes.len() == 32 {
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(&bytes);
-                    accounts.push(arr);
-                    return;
-                }
-
-                // Check if this is a single u32 value (points)
-                if let Some(n) = val.as_u128() {
-                    if n < u32::MAX as u128 && n > 0 {
-                        points.push(n as u32);
-                    }
-                    return;
-                }
-
-                // Recursively check children
-                for i in 0..1000 {
-                    if let Some(child) = val.at(i) {
-                        find_accounts_and_points(child, accounts, points, depth + 1);
-                    } else {
-                        break;
-                    }
-                }
-            }
-
-            let mut found_accounts = Vec::new();
-            let mut found_points = Vec::new();
-            find_accounts_and_points(individual, &mut found_accounts, &mut found_points, 0);
-
-            // Pair accounts with points (they should be in matching order)
-            let count = found_accounts.len().min(found_points.len());
-            for i in 0..count {
-                validators.push(ValidatorPoints {
-                    address: AccountId32::from(found_accounts[i]),
-                    points: found_points[i],
                 });
+                let points = entry
+                    .at(1)
+                    .and_then(|v: &Value<u32>| v.as_u128())
+                    .map(|n| n as u32);
+
+                if let (Some(address), Some(points)) = (account_id, points) {
+                    validators.push(ValidatorPoints { address, points });
+                }
             }
         }
 

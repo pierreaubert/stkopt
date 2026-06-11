@@ -1,5 +1,6 @@
 //! Nomination pool queries.
 
+use super::decode_helpers::extract_account_id;
 use crate::ChainClient;
 use crate::error::ChainError;
 use stkopt_core::Balance;
@@ -73,11 +74,6 @@ pub fn derive_pool_account(pool_id: u32, account_type: PoolAccountType) -> Accou
     data.extend_from_slice(pallet_id);
     data.push(account_type as u8);
     data.extend_from_slice(&pool_id.to_le_bytes());
-
-    // Pad to 32 bytes if needed (standard derivation uses trailing zeros)
-    while data.len() < 32 {
-        data.push(0);
-    }
 
     // Hash to get the account
     let hash = blake2_256(&data);
@@ -153,11 +149,26 @@ impl ChainClient {
                         .and_then(|v: &Value<u32>| v.as_u128())
                         .unwrap_or(0);
 
-                    let state = match decoded.at("state").and_then(|v: &Value<u32>| v.as_str()) {
-                        Some("Open") => PoolState::Open,
-                        Some("Blocked") => PoolState::Blocked,
-                        Some("Destroying") => PoolState::Destroying,
-                        _ => PoolState::Open,
+                    let state = match decoded.at("state").map(|v: &Value<u32>| &v.value) {
+                        Some(subxt::ext::scale_value::ValueDef::Variant(variant)) => {
+                            match variant.name.as_str() {
+                                "Open" => PoolState::Open,
+                                "Blocked" => PoolState::Blocked,
+                                "Destroying" => PoolState::Destroying,
+                                other => {
+                                    tracing::warn!(
+                                        "Skipping pool {}: unknown state '{}'",
+                                        id,
+                                        other
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
+                        _ => {
+                            tracing::warn!("Skipping pool {}: state field is not a variant", id);
+                            continue;
+                        }
                     };
 
                     let member_count = decoded
@@ -402,15 +413,12 @@ impl ChainClient {
         let mut targets = Vec::new();
         if let Some(targets_val) = decoded.at("targets") {
             // Iterate over targets array
-            for i in 0..512 {
-                // Max nominators limit
-                if let Some(target) = targets_val.at(i) {
-                    if let Some(account) = extract_account_id(target) {
-                        targets.push(account);
-                    }
-                } else {
-                    break;
+            let mut i = 0;
+            while let Some(target) = targets_val.at(i) {
+                if let Some(account) = extract_account_id(target) {
+                    targets.push(account);
                 }
+                i += 1;
             }
         }
 
@@ -545,26 +553,6 @@ fn parse_account_id(value: Option<&Value<u32>>) -> Option<AccountId32> {
     let mut bytes = Vec::with_capacity(32);
     for i in 0..32 {
         if let Some(byte_val) = inner.at(i)
-            && let Some(byte) = byte_val.as_u128()
-        {
-            bytes.push(byte as u8);
-        }
-    }
-
-    if bytes.len() == 32 {
-        let arr: [u8; 32] = bytes.try_into().ok()?;
-        Some(AccountId32::from(arr))
-    } else {
-        None
-    }
-}
-
-/// Extract an AccountId from a dynamic Value directly.
-fn extract_account_id(value: &Value<u32>) -> Option<AccountId32> {
-    // Try to extract 32 bytes by iterating indices
-    let mut bytes = Vec::with_capacity(32);
-    for i in 0..32 {
-        if let Some(byte_val) = value.at(i)
             && let Some(byte) = byte_val.as_u128()
         {
             bytes.push(byte as u8);

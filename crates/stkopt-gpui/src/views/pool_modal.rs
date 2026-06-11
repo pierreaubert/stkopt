@@ -74,20 +74,20 @@ impl PoolModal {
             .flex()
             .items_center()
             .justify_between()
-            .p_4()
+            .p_3()
             .border_b_1()
             .border_color(theme.border)
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .child(Text::new(Self::operation_icon(operation)).size(TextSize::Lg))
+                    .gap_1()
+                    .child(Text::new(Self::operation_icon(operation)).size(TextSize::Xl))
                     .child(Heading::h2(operation.label()).into_any_element()),
             )
             .child(
                 Text::new(pool_info)
-                    .size(TextSize::Sm)
+                    .size(TextSize::Xs)
                     .color(theme.text_secondary),
             )
     }
@@ -122,7 +122,7 @@ impl PoolModal {
             None
         };
 
-        let mut body = div().flex().flex_col().gap_4().p_4();
+        let mut body = div().flex().flex_col().gap_3().p_3();
 
         // Show balance info
         if let Some(ref info) = app.staking_info {
@@ -134,10 +134,10 @@ impl PoolModal {
                     .justify_between()
                     .child(
                         Text::new("Available Balance:")
-                            .size(TextSize::Sm)
+                            .size(TextSize::Xs)
                             .color(theme.text_secondary),
                     )
-                    .child(Text::new(available).size(TextSize::Sm)),
+                    .child(Text::new(available).size(TextSize::Xs)),
             );
         }
 
@@ -148,7 +148,7 @@ impl PoolModal {
         {
             body = body.child(
                 div()
-                    .p_3()
+                    .p_2()
                     .rounded_md()
                     .bg(theme.background)
                     .border_1()
@@ -158,10 +158,10 @@ impl PoolModal {
                             .flex()
                             .flex_col()
                             .gap_1()
-                            .child(Text::new(pool.name.clone()).size(TextSize::Md))
+                            .child(Text::new(pool.name.clone()).size(TextSize::Xs))
                             .child(
                                 Text::new(format!("{} members", pool.member_count))
-                                    .size(TextSize::Sm)
+                                    .size(TextSize::Xs)
                                     .color(theme.text_secondary),
                             ),
                     ),
@@ -176,17 +176,17 @@ impl PoolModal {
                 div()
                     .flex()
                     .flex_col()
-                    .gap_2()
+                    .gap_1()
                     .child(
                         Text::new("Amount")
-                            .size(TextSize::Sm)
+                            .size(TextSize::Xs)
                             .color(theme.text_secondary),
                     )
                     .child(
                         div()
                             .flex()
                             .items_center()
-                            .gap_2()
+                            .gap_1()
                             .child(
                                 Input::new("pool-amount-input")
                                     .placeholder("0.0")
@@ -203,10 +203,10 @@ impl PoolModal {
                                         }
                                     }),
                             )
-                            .child(Text::new(symbol).size(TextSize::Md)),
+                            .child(Text::new(symbol).size(TextSize::Xs)),
                     )
                     .when_some(amount_error, |div, error| {
-                        div.child(Text::new(error).size(TextSize::Sm).color(error_color))
+                        div.child(Text::new(error).size(TextSize::Xs).color(error_color))
                     }),
             );
         }
@@ -214,12 +214,12 @@ impl PoolModal {
         // Operation description
         body = body.child(
             div()
-                .p_3()
+                .p_2()
                 .rounded_md()
                 .bg(theme.info_token().subtle)
                 .child(
                     Text::new(Self::operation_description(operation))
-                        .size(TextSize::Sm)
+                        .size(TextSize::Xs)
                         .color(theme.text_secondary),
                 ),
         );
@@ -231,9 +231,9 @@ impl PoolModal {
                 theme.warning_token().subtle
             };
             body = body.child(
-                div().p_3().rounded_md().bg(bg).child(
+                div().p_2().rounded_md().bg(bg).child(
                     Text::new(message.clone())
-                        .size(TextSize::Sm)
+                        .size(TextSize::Xs)
                         .color(theme.text_primary),
                 ),
             );
@@ -276,8 +276,8 @@ impl PoolModal {
             .flex()
             .items_center()
             .justify_end()
-            .gap_3()
-            .p_4()
+            .gap_2()
+            .p_3()
             .border_t_1()
             .border_color(theme.border)
             .child(

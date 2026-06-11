@@ -88,6 +88,15 @@ pub struct LightClientConnections {
     network: Network,
 }
 
+impl Drop for LightClientConnections {
+    fn drop(&mut self) {
+        tracing::info!(
+            "Shutting down light client connections for {}",
+            self.network
+        );
+    }
+}
+
 impl LightClientConnections {
     /// Connect to a network using the light client.
     ///
@@ -96,6 +105,7 @@ impl LightClientConnections {
     /// - Asset Hub parachain (for staking data)
     ///
     /// Chain specs are bundled with the binary (no network fetch required).
+    #[allow(clippy::result_large_err)]
     pub async fn connect(network: Network) -> Result<Self, ChainError> {
         let total_start = std::time::Instant::now();
         tracing::info!("Connecting to {} via light client (smoldot)...", network);
@@ -123,9 +133,13 @@ impl LightClientConnections {
         );
         tracing::info!("Smoldot will discover and connect to P2P network peers...");
         let start = std::time::Instant::now();
-        let (light_client, relay_rpc) = LightClient::relay_chain(relay_spec).map_err(|e| {
-            ChainError::LightClient(format!("Failed to start relay chain light client: {}", e))
-        })?;
+        let (light_client, relay_rpc) = tokio::task::spawn_blocking(move || {
+            LightClient::relay_chain(relay_spec).map_err(|e| {
+                ChainError::LightClient(format!("Failed to start relay chain light client: {}", e))
+            })
+        })
+        .await
+        .map_err(|e| ChainError::LightClient(format!("Light client task panicked: {}", e)))??;
         tracing::debug!("Relay chain light client started in {:?}", start.elapsed());
 
         // Connect to Asset Hub as a parachain
@@ -134,9 +148,14 @@ impl LightClientConnections {
             network
         );
         let start = std::time::Instant::now();
-        let asset_hub_rpc = light_client.parachain(asset_hub_spec).map_err(|e| {
-            ChainError::LightClient(format!("Failed to connect to Asset Hub: {}", e))
-        })?;
+        let (light_client, asset_hub_rpc) = tokio::task::spawn_blocking(move || {
+            let asset_hub_rpc = light_client.parachain(asset_hub_spec).map_err(|e| {
+                ChainError::LightClient(format!("Failed to connect to Asset Hub: {}", e))
+            })?;
+            Ok::<_, ChainError>((light_client, asset_hub_rpc))
+        })
+        .await
+        .map_err(|e| ChainError::LightClient(format!("Light client task panicked: {}", e)))??;
         tracing::debug!("Asset Hub parachain added in {:?}", start.elapsed());
 
         // Create subxt clients from the light client RPCs
@@ -183,6 +202,7 @@ impl LightClientConnections {
     ///
     /// This is called separately since identity data is optional.
     /// Returns an error if People chain spec is not available for this network.
+    #[allow(clippy::result_large_err)]
     pub async fn connect_people_chain(&self) -> Result<OnlineClient<PolkadotConfig>, ChainError> {
         let total_start = std::time::Instant::now();
 
@@ -203,9 +223,14 @@ impl LightClientConnections {
             self.network
         );
         let start = std::time::Instant::now();
-        let people_rpc = self.light_client.parachain(people_spec).map_err(|e| {
-            ChainError::LightClient(format!("Failed to connect to People chain: {}", e))
-        })?;
+        let light_client = self.light_client.clone();
+        let people_rpc = tokio::task::spawn_blocking(move || {
+            light_client.parachain(people_spec).map_err(|e| {
+                ChainError::LightClient(format!("Failed to connect to People chain: {}", e))
+            })
+        })
+        .await
+        .map_err(|e| ChainError::LightClient(format!("Light client task panicked: {}", e)))??;
         tracing::debug!("People chain parachain added in {:?}", start.elapsed());
 
         tracing::info!("Waiting for People chain to sync...");

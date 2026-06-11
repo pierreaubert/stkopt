@@ -42,12 +42,12 @@ impl DashboardSection {
                 tracing::info!("[DASHBOARD] Section root clicked!");
             })
             .child(Heading::h1("Dashboard"))
-            .child(Text::new("Overview of your staking activity").size(TextSize::Md))
+            .child(Text::new("Overview of your staking activity").size(TextSize::Xs))
             .child(Self::render_feedback(app, entity.clone()))
             .child(
                 div()
                     .flex()
-                    .gap_4()
+                    .gap_3()
                     .child(stat_card("Total Balance", total_balance, "💰", &theme))
                     .child(stat_card("Bonded", bonded, "🔒", &theme))
                     .child(stat_card("Unbonding", unbonding, "⏳", &theme))
@@ -57,13 +57,13 @@ impl DashboardSection {
                 div()
                     .flex()
                     .flex_col()
-                    .gap_4()
+                    .gap_3()
                     .child(Heading::h2("Quick Actions"))
                     .child(
                         div()
                             .flex()
                             .flex_wrap()
-                            .gap_3()
+                            .gap_2()
                             .child(
                                 Button::new("btn-bond", "Bond")
                                     .variant(ButtonVariant::Primary)
@@ -181,21 +181,21 @@ fn stat_card(
         div()
             .flex()
             .flex_col()
-            .gap_2()
+            .gap_1()
             .min_w(px(180.0))
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .child(Text::new(icon).size(TextSize::Lg))
+                    .gap_1()
+                    .child(Text::new(icon).size(TextSize::Xl))
                     .child(
                         Text::new(title)
-                            .size(TextSize::Sm)
+                            .size(TextSize::Xs)
                             .color(theme.text_secondary),
                     ),
             )
-            .child(Text::new(value).size(TextSize::Xl).weight(TextWeight::Bold)),
+            .child(Text::new(value).size(TextSize::Lg).weight(TextWeight::Bold)),
     )
 }
 

@@ -61,20 +61,20 @@ impl HelpOverlay {
             .flex()
             .items_center()
             .justify_between()
-            .p_4()
+            .p_3()
             .border_b_1()
             .border_color(theme.border)
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .child(Text::new("❓").size(TextSize::Lg))
+                    .gap_1()
+                    .child(Text::new("❓").size(TextSize::Xl))
                     .child(Heading::h2("Help").into_any_element()),
             )
             .child(
                 Text::new("Press ? or Esc to close")
-                    .size(TextSize::Sm)
+                    .size(TextSize::Xs)
                     .color(theme.text_secondary),
             )
     }
@@ -83,14 +83,14 @@ impl HelpOverlay {
         let theme = cx.theme();
         let grouped = shortcuts_by_category();
 
-        let mut section = div().flex().flex_col().gap_4().p_4();
+        let mut section = div().flex().flex_col().gap_3().p_3();
 
         section = section.child(Heading::h3("Keyboard Shortcuts").into_any_element());
 
         for (category, shortcuts) in grouped {
-            let mut category_div = div().flex().flex_col().gap_2().child(
+            let mut category_div = div().flex().flex_col().gap_1().child(
                 Text::new(category.label())
-                    .size(TextSize::Sm)
+                    .size(TextSize::Xs)
                     .color(theme.text_secondary),
             );
 
@@ -112,10 +112,10 @@ impl HelpOverlay {
             .items_center()
             .justify_between()
             .py_1()
-            .child(Text::new(shortcut.label()).size(TextSize::Sm))
+            .child(Text::new(shortcut.label()).size(TextSize::Xs))
             .child(
                 div()
-                    .px_2()
+                    .px_1()
                     .py_1()
                     .rounded_md()
                     .bg(theme.background)
@@ -135,8 +135,8 @@ impl HelpOverlay {
         div()
             .flex()
             .flex_col()
-            .gap_3()
-            .p_4()
+            .gap_2()
+            .p_3()
             .border_t_1()
             .border_color(theme.border)
             .child(Heading::h3("Quick Tips").into_any_element())
@@ -174,14 +174,14 @@ impl HelpOverlay {
     ) -> impl IntoElement {
         div()
             .flex()
-            .gap_3()
-            .child(Text::new(icon).size(TextSize::Lg))
+            .gap_2()
+            .child(Text::new(icon).size(TextSize::Xl))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(Text::new(title).size(TextSize::Sm))
+                    .child(Text::new(title).size(TextSize::Xs))
                     .child(
                         Text::new(description)
                             .size(TextSize::Xs)
@@ -197,7 +197,7 @@ impl HelpOverlay {
             .flex()
             .items_center()
             .justify_center()
-            .p_4()
+            .p_3()
             .border_t_1()
             .border_color(theme.border)
             .child(

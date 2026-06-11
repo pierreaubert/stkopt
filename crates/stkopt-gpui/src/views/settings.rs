@@ -54,8 +54,8 @@ impl SettingsSection {
         div()
             .flex()
             .flex_col()
-            .gap_4()
-            .p_4()
+            .gap_3()
+            .p_3()
             .rounded_lg()
             .bg(theme.surface)
             .border_1()
@@ -65,7 +65,7 @@ impl SettingsSection {
                 div()
                     .flex()
                     .flex_col()
-                    .gap_3()
+                    .gap_2()
                     .child(Self::render_setting_row(
                         "Theme",
                         "Choose your preferred color scheme",
@@ -114,8 +114,8 @@ impl SettingsSection {
         div()
             .flex()
             .flex_col()
-            .gap_4()
-            .p_4()
+            .gap_3()
+            .p_3()
             .rounded_lg()
             .bg(theme.surface)
             .border_1()
@@ -125,7 +125,7 @@ impl SettingsSection {
                 div()
                     .flex()
                     .flex_col()
-                    .gap_3()
+                    .gap_2()
                     .child(Self::render_setting_row(
                         "Default Network",
                         "The network to connect to by default",
@@ -148,8 +148,8 @@ impl SettingsSection {
         let mut container = div()
             .flex()
             .flex_col()
-            .gap_4()
-            .p_4()
+            .gap_3()
+            .p_3()
             .rounded_lg()
             .bg(theme.surface)
             .border_1()
@@ -157,9 +157,9 @@ impl SettingsSection {
             .child(Heading::h3("Keyboard Shortcuts").into_any_element());
 
         for (category, shortcuts) in grouped {
-            let mut category_div = div().flex().flex_col().gap_2().child(
+            let mut category_div = div().flex().flex_col().gap_1().child(
                 Text::new(category.label())
-                    .size(TextSize::Sm)
+                    .size(TextSize::Xs)
                     .color(theme.text_secondary),
             );
 
@@ -181,10 +181,10 @@ impl SettingsSection {
             .items_center()
             .justify_between()
             .py_1()
-            .child(Text::new(shortcut.label()).size(TextSize::Sm))
+            .child(Text::new(shortcut.label()).size(TextSize::Xs))
             .child(
                 div()
-                    .px_2()
+                    .px_1()
                     .py_1()
                     .rounded_md()
                     .bg(theme.background)
@@ -209,13 +209,13 @@ impl SettingsSection {
             .flex_wrap()
             .items_center()
             .justify_between()
-            .gap_4()
+            .gap_3()
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(Text::new(label).size(TextSize::Sm))
+                    .child(Text::new(label).size(TextSize::Xs))
                     .child(
                         Text::new(description)
                             .size(TextSize::Xs)

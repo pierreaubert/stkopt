@@ -69,6 +69,7 @@ mod tests {
         assert_eq!(Network::Polkadot.label(), "Polkadot");
         assert_eq!(Network::Kusama.label(), "Kusama");
         assert_eq!(Network::Westend.label(), "Westend");
+        assert_eq!(Network::Paseo.label(), "Paseo");
     }
 
     #[test]
@@ -76,6 +77,7 @@ mod tests {
         assert_eq!(Network::Polkadot.symbol(), "DOT");
         assert_eq!(Network::Kusama.symbol(), "KSM");
         assert_eq!(Network::Westend.symbol(), "WND");
+        assert_eq!(Network::Paseo.symbol(), "PAS");
     }
 
     #[test]

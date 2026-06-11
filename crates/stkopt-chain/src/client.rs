@@ -78,10 +78,6 @@ pub struct ChainInfo {
     pub spec_version: u32,
     /// Transaction version.
     pub tx_version: u32,
-    /// Whether the chain matches expected network.
-    pub validated: bool,
-    /// Validation message (empty if valid, error message if not).
-    pub validation_message: String,
 }
 
 /// Chain client for interacting with Polkadot-SDK chains.
@@ -203,7 +199,7 @@ impl ChainClient {
             ));
         }
 
-        let mut last_error = None;
+        let mut endpoint_errors: Vec<String> = Vec::new();
         let mut asset_hub_client = None;
 
         for endpoint in endpoints {
@@ -217,17 +213,20 @@ impl ChainClient {
                 }
                 Err(e) => {
                     tracing::warn!("Failed to connect to {}: {}", endpoint, e);
-                    last_error = Some(e.to_string());
+                    endpoint_errors.push(format!("{}: {}", endpoint, e));
                 }
             }
         }
 
         let client = asset_hub_client.ok_or_else(|| {
-            ChainError::Connection(
-                last_error
-                    .clone()
-                    .unwrap_or_else(|| "All endpoints failed".to_string()),
-            )
+            if endpoint_errors.is_empty() {
+                ChainError::Connection("All endpoints failed".to_string())
+            } else {
+                ChainError::Connection(format!(
+                    "All endpoints failed: {}",
+                    endpoint_errors.join("; ")
+                ))
+            }
         })?;
 
         // Also connect to relay chain for transaction submission
@@ -361,27 +360,6 @@ impl ChainClient {
         }
         .to_string();
 
-        // Validate spec version - just a basic sanity check that we're on a modern runtime
-        // Asset Hub spec versions are typically >= 1,000,000
-        let validated = spec_version >= 1_000_000;
-
-        let validation_message = if validated {
-            String::new()
-        } else {
-            format!(
-                "Warning: Unexpected spec_version {} for {} (expected >= 1000000)",
-                spec_version, self.network
-            )
-        };
-
-        if !validated {
-            tracing::warn!(
-                "Chain validation warning for {}: {}",
-                self.network,
-                validation_message
-            );
-        }
-
         tracing::info!(
             "Connected to {} (version: {}, tx_version: {})",
             chain_name,
@@ -394,8 +372,6 @@ impl ChainClient {
             spec_name,
             spec_version,
             tx_version,
-            validated,
-            validation_message,
         }
     }
 
@@ -652,7 +628,7 @@ pub async fn connect_people_chain_rpc(
         ));
     }
 
-    let mut last_error = None;
+    let mut endpoint_errors: Vec<String> = Vec::new();
     for endpoint in endpoints {
         tracing::info!("Trying {} People chain RPC via {}", network, endpoint);
 
@@ -663,12 +639,19 @@ pub async fn connect_people_chain_rpc(
             }
             Err(e) => {
                 tracing::warn!("Failed to connect to People chain RPC {}: {}", endpoint, e);
-                last_error = Some(e.to_string());
+                endpoint_errors.push(format!("{}: {}", endpoint, e));
             }
         }
     }
 
-    Err(ChainError::Connection(last_error.unwrap_or_else(|| {
-        "All People chain RPC endpoints failed".to_string()
-    })))
+    if endpoint_errors.is_empty() {
+        Err(ChainError::Connection(
+            "All People chain RPC endpoints failed".to_string(),
+        ))
+    } else {
+        Err(ChainError::Connection(format!(
+            "All People chain RPC endpoints failed: {}",
+            endpoint_errors.join("; ")
+        )))
+    }
 }

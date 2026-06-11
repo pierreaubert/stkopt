@@ -33,4 +33,4 @@ pub use config::{
     NetworkConfig, SavedAccount, ThemeConfig, ValidatorCache,
 };
 #[cfg(feature = "persistence")]
-pub use db::{CachedAccountStatus, CachedChainMetadata, DbError, StakingDb};
+pub use db::{CachedAccountStatus, CachedChainMetadata, StakingDb};

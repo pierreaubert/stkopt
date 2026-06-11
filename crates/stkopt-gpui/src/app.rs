@@ -13,7 +13,7 @@ use crate::views::{
     PoolsSection, SettingsSection, ValidatorsSection,
 };
 
-const LOG_PANE_DEFAULT_HEIGHT: f32 = 220.0;
+const LOG_PANE_DEFAULT_HEIGHT: f32 = 180.0;
 const LOG_PANE_MIN_HEIGHT: f32 = 120.0;
 const LOG_PANE_MIN_APP_HEIGHT: f32 = 220.0;
 
@@ -178,6 +178,10 @@ pub struct StkoptApp {
     pub history_loading: bool,
     /// Available nomination pools
     pub pools: Vec<PoolInfo>,
+    /// Whether pools are currently loading
+    pub pools_loading: bool,
+    /// Whether connection/sync operations are in progress
+    pub operations_loading: bool,
     /// Whether settings panel is visible
     pub show_settings: bool,
     /// Settings: theme preference
@@ -212,6 +216,8 @@ pub struct StkoptApp {
     pub log_buffer: crate::log::LogBuffer,
     /// Whether log window is visible
     pub show_logs: bool,
+    /// Minimum log level to display in the log pane.
+    pub log_level_filter: crate::log::LogLevel,
     /// Current bottom log pane height in pixels.
     pub log_pane_height: f32,
     /// Whether the bottom log pane divider is currently being dragged.
@@ -460,6 +466,7 @@ pub enum Network {
     Polkadot,
     Kusama,
     Westend,
+    Paseo,
 }
 
 impl Network {
@@ -468,6 +475,7 @@ impl Network {
             Network::Polkadot => "Polkadot",
             Network::Kusama => "Kusama",
             Network::Westend => "Westend",
+            Network::Paseo => "Paseo",
         }
     }
 
@@ -476,6 +484,7 @@ impl Network {
             Network::Polkadot => "DOT",
             Network::Kusama => "KSM",
             Network::Westend => "WND",
+            Network::Paseo => "PAS",
         }
     }
 
@@ -484,6 +493,7 @@ impl Network {
             Network::Polkadot => 10,
             Network::Kusama => 12,
             Network::Westend => 12,
+            Network::Paseo => 10,
         }
     }
 
@@ -493,6 +503,7 @@ impl Network {
             Network::Polkadot => stkopt_core::Network::Polkadot,
             Network::Kusama => stkopt_core::Network::Kusama,
             Network::Westend => stkopt_core::Network::Westend,
+            Network::Paseo => stkopt_core::Network::Paseo,
         }
     }
 }
@@ -561,7 +572,7 @@ impl StkoptApp {
             crate::persistence::NetworkConfig::Polkadot => Network::Polkadot,
             crate::persistence::NetworkConfig::Kusama => Network::Kusama,
             crate::persistence::NetworkConfig::Westend => Network::Westend,
-            crate::persistence::NetworkConfig::Paseo => Network::Westend, // Paseo not yet supported in GPUI
+            crate::persistence::NetworkConfig::Paseo => Network::Paseo,
             crate::persistence::NetworkConfig::Custom => Network::Polkadot,
         };
 
@@ -632,6 +643,8 @@ impl StkoptApp {
             staking_history: Vec::new(),
             history_loading: false,
             pools: Vec::new(),
+            pools_loading: false,
+            operations_loading: false,
             show_settings: false,
             settings_theme: config.theme,
             settings_network: config.network,
@@ -649,6 +662,7 @@ impl StkoptApp {
             db,
             log_buffer,
             show_logs: true,
+            log_level_filter: crate::log::LogLevel::Trace,
             log_pane_height: LOG_PANE_DEFAULT_HEIGHT,
             log_pane_dragging: false,
             log_pane_drag_start_y: 0.0,
@@ -769,10 +783,17 @@ impl StkoptApp {
                 self.connection_status = match status {
                     stkopt_core::ConnectionStatus::Disconnected => ConnectionStatus::Disconnected,
                     stkopt_core::ConnectionStatus::Connecting => ConnectionStatus::Connecting,
-                    stkopt_core::ConnectionStatus::Connected => ConnectionStatus::Connected,
+                    stkopt_core::ConnectionStatus::Connected => {
+                        self.operations_loading = false;
+                        if self.watched_account.is_none() {
+                            self.history_loading = false;
+                        }
+                        ConnectionStatus::Connected
+                    }
                     stkopt_core::ConnectionStatus::Syncing { .. } => ConnectionStatus::Connecting,
                     stkopt_core::ConnectionStatus::Error(e) => {
                         self.connection_error = Some(e);
+                        self.operations_loading = false;
                         ConnectionStatus::Disconnected
                     }
                 };
@@ -784,6 +805,7 @@ impl StkoptApp {
             }
             ChainUpdate::PoolsLoaded(pools) => {
                 self.pools = pools;
+                self.pools_loading = false;
                 tracing::info!("Loaded {} pools from chain", self.pools.len());
             }
             ChainUpdate::AccountLoaded(account_data) => {
@@ -810,6 +832,7 @@ impl StkoptApp {
             }
             ChainUpdate::HistoryLoaded(history) => {
                 self.staking_history = history;
+                self.history_loading = false;
             }
             ChainUpdate::QrPayloadGenerated(payload) => {
                 // Store the generated QR payload for display in QR modal
@@ -843,6 +866,10 @@ impl StkoptApp {
             ChainUpdate::Error(e) => {
                 tracing::error!("Chain error: {}", e);
                 self.connection_error = Some(e);
+                self.operations_loading = false;
+                self.validators_loading = false;
+                self.pools_loading = false;
+                self.history_loading = false;
             }
         }
         cx.notify();
@@ -889,7 +916,10 @@ impl StkoptApp {
                 let use_light_client = mode.uses_light_client();
 
                 self.connection_status = ConnectionStatus::Connecting;
+                self.operations_loading = true;
                 self.validators_loading = true;
+                self.pools_loading = true;
+                self.history_loading = false;
                 self.validators.clear();
                 self.pools.clear();
 
@@ -902,7 +932,10 @@ impl StkoptApp {
                 .detach();
             } else {
                 self.connection_status = ConnectionStatus::Disconnected;
+                self.operations_loading = false;
                 self.validators_loading = false;
+                self.pools_loading = false;
+                self.history_loading = false;
                 self.connection_error = Some("Connection worker is not available".to_string());
             }
         }
@@ -914,6 +947,11 @@ impl StkoptApp {
         self.show_logs = visible;
         self.log_pane_dragging = false;
         self.log_pane_height = clamp_log_pane_height(self.log_pane_height, self.viewport_height);
+        cx.notify();
+    }
+
+    pub fn set_log_level_filter(&mut self, level: crate::log::LogLevel, cx: &mut Context<Self>) {
+        self.log_level_filter = level;
         cx.notify();
     }
 
@@ -1534,10 +1572,11 @@ impl StkoptApp {
     /// Wake GPUI periodically while the camera reader is active.
     fn schedule_camera_poll(&self, cx: &mut Context<Self>) {
         let mut async_cx = cx.to_async();
+        let executor = async_cx.background_executor().clone();
         cx.spawn(
             move |this: gpui::WeakEntity<Self>, _cx: &mut gpui::AsyncApp| async move {
                 loop {
-                    smol::Timer::after(Duration::from_millis(80)).await;
+                    executor.timer(Duration::from_millis(80)).await;
 
                     let keep_polling =
                         match this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
@@ -1579,7 +1618,8 @@ impl StkoptApp {
             &payload.unsigned_payload,
             &payload.signer,
             &decoded_sig,
-        );
+        )
+        .map_err(|e| format!("Failed to build signed transaction: {}", e))?;
 
         tracing::info!(
             "Signed extrinsic built: 0x{} ({} bytes)",
@@ -1746,13 +1786,13 @@ impl StkoptApp {
             .id("sidebar-root")
             .flex()
             .flex_col()
-            .w(px(220.0))
-            .min_w(px(220.0))
+            .w(px(200.0))
+            .min_w(px(200.0))
             .h_full()
             .bg(theme.surface)
             .border_r_1()
             .border_color(theme.border)
-            .py_4()
+            .py_3()
             .on_mouse_down(MouseButton::Left, |_event, _window, _cx| {
                 tracing::info!("[SIDEBAR] Root clicked!");
             });
@@ -1760,22 +1800,22 @@ impl StkoptApp {
         // App title and network selector
         nav = nav.child(
             div()
-                .px_4()
-                .pb_4()
-                .mb_2()
+                .px_3()
+                .pb_3()
+                .mb_1()
                 .border_b_1()
                 .border_color(theme.border)
                 .child(
                     div()
                         .flex()
                         .items_center()
-                        .gap_2()
-                        .child(Text::new("⚡").size(TextSize::Lg))
+                        .gap_1()
+                        .child(Text::new("⚡").size(TextSize::Xl))
                         .child(Heading::h3("Staking Optimizer").into_any_element()),
                 )
                 .child(
                     div()
-                        .mt_2()
+                        .mt_1()
                         .flex()
                         .gap_1()
                         .child(network_pill(
@@ -1798,6 +1838,13 @@ impl StkoptApp {
                             self.network,
                             &theme,
                             entity.clone(),
+                        ))
+                        .child(network_pill(
+                            "PAS",
+                            Network::Paseo,
+                            self.network,
+                            &theme,
+                            entity.clone(),
                         )),
                 ),
         );
@@ -1812,10 +1859,10 @@ impl StkoptApp {
                 .id(SharedString::from(format!("nav-{:?}", section)))
                 .flex()
                 .items_center()
-                .gap_3()
-                .px_4()
-                .py_2()
-                .mx_2()
+                .gap_2()
+                .px_3()
+                .py_1()
+                .mx_1()
                 .rounded_md()
                 .cursor_pointer()
                 .text_sm();
@@ -1849,13 +1896,13 @@ impl StkoptApp {
         nav = nav.child(
             div()
                 .mt_auto()
-                .px_4()
-                .pt_4()
+                .px_3()
+                .pt_3()
                 .border_t_1()
                 .border_color(theme.border)
                 .flex()
                 .flex_col()
-                .gap_3()
+                .gap_2()
                 .child(self.render_connection_controls(cx))
                 .child(self.render_connection_status(cx)),
         );
@@ -1889,38 +1936,81 @@ impl StkoptApp {
     fn render_connection_status(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
 
-        let is_loading = match self.connection_status {
-            ConnectionStatus::Connecting => true,
-            ConnectionStatus::Connected => {
-                self.validators_loading || self.history_loading || self.validators.is_empty()
-            }
-            ConnectionStatus::Disconnected => false,
-        };
+        let all_done = self.connection_status == ConnectionStatus::Connected
+            && !self.operations_loading
+            && !self.validators_loading
+            && !self.pools_loading
+            && !self.history_loading;
 
         let (status_text, status_color) = match self.connection_status {
             ConnectionStatus::Disconnected => ("Disconnected", theme.error),
             ConnectionStatus::Connecting => ("Connecting...", theme.warning),
             ConnectionStatus::Connected => {
-                if is_loading {
-                    ("Loading data...", theme.warning)
-                } else {
+                if all_done {
                     ("Connected", theme.success)
+                } else {
+                    ("Loading data...", theme.warning)
                 }
             }
         };
 
-        let mut row = div()
+        let bars = [
+            (
+                "Operations",
+                !self.operations_loading && self.connection_status == ConnectionStatus::Connected,
+            ),
+            (
+                "Validators",
+                !self.validators_loading && self.connection_status == ConnectionStatus::Connected,
+            ),
+            (
+                "Pools",
+                !self.pools_loading && self.connection_status == ConnectionStatus::Connected,
+            ),
+            (
+                "History",
+                !self.history_loading
+                    && (self.watched_account.is_none()
+                        || self.connection_status == ConnectionStatus::Connected),
+            ),
+        ];
+
+        div()
             .flex()
-            .items_center()
-            .gap_2()
-            .child(div().w(px(8.0)).h(px(8.0)).rounded_full().bg(status_color))
-            .child(Text::new(status_text).size(TextSize::Sm));
-
-        if is_loading {
-            row = row.child(LoadingDots::new().size(SpinnerSize::Xs));
-        }
-
-        row
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(div().w(px(6.0)).h(px(6.0)).rounded_full().bg(status_color))
+                    .child(Text::new(status_text).size(TextSize::Xs)),
+            )
+            .children(bars.into_iter().map(|(label, done)| {
+                let fill_color = if done { theme.success } else { theme.border };
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        Text::new(label)
+                            .size(TextSize::Xs)
+                            .color(theme.text_secondary),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .h(px(4.0))
+                            .rounded_full()
+                            .bg(theme.border)
+                            .child(div().h_full().rounded_full().bg(fill_color).w(if done {
+                                px(100.0)
+                            } else {
+                                px(0.0)
+                            })),
+                    )
+            }))
     }
 
     fn render_content(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1990,7 +2080,12 @@ impl StkoptApp {
                     .h(px(self.log_pane_height))
                     .min_h(px(LOG_PANE_MIN_HEIGHT))
                     .overflow_hidden()
-                    .child(LogsView::render(&self.log_buffer, cx, self.entity.clone())),
+                    .child(LogsView::render(
+                        &self.log_buffer,
+                        self.log_level_filter,
+                        cx,
+                        self.entity.clone(),
+                    )),
             );
         }
 
@@ -2183,7 +2278,7 @@ fn network_pill(
 
     div()
         .id(SharedString::from(format!("network-{:?}", network)))
-        .px_2()
+        .px_1()
         .py_1()
         .rounded_md()
         .cursor_pointer()
@@ -2213,6 +2308,10 @@ fn network_pill(
                     this.validators.clear();
                     this.pools.clear();
                     this.staking_history.clear();
+                    this.operations_loading = false;
+                    this.validators_loading = false;
+                    this.pools_loading = false;
+                    this.history_loading = false;
                     cx.notify();
                 }
             });
@@ -2241,7 +2340,7 @@ fn mode_pill(
 
     div()
         .id(SharedString::from(format!("mode-{:?}", mode)))
-        .px_2()
+        .px_1()
         .py_1()
         .rounded_md()
         .cursor_pointer()

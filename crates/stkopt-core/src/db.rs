@@ -47,6 +47,13 @@ fn read_u128(row: &rusqlite::Row<'_>, index: usize) -> Result<u128> {
     }
 }
 
+fn read_option_u128(row: &rusqlite::Row<'_>, index: usize) -> Result<Option<u128>> {
+    match row.get_ref(index)? {
+        ValueRef::Null => Ok(None),
+        _ => read_u128(row, index).map(Some),
+    }
+}
+
 /// Cached chain metadata from the blockchain.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedChainMetadata {
@@ -87,17 +94,6 @@ pub struct CachedAccountStatus {
     pub pool_points: Option<u128>,
 }
 
-/// Database error type.
-#[derive(Debug, thiserror::Error)]
-pub enum DbError {
-    /// SQLite error.
-    #[error("SQLite error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
-    /// Other database error.
-    #[error("{0}")]
-    Other(String),
-}
-
 /// Unified database wrapper for staking data storage.
 ///
 /// This struct provides a single interface for both TUI and GPUI frontends.
@@ -116,7 +112,7 @@ impl StakingDb {
     /// Open or create the database at the given path.
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)?;
-        let db = Self { conn };
+        let mut db = Self { conn };
         db.init_schema()?;
         Ok(db)
     }
@@ -124,13 +120,13 @@ impl StakingDb {
     /// Open an in-memory database (for testing).
     pub fn open_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
-        let db = Self { conn };
+        let mut db = Self { conn };
         db.init_schema()?;
         Ok(db)
     }
 
     /// Initialize the database schema.
-    fn init_schema(&self) -> Result<()> {
+    fn init_schema(&mut self) -> Result<()> {
         self.conn.execute_batch(
             r#"
             -- Staking history table (date is optional for GPUI compatibility)
@@ -140,8 +136,8 @@ impl StakingDb {
                 address TEXT NOT NULL,
                 era INTEGER NOT NULL,
                 date TEXT,
-                reward INTEGER NOT NULL,
-                bonded INTEGER NOT NULL,
+                reward TEXT NOT NULL,
+                bonded TEXT NOT NULL,
                 apy REAL NOT NULL,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(network, address, era)
@@ -191,7 +187,7 @@ impl StakingDb {
                 name TEXT NOT NULL,
                 state TEXT NOT NULL,
                 member_count INTEGER NOT NULL,
-                total_bonded INTEGER NOT NULL,
+                total_bonded TEXT NOT NULL,
                 commission REAL,
                 apy REAL,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -202,13 +198,13 @@ impl StakingDb {
             CREATE TABLE IF NOT EXISTS cached_account_status (
                 network TEXT NOT NULL,
                 address TEXT NOT NULL,
-                free_balance INTEGER NOT NULL DEFAULT 0,
-                reserved_balance INTEGER NOT NULL DEFAULT 0,
-                frozen_balance INTEGER NOT NULL DEFAULT 0,
-                staked_amount INTEGER NOT NULL DEFAULT 0,
+                free_balance TEXT NOT NULL DEFAULT '0',
+                reserved_balance TEXT NOT NULL DEFAULT '0',
+                frozen_balance TEXT NOT NULL DEFAULT '0',
+                staked_amount TEXT NOT NULL DEFAULT '0',
                 nominations_json TEXT,
                 pool_id INTEGER,
-                pool_points INTEGER,
+                pool_points TEXT,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (network, address)
             );
@@ -228,8 +224,35 @@ impl StakingDb {
             );
             "#,
         )?;
+
+        let user_version: i32 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))?;
+
+        // Clean up any orphaned tables from failed previous migrations
+        self.conn.execute_batch(
+            r#"
+            DROP TABLE IF EXISTS cached_pools_old;
+            DROP TABLE IF EXISTS cached_validators_old;
+            DROP TABLE IF EXISTS staking_history_old;
+            DROP TABLE IF EXISTS cached_account_status_old;
+            "#,
+        )?;
+
+        // Always validate critical schemas regardless of user_version,
+        // to handle DBs created by intermediate code versions.
+        self.migrate_cached_pools_total_bonded_to_text()?;
+
+        if user_version >= 2 {
+            return Ok(());
+        }
+
         self.migrate_cached_validator_stakes_to_text()?;
         self.purge_invalid_cached_validator_stakes()?;
+        self.migrate_staking_history_balances_to_text()?;
+        self.migrate_cached_account_status_balances_to_text()?;
+
+        self.conn.execute_batch("PRAGMA user_version = 2;")?;
         Ok(())
     }
 
@@ -341,6 +364,214 @@ impl StakingDb {
         Ok(())
     }
 
+    fn migrate_staking_history_balances_to_text(&self) -> Result<()> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(staking_history)")?;
+        let columns = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        })?;
+
+        let mut reward_type = None;
+        let mut bonded_type = None;
+        for column in columns {
+            let (name, column_type) = column?;
+            match name.as_str() {
+                "reward" => reward_type = Some(column_type),
+                "bonded" => bonded_type = Some(column_type),
+                _ => {}
+            }
+        }
+
+        if reward_type.as_deref() == Some("TEXT") && bonded_type.as_deref() == Some("TEXT") {
+            return Ok(());
+        }
+
+        let result = self.conn.execute_batch(
+            r#"
+            BEGIN IMMEDIATE;
+
+            DROP INDEX IF EXISTS idx_staking_history_lookup;
+            DROP INDEX IF EXISTS idx_staking_history_era;
+
+            ALTER TABLE staking_history RENAME TO staking_history_old;
+
+            CREATE TABLE staking_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                network TEXT NOT NULL,
+                address TEXT NOT NULL,
+                era INTEGER NOT NULL,
+                date TEXT,
+                reward TEXT NOT NULL,
+                bonded TEXT NOT NULL,
+                apy REAL NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(network, address, era)
+            );
+
+            INSERT INTO staking_history
+                (id, network, address, era, date, reward, bonded, apy, created_at)
+            SELECT id, network, address, era, date, CAST(reward AS TEXT), CAST(bonded AS TEXT), apy, created_at
+            FROM staking_history_old;
+
+            DROP TABLE staking_history_old;
+
+            CREATE INDEX IF NOT EXISTS idx_staking_history_lookup
+                ON staking_history(network, address, era);
+            CREATE INDEX IF NOT EXISTS idx_staking_history_era
+                ON staking_history(network, address, era DESC);
+
+            COMMIT;
+            "#,
+        );
+
+        if let Err(err) = result {
+            let _ = self.conn.execute_batch("ROLLBACK;");
+            return Err(err);
+        }
+
+        Ok(())
+    }
+
+    fn migrate_cached_pools_total_bonded_to_text(&mut self) -> Result<()> {
+        let total_bonded_type = {
+            let mut stmt = self.conn.prepare("PRAGMA table_info(cached_pools)")?;
+            let columns = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            })?;
+
+            let mut t = None;
+            for column in columns {
+                let (name, column_type) = column?;
+                if name == "total_bonded" {
+                    t = Some(column_type);
+                }
+            }
+            t
+        };
+
+        if total_bonded_type.as_deref() == Some("TEXT") {
+            return Ok(());
+        }
+
+        // Case 1: total_bonded doesn't exist at all in old schema — just add it
+        if total_bonded_type.is_none() {
+            return self.conn.execute_batch(
+                r#"
+                ALTER TABLE cached_pools ADD COLUMN total_bonded TEXT NOT NULL DEFAULT '0';
+                "#,
+            );
+        }
+
+        // Case 2: total_bonded exists but is not TEXT — migrate via recreate
+        let tx = self.conn.transaction()?;
+        tx.execute("ALTER TABLE cached_pools RENAME TO cached_pools_old", [])?;
+        tx.execute_batch(
+            r#"
+            CREATE TABLE cached_pools (
+                network TEXT NOT NULL,
+                id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                state TEXT NOT NULL,
+                member_count INTEGER NOT NULL,
+                total_bonded TEXT NOT NULL,
+                commission REAL,
+                apy REAL,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (network, id)
+            );
+            "#,
+        )?;
+        let rows_inserted = tx.execute(
+            r#"
+            INSERT INTO cached_pools
+                (network, id, name, state, member_count, total_bonded, commission, apy, updated_at)
+            SELECT network, id, name, state, member_count, CAST(total_bonded AS TEXT), commission, apy, updated_at
+            FROM cached_pools_old
+            "#,
+            [],
+        )?;
+        eprintln!("Migration inserted {} rows", rows_inserted);
+        tx.execute("DROP TABLE cached_pools_old", [])?;
+        tx.commit()?;
+
+        Ok(())
+    }
+
+    fn migrate_cached_account_status_balances_to_text(&self) -> Result<()> {
+        let mut stmt = self
+            .conn
+            .prepare("PRAGMA table_info(cached_account_status)")?;
+        let columns = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        })?;
+
+        let mut free_balance_type = None;
+        let mut reserved_balance_type = None;
+        let mut frozen_balance_type = None;
+        let mut staked_amount_type = None;
+        let mut pool_points_type = None;
+        for column in columns {
+            let (name, column_type) = column?;
+            match name.as_str() {
+                "free_balance" => free_balance_type = Some(column_type),
+                "reserved_balance" => reserved_balance_type = Some(column_type),
+                "frozen_balance" => frozen_balance_type = Some(column_type),
+                "staked_amount" => staked_amount_type = Some(column_type),
+                "pool_points" => pool_points_type = Some(column_type),
+                _ => {}
+            }
+        }
+
+        if free_balance_type.as_deref() == Some("TEXT")
+            && reserved_balance_type.as_deref() == Some("TEXT")
+            && frozen_balance_type.as_deref() == Some("TEXT")
+            && staked_amount_type.as_deref() == Some("TEXT")
+            && pool_points_type.as_deref() == Some("TEXT")
+        {
+            return Ok(());
+        }
+
+        let result = self.conn.execute_batch(
+            r#"
+            BEGIN IMMEDIATE;
+
+            ALTER TABLE cached_account_status RENAME TO cached_account_status_old;
+
+            CREATE TABLE cached_account_status (
+                network TEXT NOT NULL,
+                address TEXT NOT NULL,
+                free_balance TEXT NOT NULL DEFAULT '0',
+                reserved_balance TEXT NOT NULL DEFAULT '0',
+                frozen_balance TEXT NOT NULL DEFAULT '0',
+                staked_amount TEXT NOT NULL DEFAULT '0',
+                nominations_json TEXT,
+                pool_id INTEGER,
+                pool_points TEXT,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (network, address)
+            );
+
+            INSERT INTO cached_account_status
+                (network, address, free_balance, reserved_balance, frozen_balance,
+                 staked_amount, nominations_json, pool_id, pool_points, updated_at)
+            SELECT network, address, CAST(free_balance AS TEXT), CAST(reserved_balance AS TEXT),
+                   CAST(frozen_balance AS TEXT), CAST(staked_amount AS TEXT),
+                   nominations_json, pool_id, CAST(pool_points AS TEXT), updated_at
+            FROM cached_account_status_old;
+
+            DROP TABLE cached_account_status_old;
+
+            COMMIT;
+            "#,
+        );
+
+        if let Err(err) = result {
+            let _ = self.conn.execute_batch("ROLLBACK;");
+            return Err(err);
+        }
+
+        Ok(())
+    }
+
     // ==================== Staking History ====================
 
     /// Store a single staking history point.
@@ -361,8 +592,8 @@ impl StakingDb {
                 address,
                 point.era,
                 point.date,
-                point.reward as i64,
-                point.bonded as i64,
+                point.reward.to_string(),
+                point.bonded.to_string(),
                 point.apy,
             ],
         )?;
@@ -393,8 +624,8 @@ impl StakingDb {
                     address,
                     point.era,
                     &point.date,
-                    point.reward as i64,
-                    point.bonded as i64,
+                    point.reward.to_string(),
+                    point.bonded.to_string(),
                     point.apy,
                 ])?;
             }
@@ -410,34 +641,23 @@ impl StakingDb {
         address: &str,
         limit: Option<u32>,
     ) -> Result<Vec<StakingHistoryPoint>> {
-        let mut stmt = if let Some(limit) = limit {
-            self.conn.prepare(&format!(
-                r#"
-                SELECT era, date, reward, bonded, apy
-                FROM staking_history
-                WHERE network = ?1 AND address = ?2
-                ORDER BY era DESC
-                LIMIT {}
-                "#,
-                limit
-            ))?
-        } else {
-            self.conn.prepare(
-                r#"
-                SELECT era, date, reward, bonded, apy
-                FROM staking_history
-                WHERE network = ?1 AND address = ?2
-                ORDER BY era DESC
-                "#,
-            )?
-        };
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT era, date, reward, bonded, apy
+            FROM staking_history
+            WHERE network = ?1 AND address = ?2
+            ORDER BY era ASC
+            LIMIT ?3
+            "#,
+        )?;
 
-        let rows = stmt.query_map(params![network.to_string(), address], |row| {
+        let limit_val = limit.unwrap_or(u32::MAX);
+        let rows = stmt.query_map(params![network.to_string(), address, limit_val], |row| {
             Ok(StakingHistoryPoint {
                 era: row.get(0)?,
                 date: row.get(1)?,
-                reward: row.get::<_, i64>(2)? as u128,
-                bonded: row.get::<_, i64>(3)? as u128,
+                reward: read_u128(row, 2)?,
+                bonded: read_u128(row, 3)?,
                 apy: row.get(4)?,
             })
         })?;
@@ -446,8 +666,6 @@ impl StakingDb {
         for row in rows {
             points.push(row?);
         }
-        // Reverse to get ascending order (oldest first)
-        points.reverse();
         Ok(points)
     }
 
@@ -741,7 +959,13 @@ impl StakingDb {
                 "Open" => PoolState::Open,
                 "Blocked" => PoolState::Blocked,
                 "Destroying" => PoolState::Destroying,
-                _ => PoolState::Destroying, // Fallback, should not happen
+                _ => {
+                    return Err(rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Text,
+                        format!("unknown pool state: {}", state_str).into(),
+                    ));
+                }
             };
 
             Ok(DisplayPool {
@@ -749,7 +973,7 @@ impl StakingDb {
                 name: row.get(1)?,
                 state,
                 member_count: row.get(3)?,
-                total_bonded: row.get::<_, i64>(4)? as u128,
+                total_bonded: read_u128(row, 4)?,
                 commission: row.get(5)?,
                 apy: row.get(6)?,
             })
@@ -768,10 +992,34 @@ impl StakingDb {
         let mut count = 0;
         {
             // Clear old pools for this network
-            tx.execute(
+            if let Err(e) = tx.execute(
                 "DELETE FROM cached_pools WHERE network = ?1",
                 params![network.to_string()],
-            )?;
+            ) {
+                // If the table doesn't exist, create it and continue
+                if e.to_string().contains("no such table")
+                    || e.to_string().contains("SQL error or missing database")
+                {
+                    tx.execute_batch(
+                        r#"
+                        CREATE TABLE IF NOT EXISTS cached_pools (
+                            network TEXT NOT NULL,
+                            id INTEGER NOT NULL,
+                            name TEXT NOT NULL,
+                            state TEXT NOT NULL,
+                            member_count INTEGER NOT NULL,
+                            total_bonded TEXT NOT NULL,
+                            commission REAL,
+                            apy REAL,
+                            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                            PRIMARY KEY (network, id)
+                        );
+                        "#,
+                    )?;
+                } else {
+                    return Err(e);
+                }
+            }
 
             let mut stmt = tx.prepare(
                 r#"
@@ -795,7 +1043,7 @@ impl StakingDb {
                     &p.name,
                     state_str,
                     p.member_count,
-                    p.total_bonded as i64,
+                    p.total_bonded.to_string(),
                     p.commission,
                     p.apy,
                 ])?;
@@ -836,8 +1084,8 @@ impl StakingDb {
                 ss58_prefix: row.get(3)?,
                 token_symbol: row.get(4)?,
                 token_decimals: row.get(5)?,
-                era_duration_ms: row.get(6)?,
-                current_era: row.get(7)?,
+                era_duration_ms: row.get::<_, i64>(6)? as u64,
+                current_era: row.get::<_, i64>(7)? as u32,
             })
         });
 
@@ -865,8 +1113,8 @@ impl StakingDb {
                 meta.ss58_prefix,
                 &meta.token_symbol,
                 meta.token_decimals,
-                meta.era_duration_ms,
-                meta.current_era,
+                meta.era_duration_ms as i64,
+                meta.current_era as i64,
             ],
         )?;
         Ok(())
@@ -891,13 +1139,13 @@ impl StakingDb {
 
         let result = stmt.query_row(params![network.to_string(), address], |row| {
             Ok(CachedAccountStatus {
-                free_balance: row.get::<_, i64>(0)? as u128,
-                reserved_balance: row.get::<_, i64>(1)? as u128,
-                frozen_balance: row.get::<_, i64>(2)? as u128,
-                staked_amount: row.get::<_, i64>(3)? as u128,
+                free_balance: read_u128(row, 0)?,
+                reserved_balance: read_u128(row, 1)?,
+                frozen_balance: read_u128(row, 2)?,
+                staked_amount: read_u128(row, 3)?,
                 nominations_json: row.get(4)?,
                 pool_id: row.get(5)?,
-                pool_points: row.get::<_, Option<i64>>(6)?.map(|p| p as u128),
+                pool_points: read_option_u128(row, 6)?,
             })
         });
 
@@ -925,13 +1173,13 @@ impl StakingDb {
             params![
                 network.to_string(),
                 address,
-                status.free_balance as i64,
-                status.reserved_balance as i64,
-                status.frozen_balance as i64,
-                status.staked_amount as i64,
+                status.free_balance.to_string(),
+                status.reserved_balance.to_string(),
+                status.frozen_balance.to_string(),
+                status.staked_amount.to_string(),
                 &status.nominations_json,
                 status.pool_id,
-                status.pool_points.map(|p| p as i64),
+                status.pool_points.map(|p| p.to_string()),
             ],
         )?;
         Ok(())
@@ -946,16 +1194,6 @@ mod tests {
         StakingHistoryPoint {
             era,
             date: Some(format!("2025010{}", era % 10)),
-            reward: 1_000_000_000_000,
-            bonded: 100_000_000_000_000,
-            apy: 0.15,
-        }
-    }
-
-    fn make_test_point_without_date(era: u32) -> StakingHistoryPoint {
-        StakingHistoryPoint {
-            era,
-            date: None,
             reward: 1_000_000_000_000,
             bonded: 100_000_000_000_000,
             apy: 0.15,
@@ -1183,6 +1421,26 @@ mod tests {
         assert_eq!(history[0].apy, 0.16);
     }
 
+    #[test]
+    fn test_history_preserves_u128() {
+        let db = StakingDb::open_memory().unwrap();
+
+        let point = StakingHistoryPoint::new(
+            1500,
+            "20250101".to_string(),
+            i64::MAX as u128 + 42,
+            i64::MAX as u128 + 7,
+            0.15,
+        );
+        db.insert_history(Network::Polkadot, "addr1", &point)
+            .unwrap();
+
+        let history = db.get_history(Network::Polkadot, "addr1", None).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].reward, i64::MAX as u128 + 42);
+        assert_eq!(history[0].bonded, i64::MAX as u128 + 7);
+    }
+
     // ==================== Validator Identity Tests ====================
 
     #[test]
@@ -1341,7 +1599,7 @@ mod tests {
         )
         .unwrap();
 
-        let db = StakingDb { conn };
+        let mut db = StakingDb { conn };
         db.init_schema().unwrap();
 
         let cached = db.get_cached_validators(Network::Polkadot).unwrap();
@@ -1434,6 +1692,20 @@ mod tests {
         assert_eq!(cached[0].state, PoolState::Open);
         assert_eq!(cached[1].state, PoolState::Blocked);
         assert_eq!(cached[2].state, PoolState::Destroying);
+    }
+
+    #[test]
+    fn test_cached_pools_preserves_u128() {
+        let mut db = StakingDb::open_memory().unwrap();
+        let mut pool = make_test_pool(1, PoolState::Open);
+        pool.total_bonded = i64::MAX as u128 + 42;
+
+        db.set_cached_pools(Network::Polkadot, &[pool.clone()])
+            .unwrap();
+
+        let cached = db.get_cached_pools(Network::Polkadot).unwrap();
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[0].total_bonded, pool.total_bonded);
     }
 
     #[test]
@@ -1571,6 +1843,34 @@ mod tests {
         assert!(loaded.pool_points.is_none());
     }
 
+    #[test]
+    fn test_cached_account_status_preserves_u128() {
+        let db = StakingDb::open_memory().unwrap();
+
+        let status = CachedAccountStatus {
+            free_balance: i64::MAX as u128 + 1,
+            reserved_balance: i64::MAX as u128 + 2,
+            frozen_balance: i64::MAX as u128 + 3,
+            staked_amount: i64::MAX as u128 + 4,
+            nominations_json: None,
+            pool_id: Some(42),
+            pool_points: Some(i64::MAX as u128 + 5),
+        };
+
+        db.set_cached_account_status(Network::Polkadot, "addr1", &status)
+            .unwrap();
+
+        let loaded = db
+            .get_cached_account_status(Network::Polkadot, "addr1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.free_balance, status.free_balance);
+        assert_eq!(loaded.reserved_balance, status.reserved_balance);
+        assert_eq!(loaded.frozen_balance, status.frozen_balance);
+        assert_eq!(loaded.staked_amount, status.staked_amount);
+        assert_eq!(loaded.pool_points, status.pool_points);
+    }
+
     // ==================== Network Isolation Tests ====================
 
     #[test]
@@ -1656,5 +1956,104 @@ mod tests {
         assert_eq!(status.staked_amount, 0);
         assert!(status.nominations_json.is_none());
         assert!(status.pool_id.is_none());
+    }
+
+    /// Simulate a DB created with the old schema (total_bonded INTEGER)
+    /// and verify init_schema migrates it correctly.
+    #[test]
+    fn test_cached_pools_migration_from_integer() {
+        use rusqlite::Connection;
+
+        let conn = Connection::open_in_memory().unwrap();
+        // Create old schema
+        conn.execute_batch(
+            r#"
+            CREATE TABLE cached_pools (
+                network TEXT NOT NULL,
+                id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                state TEXT NOT NULL,
+                member_count INTEGER NOT NULL,
+                total_bonded INTEGER NOT NULL,
+                commission REAL,
+                apy REAL,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (network, id)
+            );
+            INSERT INTO cached_pools (network, id, name, state, member_count, total_bonded, commission, apy)
+            VALUES ('Polkadot', 1, 'Old Pool', 'Open', 100, 500000000000000, 0.1, 0.15);
+            "#,
+        )
+        .unwrap();
+
+        // Check table info before init_schema
+        {
+            let mut stmt = conn.prepare("PRAGMA table_info(cached_pools)").unwrap();
+            let cols: Vec<(String, String)> = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            eprintln!("Columns before init_schema: {:?}", cols);
+        }
+
+        let mut db = StakingDb { conn };
+        db.init_schema().unwrap();
+
+        // Check what we have after init_schema
+        let raw_count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM cached_pools", [], |r| r.get(0))
+            .unwrap();
+        eprintln!("Raw count after init_schema: {}", raw_count);
+        let cached_before = db.get_cached_pools(Network::Polkadot).unwrap();
+        eprintln!("Pools after init_schema: {}", cached_before.len());
+        for p in &cached_before {
+            eprintln!(
+                "  - id={}, name={}, total_bonded={}",
+                p.id, p.name, p.total_bonded
+            );
+        }
+
+        // Check table info after init_schema
+        {
+            let mut stmt = db.conn.prepare("PRAGMA table_info(cached_pools)").unwrap();
+            let cols: Vec<(String, String)> = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            eprintln!("Columns after init_schema: {:?}", cols);
+        }
+        // Check if old table still exists
+        let old_exists: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='cached_pools_old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        eprintln!("cached_pools_old exists: {}", old_exists);
+
+        // Should be able to insert with TEXT total_bonded after migration
+        let pools = vec![make_test_pool(2, PoolState::Blocked)];
+        db.set_cached_pools(Network::Polkadot, &pools).unwrap();
+
+        let cached = db.get_cached_pools(Network::Polkadot).unwrap();
+        eprintln!("Pools after set_cached_pools: {}", cached.len());
+        for p in &cached {
+            eprintln!(
+                "  - id={}, name={}, total_bonded={}",
+                p.id, p.name, p.total_bonded
+            );
+        }
+        // set_cached_pools deletes old pools for the network, so only new pools remain
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[0].id, 2);
     }
 }

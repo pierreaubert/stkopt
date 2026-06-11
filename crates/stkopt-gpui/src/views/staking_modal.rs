@@ -65,20 +65,20 @@ impl StakingModal {
             .flex()
             .items_center()
             .justify_between()
-            .p_4()
+            .p_3()
             .border_b_1()
             .border_color(theme.border)
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .child(Text::new(Self::operation_icon(operation)).size(TextSize::Lg))
+                    .gap_1()
+                    .child(Text::new(Self::operation_icon(operation)).size(TextSize::Xl))
                     .child(Heading::h2(operation.label()).into_any_element()),
             )
             .child(
                 Text::new("Press Esc to close")
-                    .size(TextSize::Sm)
+                    .size(TextSize::Xs)
                     .color(theme.text_secondary),
             )
     }
@@ -90,7 +90,7 @@ impl StakingModal {
         let symbol = app.token_symbol();
         let decimals = app.token_decimals();
 
-        let mut body = div().flex().flex_col().gap_4().p_4();
+        let mut body = div().flex().flex_col().gap_3().p_3();
 
         // Show balance info
         if let Some(ref info) = app.staking_info {
@@ -103,10 +103,10 @@ impl StakingModal {
                     .justify_between()
                     .child(
                         Text::new("Available Balance:")
-                            .size(TextSize::Sm)
+                            .size(TextSize::Xs)
                             .color(theme.text_secondary),
                     )
-                    .child(Text::new(available).size(TextSize::Sm)),
+                    .child(Text::new(available).size(TextSize::Xs)),
             );
 
             body = body.child(
@@ -115,10 +115,10 @@ impl StakingModal {
                     .justify_between()
                     .child(
                         Text::new("Currently Bonded:")
-                            .size(TextSize::Sm)
+                            .size(TextSize::Xs)
                             .color(theme.text_secondary),
                     )
-                    .child(Text::new(bonded).size(TextSize::Sm)),
+                    .child(Text::new(bonded).size(TextSize::Xs)),
             );
         }
 
@@ -128,17 +128,17 @@ impl StakingModal {
                 div()
                     .flex()
                     .flex_col()
-                    .gap_2()
+                    .gap_1()
                     .child(
                         Text::new("Amount")
-                            .size(TextSize::Sm)
+                            .size(TextSize::Xs)
                             .color(theme.text_secondary),
                     )
                     .child(
                         div()
                             .flex()
                             .items_center()
-                            .gap_2()
+                            .gap_1()
                             .child(
                                 Input::new("staking-amount-input")
                                     .placeholder("0.0")
@@ -155,7 +155,7 @@ impl StakingModal {
                                         }
                                     }),
                             )
-                            .child(Text::new(symbol).size(TextSize::Md)),
+                            .child(Text::new(symbol).size(TextSize::Xs)),
                     ),
             );
         }
@@ -167,10 +167,10 @@ impl StakingModal {
                 div()
                     .flex()
                     .flex_col()
-                    .gap_2()
+                    .gap_1()
                     .child(
                         Text::new("Reward Destination")
-                            .size(TextSize::Sm)
+                            .size(TextSize::Xs)
                             .color(theme.text_secondary),
                     )
                     .child(Self::render_payee_option(
@@ -227,12 +227,12 @@ impl StakingModal {
         // Operation description
         body = body.child(
             div()
-                .p_3()
+                .p_2()
                 .rounded_md()
                 .bg(theme.info_token().subtle)
                 .child(
                     Text::new(Self::operation_description(operation))
-                        .size(TextSize::Sm)
+                        .size(TextSize::Xs)
                         .color(theme.text_secondary),
                 ),
         );
@@ -244,9 +244,9 @@ impl StakingModal {
                 theme.warning_token().subtle
             };
             body = body.child(
-                div().p_3().rounded_md().bg(bg).child(
+                div().p_2().rounded_md().bg(bg).child(
                     Text::new(message.clone())
-                        .size(TextSize::Sm)
+                        .size(TextSize::Xs)
                         .color(theme.text_primary),
                 ),
             );
@@ -276,8 +276,8 @@ impl StakingModal {
             .id(SharedString::from(format!("payee-{}", label)))
             .flex()
             .items_center()
-            .gap_3()
-            .p_3()
+            .gap_2()
+            .p_2()
             .rounded_md()
             .border_1()
             .border_color(border)
@@ -311,7 +311,7 @@ impl StakingModal {
                     .gap_1()
                     .child(
                         Text::new(label)
-                            .size(TextSize::Sm)
+                            .size(TextSize::Xs)
                             .weight(TextWeight::Medium),
                     )
                     .child(
@@ -355,8 +355,8 @@ impl StakingModal {
             .flex()
             .items_center()
             .justify_end()
-            .gap_3()
-            .p_4()
+            .gap_2()
+            .p_3()
             .border_t_1()
             .border_color(theme.border)
             .child(

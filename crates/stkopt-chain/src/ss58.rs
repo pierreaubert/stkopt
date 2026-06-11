@@ -1,11 +1,13 @@
 //! SS58 address encoding utilities.
 
+use crate::error::ChainError;
 use subxt::utils::AccountId32;
 
 const SS58_PREFIX: &[u8] = b"SS58PRE";
 
 /// Encode an AccountId32 with a specific SS58 prefix.
-pub fn encode_ss58(account: &AccountId32, prefix: u16) -> String {
+#[allow(clippy::result_large_err)]
+pub fn encode_ss58(account: &AccountId32, prefix: u16) -> Result<String, ChainError> {
     let account_bytes: &[u8; 32] = account.as_ref();
 
     // Build the payload for checksum
@@ -21,8 +23,10 @@ pub fn encode_ss58(account: &AccountId32, prefix: u16) -> String {
         payload.push(first);
         payload.push(second);
     } else {
-        // Unsupported prefix, fall back to generic
-        payload.push(42);
+        return Err(ChainError::InvalidAddress(format!(
+            "SS58 prefix {} is not supported (must be < 16384)",
+            prefix
+        )));
     }
 
     // Add account bytes
@@ -40,7 +44,7 @@ pub fn encode_ss58(account: &AccountId32, prefix: u16) -> String {
     payload.push(hash[1]);
 
     // Base58 encode
-    bs58::encode(payload).into_string()
+    Ok(bs58::encode(payload).into_string())
 }
 
 #[cfg(test)]
@@ -55,7 +59,7 @@ mod tests {
         let account = AccountId32::from_str(addr).unwrap();
 
         // Re-encode with Polkadot prefix (0)
-        let encoded = encode_ss58(&account, 0);
+        let encoded = encode_ss58(&account, 0).unwrap();
         assert_eq!(encoded, addr);
     }
 
@@ -66,7 +70,7 @@ mod tests {
         let account = AccountId32::from_str(addr).unwrap();
 
         // Encode with Kusama prefix (2)
-        let encoded = encode_ss58(&account, 2);
+        let encoded = encode_ss58(&account, 2).unwrap();
         // Kusama Alice address
         assert_eq!(encoded, "HNZata7iMYWmk5RvZRTiAsSDhV8366zq2YGb3tLH5Upf74F");
     }
@@ -77,12 +81,20 @@ mod tests {
         let account = AccountId32::from_str(original).unwrap();
 
         // Encode with different prefixes and verify they all decode to same account
-        let polkadot = encode_ss58(&account, 0);
-        let kusama = encode_ss58(&account, 2);
-        let westend = encode_ss58(&account, 42);
+        let polkadot = encode_ss58(&account, 0).unwrap();
+        let kusama = encode_ss58(&account, 2).unwrap();
+        let westend = encode_ss58(&account, 42).unwrap();
 
         assert_eq!(AccountId32::from_str(&polkadot).unwrap(), account);
         assert_eq!(AccountId32::from_str(&kusama).unwrap(), account);
         assert_eq!(AccountId32::from_str(&westend).unwrap(), account);
+    }
+
+    #[test]
+    fn test_encode_ss58_large_prefix_rejected() {
+        let account =
+            AccountId32::from_str("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY").unwrap();
+        let result = encode_ss58(&account, 16384);
+        assert!(result.is_err());
     }
 }

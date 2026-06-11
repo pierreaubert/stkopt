@@ -6,7 +6,7 @@ use gpui_ui_kit::theme::ThemeExt;
 use gpui_ui_kit::*;
 
 use crate::actions::ValidatorSortColumn;
-use crate::app::StkoptApp;
+use crate::app::{ConnectionStatus, StkoptApp};
 use crate::validators::filter_validators;
 
 pub struct ValidatorsSection;
@@ -37,7 +37,7 @@ impl ValidatorsSection {
                     .child(
                         div()
                             .flex()
-                            .gap_3()
+                            .gap_2()
                             .child(
                                 Input::new("validator-search")
                                     .placeholder("Search validators...")
@@ -64,7 +64,7 @@ impl ValidatorsSection {
                                     },
                                 )
                                 .variant(ButtonVariant::Secondary)
-                                .size(ButtonSize::Sm)
+                                .size(ButtonSize::Xs)
                                 .on_click({
                                     let entity = entity.clone();
                                     move |_window, cx| {
@@ -81,8 +81,11 @@ impl ValidatorsSection {
                                     if is_loading { "Loading..." } else { "Refresh" },
                                 )
                                 .variant(ButtonVariant::Secondary)
-                                .size(ButtonSize::Sm)
-                                .disabled(is_loading)
+                                .size(ButtonSize::Xs)
+                                .disabled(
+                                    is_loading
+                                        || app.connection_status != ConnectionStatus::Connected,
+                                )
                                 .on_click({
                                     let entity = entity.clone();
                                     move |_window, cx| {
@@ -111,7 +114,7 @@ impl ValidatorsSection {
             .child(
                 div()
                     .flex()
-                    .gap_4()
+                    .gap_3()
                     .child(Badge::new(format!("{} validators", total)))
                     .child(if filtered_count != total {
                         Badge::new(format!("{} shown", filtered_count))
@@ -136,7 +139,7 @@ impl ValidatorsSection {
                             )
                             .variant(ButtonVariant::Primary)
                             .theme(crate::theme::button_theme_for_ui_theme(&theme))
-                            .size(ButtonSize::Sm)
+                            .size(ButtonSize::Xs)
                             .on_click(move |_window, cx| {
                                 entity.update(cx, |this, cx| {
                                     let targets: Vec<String> = this
@@ -175,16 +178,16 @@ impl ValidatorsSection {
                 .flex_col()
                 .items_center()
                 .justify_center()
-                .gap_2()
-                .child(Text::new("⏳").size(TextSize::Xl))
+                .gap_1()
+                .child(Text::new("⏳").size(TextSize::Lg))
                 .child(
                     Text::new("Loading validators...")
-                        .size(TextSize::Md)
+                        .size(TextSize::Xs)
                         .color(theme.text_secondary),
                 )
                 .child(
                     Text::new("This may take a moment with light client")
-                        .size(TextSize::Sm)
+                        .size(TextSize::Xs)
                         .color(theme.text_secondary),
                 )
                 .into_any_element();
@@ -197,15 +200,15 @@ impl ValidatorsSection {
                 .flex_col()
                 .items_center()
                 .justify_center()
-                .gap_2()
-                .child(Text::new("📋").size(TextSize::Xl))
+                .gap_1()
+                .child(Text::new("📋").size(TextSize::Lg))
                 .child(
                     Text::new(if app.validators.is_empty() {
                         "No validators loaded"
                     } else {
                         "No validators match your search"
                     })
-                    .size(TextSize::Md)
+                    .size(TextSize::Xs)
                     .color(theme.text_secondary),
                 )
                 .child(
@@ -214,7 +217,7 @@ impl ValidatorsSection {
                     } else {
                         "Try a different search term"
                     })
-                    .size(TextSize::Sm)
+                    .size(TextSize::Xs)
                     .color(theme.text_secondary),
                 )
                 .into_any_element();
@@ -227,8 +230,8 @@ impl ValidatorsSection {
             div()
                 .flex()
                 .items_center()
-                .px_4()
-                .py_3()
+                .px_3()
+                .py_2()
                 .bg(theme.surface)
                 .border_b_1()
                 .border_color(theme.border)
@@ -242,7 +245,7 @@ impl ValidatorsSection {
                 .child(
                     div().w(px(40.0)).child(
                         Text::new("#")
-                            .size(TextSize::Sm)
+                            .size(TextSize::Xs)
                             .weight(TextWeight::Semibold),
                     ),
                 )
@@ -382,8 +385,8 @@ impl ValidatorsSection {
                         .id(SharedString::from(format!("validator-row-{}", i)))
                         .flex()
                         .items_center()
-                        .px_4()
-                        .py_2()
+                        .px_3()
+                        .py_1()
                         .bg(row_bg)
                         .border_b_1()
                         .border_color(theme.border)
@@ -416,7 +419,7 @@ impl ValidatorsSection {
                         .child(
                             div().w(px(40.0)).child(
                                 Text::new(format!("{}", i + 1))
-                                    .size(TextSize::Sm)
+                                    .size(TextSize::Xs)
                                     .color(theme.text_secondary),
                             ),
                         )
@@ -425,7 +428,7 @@ impl ValidatorsSection {
                                 .flex_1()
                                 .flex()
                                 .flex_col()
-                                .child(Text::new(name).size(TextSize::Sm))
+                                .child(Text::new(name).size(TextSize::Xs))
                                 .child(
                                     Text::new(addr_short)
                                         .size(TextSize::Xs)
@@ -435,35 +438,35 @@ impl ValidatorsSection {
                         .child(
                             div()
                                 .w(px(120.0))
-                                .child(Text::new(stake_str).size(TextSize::Sm)),
+                                .child(Text::new(stake_str).size(TextSize::Xs)),
                         )
                         .child(
                             div()
                                 .w(px(110.0))
-                                .child(Text::new(own_stake_str).size(TextSize::Sm)),
+                                .child(Text::new(own_stake_str).size(TextSize::Xs)),
                         )
                         .child(div().w(px(60.0)).child(
-                            Text::new(validator.nominator_count.to_string()).size(TextSize::Sm),
+                            Text::new(validator.nominator_count.to_string()).size(TextSize::Xs),
                         ))
                         .child(
                             div()
                                 .w(px(100.0))
-                                .child(Text::new(commission_str).size(TextSize::Sm)),
+                                .child(Text::new(commission_str).size(TextSize::Xs)),
                         )
                         .child(
                             div()
                                 .w(px(80.0))
-                                .child(Text::new(apy_str).size(TextSize::Sm).color(apy_color)),
+                                .child(Text::new(apy_str).size(TextSize::Xs).color(apy_color)),
                         )
                         .child(
                             div()
                                 .w(px(70.0))
-                                .child(Text::new(points_str).size(TextSize::Sm)),
+                                .child(Text::new(points_str).size(TextSize::Xs)),
                         )
                         .child(
                             div().w(px(70.0)).child(
                                 Text::new(blocked_str)
-                                    .size(TextSize::Sm)
+                                    .size(TextSize::Xs)
                                     .color(blocked_color),
                             ),
                         ),
@@ -473,9 +476,9 @@ impl ValidatorsSection {
         // Show count if more validators exist
         if filtered.len() > 200 {
             list = list.child(
-                div().px_4().py_3().child(
+                div().px_3().py_2().child(
                     Text::new(format!("... and {} more validators", filtered.len() - 200))
-                        .size(TextSize::Sm)
+                        .size(TextSize::Xs)
                         .color(theme.text_secondary),
                 ),
             );
@@ -524,7 +527,7 @@ fn sortable_header(
         })
         .child(
             Text::new(format!("{}{}", label, indicator))
-                .size(TextSize::Sm)
+                .size(TextSize::Xs)
                 .weight(TextWeight::Semibold)
                 .color(if is_active {
                     theme.accent
@@ -573,7 +576,7 @@ fn sortable_header_fixed(
         })
         .child(
             Text::new(format!("{}{}", label, indicator))
-                .size(TextSize::Sm)
+                .size(TextSize::Xs)
                 .weight(TextWeight::Semibold)
                 .color(if is_active {
                     theme.accent
