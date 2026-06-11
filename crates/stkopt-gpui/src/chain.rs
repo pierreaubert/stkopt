@@ -6,7 +6,8 @@
 use std::collections::HashMap;
 use stkopt_chain::{
     ChainClient, ConnectionConfig, ConnectionMode as ChainConnectionMode, PeopleChainClient,
-    PoolState as ChainPoolState, RewardDestination, RpcEndpoints, UnsignedPayload, encode_for_qr,
+    PoolNominations, PoolState as ChainPoolState, RewardDestination, RpcEndpoints, UnsignedPayload,
+    encode_for_qr,
 };
 use stkopt_core::{ConnectionStatus, Network, get_era_apy};
 use subxt::utils::AccountId32;
@@ -55,6 +56,33 @@ async fn connect_ready_people_client(
 /// Check if an APY value is realistic (not corrupted data).
 fn is_realistic_apy(apy: f64) -> bool {
     apy <= MAX_REALISTIC_APY
+}
+
+fn validator_apy_map(validators: &[ValidatorInfo]) -> HashMap<String, f64> {
+    validators
+        .iter()
+        .filter_map(|validator| validator.apy.map(|apy| (validator.address.clone(), apy)))
+        .collect()
+}
+
+fn pool_nomination_apy(
+    nominations: &PoolNominations,
+    validator_apy_map: &HashMap<String, f64>,
+) -> Option<f64> {
+    let mut total_apy = 0.0;
+    let mut count = 0;
+    for target in &nominations.targets {
+        if let Some(&validator_apy) = validator_apy_map.get(&target.to_string()) {
+            total_apy += validator_apy;
+            count += 1;
+        }
+    }
+
+    if count > 0 {
+        Some(total_apy / count as f64)
+    } else {
+        None
+    }
 }
 
 /// Estimate user's reward for an era, capped to avoid unrealistic values.
@@ -2047,5 +2075,325 @@ mod tests {
             calculate_era_date(99, 100, reference_ms, 86_400_000),
             "20260530"
         );
+    }
+
+    // === is_realistic_apy ===
+
+    fn account(byte: u8) -> AccountId32 {
+        AccountId32::from([byte; 32])
+    }
+
+    #[test]
+    fn test_pool_nomination_apy_averages_known_targets() {
+        let known_a = account(1);
+        let known_b = account(2);
+        let missing = account(3);
+        let nominations = PoolNominations {
+            pool_id: 7,
+            stash: account(9),
+            targets: vec![known_a, missing, known_b],
+        };
+        let validator_apy_map =
+            HashMap::from([(known_a.to_string(), 0.12), (known_b.to_string(), 0.06)]);
+
+        assert_eq!(
+            pool_nomination_apy(&nominations, &validator_apy_map),
+            Some(0.09)
+        );
+    }
+
+    #[test]
+    fn test_pool_nomination_apy_is_none_without_known_targets() {
+        let nominations = PoolNominations {
+            pool_id: 7,
+            stash: account(9),
+            targets: vec![account(3)],
+        };
+
+        assert_eq!(pool_nomination_apy(&nominations, &HashMap::new()), None);
+    }
+
+    #[test]
+    fn test_is_realistic_apy_zero() {
+        assert!(is_realistic_apy(0.0));
+    }
+
+    #[test]
+    fn test_is_realistic_apy_positive_within_limit() {
+        assert!(is_realistic_apy(0.25));
+    }
+
+    #[test]
+    fn test_is_realistic_apy_at_exact_boundary() {
+        assert!(is_realistic_apy(0.50));
+    }
+
+    #[test]
+    fn test_is_realistic_apy_negative() {
+        assert!(is_realistic_apy(-0.1));
+    }
+
+    #[test]
+    fn test_is_realistic_apy_above_limit() {
+        assert!(!is_realistic_apy(0.51));
+    }
+
+    #[test]
+    fn test_is_realistic_apy_very_high() {
+        assert!(!is_realistic_apy(10.0));
+    }
+
+    // === validator_apy_map ===
+
+    #[test]
+    fn test_validator_apy_map_empty() {
+        let validators: Vec<ValidatorInfo> = vec![];
+        let map = validator_apy_map(&validators);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn test_validator_apy_map_skips_missing_apy() {
+        let validators = vec![ValidatorInfo {
+            address: "addr1".to_string(),
+            name: None,
+            commission: 0.1,
+            blocked: false,
+            total_stake: 1000,
+            own_stake: 100,
+            nominator_count: 5,
+            points: 100,
+            apy: None,
+        }];
+        let map = validator_apy_map(&validators);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn test_validator_apy_map_collects_correct_values() {
+        let validators = vec![
+            ValidatorInfo {
+                address: "addr1".to_string(),
+                name: None,
+                commission: 0.1,
+                blocked: false,
+                total_stake: 1000,
+                own_stake: 100,
+                nominator_count: 5,
+                points: 100,
+                apy: Some(0.12),
+            },
+            ValidatorInfo {
+                address: "addr2".to_string(),
+                name: None,
+                commission: 0.05,
+                blocked: false,
+                total_stake: 2000,
+                own_stake: 200,
+                nominator_count: 10,
+                points: 200,
+                apy: Some(0.08),
+            },
+        ];
+        let map = validator_apy_map(&validators);
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get("addr1"), Some(&0.12));
+        assert_eq!(map.get("addr2"), Some(&0.08));
+    }
+
+    // === estimate_user_reward ===
+
+    #[test]
+    fn test_estimate_user_reward_zero_user_bonded() {
+        assert_eq!(estimate_user_reward(1000, 0, 10000), 0);
+    }
+
+    #[test]
+    fn test_estimate_user_reward_zero_total_staked() {
+        assert_eq!(estimate_user_reward(1000, 500, 0), 0);
+    }
+
+    #[test]
+    fn test_estimate_user_reward_typical() {
+        // era_reward=1000, user=100, total=1000 => 100
+        assert_eq!(estimate_user_reward(1000, 100, 1000), 100);
+    }
+
+    #[test]
+    fn test_estimate_user_reward_capped() {
+        // user_bonded=10000, max_reasonable = 10000/200 = 50
+        // era_reward=10000, user=10000, total=1000 => estimated=100000, capped to 50
+        assert_eq!(estimate_user_reward(10000, 10000, 1000), 50);
+    }
+
+    #[test]
+    fn test_estimate_user_reward_not_capped_when_under_limit() {
+        // era_reward=50, user=1000, total=1000 => estimated=50, capped to 5
+        assert_eq!(estimate_user_reward(50, 1000, 1000), 5);
+        // era_reward=4, user=1000, total=1000 => estimated=4 (< 5)
+        assert_eq!(estimate_user_reward(4, 1000, 1000), 4);
+    }
+
+    #[test]
+    fn test_estimate_user_reward_max_reasonable_zero() {
+        // user_bonded=1, max_reasonable = 1/200 = 0 (integer division)
+        // estimated should be returned as-is because max_reasonable > 0 check fails
+        assert_eq!(estimate_user_reward(1000, 1, 1000), 1);
+    }
+
+    // === calculate_era_date ===
+
+    #[test]
+    fn test_calculate_era_date_future_era() {
+        let reference_ms = chrono::NaiveDate::from_ymd_opt(2026, 5, 31)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_millis() as u64;
+        // era > current_era, saturating_sub gives 0, same date
+        assert_eq!(
+            calculate_era_date(101, 100, reference_ms, 86_400_000),
+            "20260531"
+        );
+    }
+
+    #[test]
+    fn test_calculate_era_date_many_eras_ago() {
+        let reference_ms = chrono::NaiveDate::from_ymd_opt(2026, 5, 31)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_millis() as u64;
+        // 10 eras ago = 10 days earlier
+        assert_eq!(
+            calculate_era_date(90, 100, reference_ms, 86_400_000),
+            "20260521"
+        );
+    }
+
+    // === basic_validator_conversion ===
+
+    #[test]
+    fn test_basic_validator_conversion_empty() {
+        let validators: Vec<stkopt_chain::ValidatorInfo> = vec![];
+        let result = basic_validator_conversion(&validators);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_basic_validator_conversion_preserves_fields() {
+        let chain_validator = stkopt_chain::ValidatorInfo {
+            address: account(1),
+            preferences: stkopt_core::ValidatorPreferences {
+                commission: 0.15,
+                blocked: true,
+            },
+        };
+        let result = basic_validator_conversion(&[chain_validator]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].address, account(1).to_string());
+        assert_eq!(result[0].commission, 0.15);
+        assert!(result[0].blocked);
+        assert_eq!(result[0].total_stake, 0);
+        assert_eq!(result[0].own_stake, 0);
+        assert_eq!(result[0].nominator_count, 0);
+        assert_eq!(result[0].points, 0);
+        assert_eq!(result[0].apy, None);
+        assert_eq!(result[0].name, None);
+    }
+
+    #[test]
+    fn test_basic_validator_conversion_multiple() {
+        let validators = vec![
+            stkopt_chain::ValidatorInfo {
+                address: account(1),
+                preferences: stkopt_core::ValidatorPreferences {
+                    commission: 0.10,
+                    blocked: false,
+                },
+            },
+            stkopt_chain::ValidatorInfo {
+                address: account(2),
+                preferences: stkopt_core::ValidatorPreferences {
+                    commission: 0.20,
+                    blocked: true,
+                },
+            },
+        ];
+        let result = basic_validator_conversion(&validators);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].address, account(1).to_string());
+        assert_eq!(result[1].address, account(2).to_string());
+    }
+
+    // === make_transaction_payload ===
+
+    #[test]
+    fn test_make_transaction_payload_success() {
+        let payload = UnsignedPayload {
+            call_data: vec![0x01, 0x02],
+            description: "Bond 10 DOT".to_string(),
+            metadata_hash: [0u8; 32],
+            genesis_hash: [0u8; 32],
+            block_hash: [0u8; 32],
+            spec_version: 1,
+            tx_version: 1,
+            nonce: 0,
+            era: stkopt_chain::Era::Immortal,
+            include_metadata_hash: false,
+            use_asset_payment: false,
+            extension_ids: vec![],
+        };
+        let signer = account(1);
+        let result = make_transaction_payload(payload.clone(), signer).unwrap();
+        assert_eq!(result.signer, signer);
+        assert_eq!(result.description, "Bond 10 DOT");
+        assert!(!result.qr_data.is_empty());
+    }
+
+    // === ChainWorker::is_connection_error ===
+
+    #[test]
+    fn test_is_connection_error_connection_shutdown() {
+        assert!(ChainWorker::is_connection_error(
+            "ConnectionShutdown occurred"
+        ));
+    }
+
+    #[test]
+    fn test_is_connection_error_not_connected() {
+        assert!(ChainWorker::is_connection_error("Not connected to node"));
+    }
+
+    #[test]
+    fn test_is_connection_error_rpc_error() {
+        assert!(ChainWorker::is_connection_error("Rpc error: timeout"));
+    }
+
+    #[test]
+    fn test_is_connection_error_connection_closed() {
+        assert!(ChainWorker::is_connection_error(
+            "connection closed by peer"
+        ));
+    }
+
+    #[test]
+    fn test_is_connection_error_channel_closed() {
+        assert!(ChainWorker::is_connection_error(
+            "channel closed unexpectedly"
+        ));
+    }
+
+    #[test]
+    fn test_is_connection_error_unrelated() {
+        assert!(!ChainWorker::is_connection_error(" parsing failed"));
+        assert!(!ChainWorker::is_connection_error("random text"));
+    }
+
+    #[test]
+    fn test_is_connection_error_empty() {
+        assert!(!ChainWorker::is_connection_error(""));
     }
 }

@@ -385,4 +385,139 @@ mod tests {
             ConnectionStatus::Error("test".into())
         );
     }
+
+    #[test]
+    fn test_reward_destination_label() {
+        assert_eq!(RewardDestination::Staked.label(), "Compound (Staked)");
+        assert_eq!(RewardDestination::Stash.label(), "Stash Account");
+        assert_eq!(RewardDestination::Controller.label(), "Controller Account");
+        assert_eq!(
+            RewardDestination::Account("abc".to_string()).label(),
+            "Custom Account"
+        );
+        assert_eq!(RewardDestination::None.label(), "None (Burn)");
+    }
+
+    #[test]
+    fn test_transaction_type_label() {
+        assert_eq!(TransactionType::Nominate.label(), "Nominate");
+        assert_eq!(TransactionType::Bond.label(), "Bond");
+        assert_eq!(TransactionType::BondExtra.label(), "Bond Extra");
+        assert_eq!(TransactionType::Unbond.label(), "Unbond");
+        assert_eq!(
+            TransactionType::WithdrawUnbonded.label(),
+            "Withdraw Unbonded"
+        );
+        assert_eq!(TransactionType::Chill.label(), "Chill");
+        assert_eq!(TransactionType::SetController.label(), "Set Controller");
+        assert_eq!(TransactionType::SetPayee.label(), "Set Payee");
+        assert_eq!(TransactionType::Rebond.label(), "Rebond");
+        assert_eq!(TransactionType::PoolJoin.label(), "Join Pool");
+        assert_eq!(TransactionType::PoolBondExtra.label(), "Pool Bond Extra");
+        assert_eq!(
+            TransactionType::PoolClaimPayout.label(),
+            "Claim Pool Rewards"
+        );
+        assert_eq!(TransactionType::PoolUnbond.label(), "Pool Unbond");
+        assert_eq!(
+            TransactionType::PoolWithdrawUnbonded.label(),
+            "Pool Withdraw"
+        );
+    }
+
+    #[test]
+    fn test_transaction_type_description() {
+        assert_eq!(
+            TransactionType::Nominate.description(),
+            "Select validators to nominate"
+        );
+        assert_eq!(
+            TransactionType::Bond.description(),
+            "Lock tokens for staking"
+        );
+        assert_eq!(
+            TransactionType::BondExtra.description(),
+            "Add more tokens to existing stake"
+        );
+        assert_eq!(
+            TransactionType::Unbond.description(),
+            "Start unbonding tokens (28 day wait)"
+        );
+        assert_eq!(
+            TransactionType::WithdrawUnbonded.description(),
+            "Withdraw fully unbonded tokens"
+        );
+        assert_eq!(
+            TransactionType::Chill.description(),
+            "Stop nominating validators"
+        );
+        assert_eq!(
+            TransactionType::SetController.description(),
+            "Change controller account"
+        );
+        assert_eq!(
+            TransactionType::SetPayee.description(),
+            "Change reward destination"
+        );
+        assert_eq!(
+            TransactionType::Rebond.description(),
+            "Cancel unbonding and restake"
+        );
+        assert_eq!(
+            TransactionType::PoolJoin.description(),
+            "Join a nomination pool"
+        );
+        assert_eq!(
+            TransactionType::PoolBondExtra.description(),
+            "Add more tokens to pool stake"
+        );
+        assert_eq!(
+            TransactionType::PoolClaimPayout.description(),
+            "Claim pending pool rewards"
+        );
+        assert_eq!(
+            TransactionType::PoolUnbond.description(),
+            "Start unbonding from pool"
+        );
+        assert_eq!(
+            TransactionType::PoolWithdrawUnbonded.description(),
+            "Withdraw unbonded pool tokens"
+        );
+    }
+
+    #[test]
+    fn test_transaction_status_is_pending() {
+        assert!(TransactionStatus::Building.is_pending());
+        assert!(TransactionStatus::ReadyToSign.is_pending());
+        assert!(TransactionStatus::AwaitingSignature.is_pending());
+        assert!(TransactionStatus::Signed.is_pending());
+        assert!(TransactionStatus::Submitted.is_pending());
+        assert!(TransactionStatus::InBlock("0x1234".to_string()).is_pending());
+        assert!(!TransactionStatus::Finalized("0x1234".to_string()).is_pending());
+        assert!(!TransactionStatus::Failed("error".to_string()).is_pending());
+    }
+
+    #[test]
+    fn test_transaction_status_label() {
+        assert_eq!(TransactionStatus::Building.label(), "Building");
+        assert_eq!(TransactionStatus::ReadyToSign.label(), "Ready to Sign");
+        assert_eq!(
+            TransactionStatus::AwaitingSignature.label(),
+            "Awaiting Signature"
+        );
+        assert_eq!(TransactionStatus::Signed.label(), "Signed");
+        assert_eq!(TransactionStatus::Submitted.label(), "Submitted");
+        assert_eq!(
+            TransactionStatus::InBlock("0x1234".to_string()).label(),
+            "In Block"
+        );
+        assert_eq!(
+            TransactionStatus::Finalized("0x1234".to_string()).label(),
+            "Finalized"
+        );
+        assert_eq!(
+            TransactionStatus::Failed("error".to_string()).label(),
+            "Failed"
+        );
+    }
 }

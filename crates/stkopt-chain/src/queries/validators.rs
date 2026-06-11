@@ -586,3 +586,90 @@ impl ChainClient {
         Ok(exposures.iter().map(|e| e.total).sum())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_validator_preferences_returns_zero_commission_and_not_blocked() {
+        let prefs = default_validator_preferences();
+        assert_eq!(prefs.commission, 0.0);
+        assert!(!prefs.blocked);
+    }
+
+    #[test]
+    fn test_parse_validator_preferences_typical_values() {
+        let decoded = subxt::dynamic::Value::named_composite([
+            ("commission", subxt::dynamic::Value::u128(150_000_000)),
+            ("blocked", subxt::dynamic::Value::bool(false)),
+        ]);
+        let prefs = parse_validator_preferences(&decoded);
+        assert_eq!(prefs.commission, 150_000_000.0 / 1_000_000_000.0);
+        assert!(!prefs.blocked);
+    }
+
+    #[test]
+    fn test_parse_validator_preferences_zero_commission_and_blocked() {
+        let decoded = subxt::dynamic::Value::named_composite([
+            ("commission", subxt::dynamic::Value::u128(0)),
+            ("blocked", subxt::dynamic::Value::bool(true)),
+        ]);
+        let prefs = parse_validator_preferences(&decoded);
+        assert_eq!(prefs.commission, 0.0);
+        assert!(prefs.blocked);
+    }
+
+    #[test]
+    fn test_parse_validator_preferences_max_commission() {
+        let decoded = subxt::dynamic::Value::named_composite([
+            ("commission", subxt::dynamic::Value::u128(1_000_000_000)),
+            ("blocked", subxt::dynamic::Value::bool(false)),
+        ]);
+        let prefs = parse_validator_preferences(&decoded);
+        assert_eq!(prefs.commission, 1.0);
+        assert!(!prefs.blocked);
+    }
+
+    #[test]
+    fn test_parse_validator_preferences_missing_fields_defaults() {
+        let decoded =
+            subxt::dynamic::Value::named_composite::<&str, [(&str, subxt::dynamic::Value); 0]>([]);
+        let prefs = parse_validator_preferences(&decoded);
+        assert_eq!(prefs.commission, 0.0);
+        assert!(!prefs.blocked);
+    }
+
+    #[test]
+    fn test_parse_validator_preferences_missing_commission() {
+        let decoded = subxt::dynamic::Value::named_composite([(
+            "blocked",
+            subxt::dynamic::Value::bool(true),
+        )]);
+        let prefs = parse_validator_preferences(&decoded);
+        assert_eq!(prefs.commission, 0.0);
+        assert!(prefs.blocked);
+    }
+
+    #[test]
+    fn test_parse_validator_preferences_missing_blocked() {
+        let decoded = subxt::dynamic::Value::named_composite([(
+            "commission",
+            subxt::dynamic::Value::u128(50_000_000),
+        )]);
+        let prefs = parse_validator_preferences(&decoded);
+        assert_eq!(prefs.commission, 50_000_000.0 / 1_000_000_000.0);
+        assert!(!prefs.blocked);
+    }
+
+    #[test]
+    fn test_parse_validator_preferences_fractional_commission() {
+        let decoded = subxt::dynamic::Value::named_composite([
+            ("commission", subxt::dynamic::Value::u128(1)),
+            ("blocked", subxt::dynamic::Value::bool(false)),
+        ]);
+        let prefs = parse_validator_preferences(&decoded);
+        assert_eq!(prefs.commission, 1.0 / 1_000_000_000.0);
+        assert!(!prefs.blocked);
+    }
+}

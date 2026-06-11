@@ -805,6 +805,8 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
     use action::DisplayValidator;
+    use std::str::FromStr;
+    use stkopt_core::{OptimizationCriteria, ValidatorCandidate};
     use theme::Theme;
 
     fn make_validator(
@@ -826,6 +828,320 @@ mod tests {
             apy,
         }
     }
+
+    fn make_validator_with_nominators(
+        address: &str,
+        commission: f64,
+        blocked: bool,
+        total_stake: u128,
+        nominator_count: u32,
+        apy: Option<f64>,
+    ) -> DisplayValidator {
+        DisplayValidator {
+            address: address.to_string(),
+            name: None,
+            commission,
+            blocked,
+            total_stake,
+            own_stake: total_stake / 10,
+            nominator_count,
+            points: 0,
+            apy,
+        }
+    }
+
+    // ── validator_candidates ──────────────────────────────────────────────
+
+    #[test]
+    fn test_validator_candidates_empty_app() {
+        let app = App::new(Network::Polkadot, LogBuffer::new(), Theme::Dark);
+        let candidates = validator_candidates(&app);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_validator_candidates_maps_fields_correctly() {
+        let mut app = App::new(Network::Polkadot, LogBuffer::new(), Theme::Dark);
+        app.validators = vec![make_validator_with_nominators(
+            "v1",
+            0.10,
+            false,
+            1_000_000,
+            42,
+            Some(0.15),
+        )];
+        let candidates = validator_candidates(&app);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].address, "v1");
+        assert_eq!(candidates[0].commission, 0.10);
+        assert!(!candidates[0].blocked);
+        assert_eq!(candidates[0].total_stake, 1_000_000);
+        assert_eq!(candidates[0].nominator_count, 42);
+        assert_eq!(candidates[0].apy, 0.15);
+    }
+
+    #[test]
+    fn test_validator_candidates_apy_defaults_to_zero() {
+        let mut app = App::new(Network::Polkadot, LogBuffer::new(), Theme::Dark);
+        app.validators = vec![make_validator("v1", 0.05, false, 100, None)];
+        let candidates = validator_candidates(&app);
+        assert_eq!(candidates[0].apy, 0.0);
+    }
+
+    #[test]
+    fn test_validator_candidates_multiple_validators() {
+        let mut app = App::new(Network::Polkadot, LogBuffer::new(), Theme::Dark);
+        app.validators = vec![
+            make_validator("a", 0.05, false, 100, Some(0.10)),
+            make_validator("b", 0.10, true, 200, None),
+        ];
+        let candidates = validator_candidates(&app);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].address, "a");
+        assert_eq!(candidates[1].address, "b");
+        assert!(candidates[1].blocked);
+    }
+
+    // ── fallback_select_without_apy ───────────────────────────────────────
+
+    #[test]
+    fn test_fallback_select_without_apy_empty_candidates() {
+        let criteria = OptimizationCriteria::default();
+        let result = fallback_select_without_apy(&[], &criteria);
+        assert!(result.selected.is_empty());
+        assert_eq!(result.estimated_apy_min, 0.0);
+        assert_eq!(result.estimated_apy_max, 0.0);
+        assert_eq!(result.estimated_apy_avg, 0.0);
+    }
+
+    #[test]
+    fn test_fallback_select_without_apy_all_blocked() {
+        let candidates = vec![ValidatorCandidate {
+            address: "v1".to_string(),
+            commission: 0.05,
+            blocked: true,
+            apy: 0.0,
+            total_stake: 1_000,
+            nominator_count: 10,
+        }];
+        let criteria = OptimizationCriteria::default();
+        let result = fallback_select_without_apy(&candidates, &criteria);
+        assert!(result.selected.is_empty());
+    }
+
+    #[test]
+    fn test_fallback_select_without_apy_all_high_commission() {
+        let candidates = vec![ValidatorCandidate {
+            address: "v1".to_string(),
+            commission: 0.50,
+            blocked: false,
+            apy: 0.0,
+            total_stake: 1_000,
+            nominator_count: 10,
+        }];
+        let criteria = OptimizationCriteria::default();
+        let result = fallback_select_without_apy(&candidates, &criteria);
+        assert!(result.selected.is_empty());
+    }
+
+    #[test]
+    fn test_fallback_select_without_apy_sorts_by_commission() {
+        let candidates = vec![
+            ValidatorCandidate {
+                address: "high-comm".to_string(),
+                commission: 0.10,
+                blocked: false,
+                apy: 0.0,
+                total_stake: 1_000,
+                nominator_count: 10,
+            },
+            ValidatorCandidate {
+                address: "low-comm".to_string(),
+                commission: 0.01,
+                blocked: false,
+                apy: 0.0,
+                total_stake: 1_000,
+                nominator_count: 10,
+            },
+        ];
+        let criteria = OptimizationCriteria::default();
+        let result = fallback_select_without_apy(&candidates, &criteria);
+        assert_eq!(result.selected.len(), 2);
+        assert_eq!(result.selected[0].address, "low-comm");
+        assert_eq!(result.selected[1].address, "high-comm");
+    }
+
+    #[test]
+    fn test_fallback_select_without_apy_tiebreak_by_total_stake() {
+        let candidates = vec![
+            ValidatorCandidate {
+                address: "low-stake".to_string(),
+                commission: 0.05,
+                blocked: false,
+                apy: 0.0,
+                total_stake: 500,
+                nominator_count: 10,
+            },
+            ValidatorCandidate {
+                address: "high-stake".to_string(),
+                commission: 0.05,
+                blocked: false,
+                apy: 0.0,
+                total_stake: 5_000,
+                nominator_count: 10,
+            },
+        ];
+        let criteria = OptimizationCriteria::default();
+        let result = fallback_select_without_apy(&candidates, &criteria);
+        assert_eq!(result.selected.len(), 2);
+        assert_eq!(result.selected[0].address, "high-stake");
+        assert_eq!(result.selected[1].address, "low-stake");
+    }
+
+    #[test]
+    fn test_fallback_select_without_apy_tiebreak_by_nominator_count() {
+        let candidates = vec![
+            ValidatorCandidate {
+                address: "few-noms".to_string(),
+                commission: 0.05,
+                blocked: false,
+                apy: 0.0,
+                total_stake: 1_000,
+                nominator_count: 5,
+            },
+            ValidatorCandidate {
+                address: "many-noms".to_string(),
+                commission: 0.05,
+                blocked: false,
+                apy: 0.0,
+                total_stake: 1_000,
+                nominator_count: 50,
+            },
+        ];
+        let criteria = OptimizationCriteria::default();
+        let result = fallback_select_without_apy(&candidates, &criteria);
+        assert_eq!(result.selected.len(), 2);
+        assert_eq!(result.selected[0].address, "many-noms");
+        assert_eq!(result.selected[1].address, "few-noms");
+    }
+
+    #[test]
+    fn test_fallback_select_without_apy_respects_target_count() {
+        let candidates: Vec<ValidatorCandidate> = (0..20)
+            .map(|i| ValidatorCandidate {
+                address: format!("v{}", i),
+                commission: 0.01,
+                blocked: false,
+                apy: 0.0,
+                total_stake: 1_000,
+                nominator_count: 10,
+            })
+            .collect();
+        let criteria = OptimizationCriteria::default();
+        let result = fallback_select_without_apy(&candidates, &criteria);
+        // default target_count is 16
+        assert_eq!(result.selected.len(), 16);
+    }
+
+    #[test]
+    fn test_fallback_select_without_apy_mixed_eligible() {
+        let candidates = vec![
+            ValidatorCandidate {
+                address: "blocked".to_string(),
+                commission: 0.01,
+                blocked: true,
+                apy: 0.0,
+                total_stake: 10_000,
+                nominator_count: 100,
+            },
+            ValidatorCandidate {
+                address: "high-comm".to_string(),
+                commission: 0.50,
+                blocked: false,
+                apy: 0.0,
+                total_stake: 10_000,
+                nominator_count: 100,
+            },
+            ValidatorCandidate {
+                address: "eligible".to_string(),
+                commission: 0.05,
+                blocked: false,
+                apy: 0.0,
+                total_stake: 1_000,
+                nominator_count: 10,
+            },
+        ];
+        let criteria = OptimizationCriteria::default();
+        let result = fallback_select_without_apy(&candidates, &criteria);
+        assert_eq!(result.selected.len(), 1);
+        assert_eq!(result.selected[0].address, "eligible");
+    }
+
+    // ── NetworkArg::from_str ──────────────────────────────────────────────
+
+    #[test]
+    fn test_network_arg_from_str_polkadot() {
+        assert_eq!(
+            NetworkArg::from_str("polkadot").unwrap().0,
+            Network::Polkadot
+        );
+    }
+
+    #[test]
+    fn test_network_arg_from_str_dot() {
+        assert_eq!(NetworkArg::from_str("dot").unwrap().0, Network::Polkadot);
+    }
+
+    #[test]
+    fn test_network_arg_from_str_kusama() {
+        assert_eq!(NetworkArg::from_str("kusama").unwrap().0, Network::Kusama);
+    }
+
+    #[test]
+    fn test_network_arg_from_str_ksm() {
+        assert_eq!(NetworkArg::from_str("ksm").unwrap().0, Network::Kusama);
+    }
+
+    #[test]
+    fn test_network_arg_from_str_westend() {
+        assert_eq!(NetworkArg::from_str("westend").unwrap().0, Network::Westend);
+    }
+
+    #[test]
+    fn test_network_arg_from_str_wnd() {
+        assert_eq!(NetworkArg::from_str("wnd").unwrap().0, Network::Westend);
+    }
+
+    #[test]
+    fn test_network_arg_from_str_paseo() {
+        assert_eq!(NetworkArg::from_str("paseo").unwrap().0, Network::Paseo);
+    }
+
+    #[test]
+    fn test_network_arg_from_str_pas() {
+        assert_eq!(NetworkArg::from_str("pas").unwrap().0, Network::Paseo);
+    }
+
+    #[test]
+    fn test_network_arg_from_str_unknown() {
+        let result = NetworkArg::from_str("bitcoin");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("bitcoin"));
+    }
+
+    #[test]
+    fn test_network_arg_from_str_case_insensitive() {
+        assert_eq!(
+            NetworkArg::from_str("PolKaDot").unwrap().0,
+            Network::Polkadot
+        );
+        assert_eq!(NetworkArg::from_str("DOT").unwrap().0, Network::Polkadot);
+        assert_eq!(NetworkArg::from_str("KUSAMA").unwrap().0, Network::Kusama);
+        assert_eq!(NetworkArg::from_str("WestEnd").unwrap().0, Network::Westend);
+        assert_eq!(NetworkArg::from_str("PaSeO").unwrap().0, Network::Paseo);
+    }
+
+    // ── optimize_nomination ───────────────────────────────────────────────
 
     #[test]
     fn optimize_nomination_falls_back_when_apy_is_unavailable() {
@@ -861,5 +1177,57 @@ mod tests {
         assert_eq!(result.selected.len(), 2);
         assert_eq!(result.selected[0].address, "higher-apy");
         assert!(status.is_none());
+    }
+
+    #[test]
+    fn test_optimize_nomination_no_eligible_validators() {
+        let mut app = App::new(Network::Polkadot, LogBuffer::new(), Theme::Dark);
+        app.validators = vec![
+            make_validator("blocked1", 0.01, true, 10_000, None),
+            make_validator("blocked2", 0.01, true, 5_000, None),
+        ];
+
+        let (result, status) = optimize_nomination(&app, SelectionStrategy::TopApy);
+
+        assert!(result.selected.is_empty());
+        assert!(
+            status
+                .as_deref()
+                .is_some_and(|msg| msg.contains("No eligible validators found"))
+        );
+    }
+
+    #[test]
+    fn test_optimize_nomination_mixed_apy_and_no_apy() {
+        let mut app = App::new(Network::Polkadot, LogBuffer::new(), Theme::Dark);
+        app.validators = vec![
+            make_validator("no-apy", 0.01, false, 10_000, None),
+            make_validator("with-apy", 0.05, false, 500, Some(0.10)),
+        ];
+
+        let (result, status) = optimize_nomination(&app, SelectionStrategy::TopApy);
+
+        // When at least one validator has APY, core optimizer is used and fallback is skipped
+        assert!(!result.selected.is_empty());
+        assert!(status.is_none());
+    }
+
+    #[test]
+    fn test_optimize_nomination_all_high_commission_no_apy() {
+        let mut app = App::new(Network::Polkadot, LogBuffer::new(), Theme::Dark);
+        app.validators = vec![
+            make_validator("high-comm1", 0.50, false, 10_000, None),
+            make_validator("high-comm2", 0.60, false, 5_000, None),
+        ];
+
+        let (result, status) = optimize_nomination(&app, SelectionStrategy::TopApy);
+
+        // default max_commission is 0.15, so none are eligible
+        assert!(result.selected.is_empty());
+        assert!(
+            status
+                .as_deref()
+                .is_some_and(|msg| msg.contains("No eligible validators found"))
+        );
     }
 }

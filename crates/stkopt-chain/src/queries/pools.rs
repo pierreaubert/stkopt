@@ -2,7 +2,9 @@
 
 use super::decode_helpers::extract_account_id;
 use crate::ChainClient;
+use crate::batch_storage::account_key;
 use crate::error::ChainError;
+use std::collections::HashMap;
 use stkopt_core::Balance;
 use subxt::dynamic::{At, Value};
 use subxt::utils::AccountId32;
@@ -395,25 +397,74 @@ impl ChainClient {
         };
 
         let decoded: Value = value.decode()?;
+        Ok(Some(parse_pool_nominations(pool_id, stash, &decoded)))
+    }
 
-        // Nominations = { targets: Vec<AccountId>, submitted_in: EraIndex, suppressed: bool }
-        let mut targets = Vec::new();
-        if let Some(targets_val) = decoded.at("targets") {
-            // Iterate over targets array
-            let mut i = 0;
-            while let Some(target) = targets_val.at(i) {
-                if let Some(account) = extract_account_id(target) {
-                    targets.push(account);
+    /// Get nominations for multiple pools.
+    ///
+    /// This fetches the derived bonded pool accounts from `Staking.Nominators` in chunks.
+    /// Batch failures fall back to single-key reads and return whatever pool nominations
+    /// were available, which keeps UI pool APY enrichment best-effort.
+    pub async fn get_pool_nominations_batch(
+        &self,
+        pool_ids: &[u32],
+    ) -> Result<Vec<PoolNominations>, ChainError> {
+        let pool_accounts: Vec<(u32, AccountId32)> = pool_ids
+            .iter()
+            .map(|pool_id| {
+                (
+                    *pool_id,
+                    derive_pool_account(*pool_id, PoolAccountType::Bonded),
+                )
+            })
+            .collect();
+        let pool_id_by_stash: HashMap<[u8; 32], u32> = pool_accounts
+            .iter()
+            .map(|(pool_id, stash)| (account_key(stash), *pool_id))
+            .collect();
+
+        let mut nominations = Vec::new();
+        for chunk in pool_accounts.chunks(50) {
+            let stashes: Vec<AccountId32> = chunk.iter().map(|(_, stash)| stash.clone()).collect();
+            match self
+                .batch_fetch_account_storage_values("Staking", "Nominators", &stashes)
+                .await
+            {
+                Ok(values) => {
+                    for (stash_key, decoded) in values {
+                        let Some(pool_id) = pool_id_by_stash.get(&stash_key).copied() else {
+                            tracing::debug!(
+                                "Ignoring unexpected pool nominations response for unknown stash"
+                            );
+                            continue;
+                        };
+                        let stash = AccountId32::from(stash_key);
+                        nominations.push(parse_pool_nominations(pool_id, stash, &decoded));
+                    }
                 }
-                i += 1;
+                Err(error) => {
+                    tracing::debug!(
+                        "Batch pool nominations fetch failed for {} pools: {}",
+                        chunk.len(),
+                        error
+                    );
+                    for (pool_id, _) in chunk {
+                        match self.get_pool_nominations(*pool_id).await {
+                            Ok(Some(pool_nominations)) => nominations.push(pool_nominations),
+                            Ok(None) => {}
+                            Err(e) => tracing::debug!(
+                                "Failed to get nominations for pool {} after batch fallback: {}",
+                                pool_id,
+                                e
+                            ),
+                        }
+                    }
+                }
             }
         }
 
-        Ok(Some(PoolNominations {
-            pool_id,
-            stash,
-            targets,
-        }))
+        nominations.sort_by_key(|n| n.pool_id);
+        Ok(nominations)
     }
 
     /// Get the reward pool state for a pool.
@@ -506,6 +557,26 @@ impl ChainClient {
     }
 }
 
+fn parse_pool_nominations(pool_id: u32, stash: AccountId32, decoded: &Value) -> PoolNominations {
+    // Nominations = { targets: Vec<AccountId>, submitted_in: EraIndex, suppressed: bool }
+    let mut targets = Vec::new();
+    if let Some(targets_val) = decoded.at("targets") {
+        let mut i = 0;
+        while let Some(target) = targets_val.at(i) {
+            if let Some(account) = extract_account_id(target) {
+                targets.push(account);
+            }
+            i += 1;
+        }
+    }
+
+    PoolNominations {
+        pool_id,
+        stash,
+        targets,
+    }
+}
+
 /// Reward pool state (for calculating pending rewards).
 #[derive(Debug, Clone)]
 pub struct RewardPool {
@@ -579,4 +650,212 @@ fn extract_bytes_as_string(value: &Value) -> String {
     // Filter out any null bytes
     let filtered: Vec<u8> = bytes.into_iter().filter(|&b| b != 0).collect();
     String::from_utf8_lossy(&filtered).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_account_value(bytes: [u8; 32]) -> Value {
+        Value::unnamed_composite(bytes.iter().map(|&b| Value::u128(b as u128)))
+    }
+
+    // ── derive_pool_account ──
+
+    #[test]
+    fn test_derive_pool_account_bonded_consistency() {
+        let a = derive_pool_account(42, PoolAccountType::Bonded);
+        let b = derive_pool_account(42, PoolAccountType::Bonded);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_derive_pool_account_reward_consistency() {
+        let a = derive_pool_account(7, PoolAccountType::Reward);
+        let b = derive_pool_account(7, PoolAccountType::Reward);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_derive_pool_account_different_pool_ids() {
+        let a = derive_pool_account(1, PoolAccountType::Bonded);
+        let b = derive_pool_account(2, PoolAccountType::Bonded);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn test_derive_pool_account_different_types_same_pool() {
+        let bonded = derive_pool_account(5, PoolAccountType::Bonded);
+        let reward = derive_pool_account(5, PoolAccountType::Reward);
+        assert_ne!(bonded, reward);
+    }
+
+    #[test]
+    fn test_derive_pool_account_zero_pool_id() {
+        let account = derive_pool_account(0, PoolAccountType::Bonded);
+        assert_ne!(account, AccountId32::from([0u8; 32]));
+    }
+
+    // ── parse_account_id ──
+
+    #[test]
+    fn test_parse_account_id_some_variant_unnamed() {
+        let bytes = [
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31, 32,
+        ];
+        let some = Value::unnamed_variant("Some", vec![make_account_value(bytes)]);
+        assert_eq!(
+            parse_account_id(Some(&some)),
+            Some(AccountId32::from(bytes))
+        );
+    }
+
+    #[test]
+    fn test_parse_account_id_none_variant() {
+        let none = Value::unnamed_variant("None", vec![]);
+        assert_eq!(parse_account_id(Some(&none)), None);
+    }
+
+    #[test]
+    fn test_parse_account_id_none_input() {
+        assert_eq!(parse_account_id(None), None);
+    }
+
+    #[test]
+    fn test_parse_account_id_some_variant_named() {
+        let bytes = [
+            10u8, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+            31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41,
+        ];
+        let some = Value::named_variant("Some", [("0", make_account_value(bytes))]);
+        assert_eq!(
+            parse_account_id(Some(&some)),
+            Some(AccountId32::from(bytes))
+        );
+    }
+
+    #[test]
+    fn test_parse_account_id_too_short() {
+        let short = Value::unnamed_composite(vec![Value::u128(1); 16]);
+        assert_eq!(parse_account_id(Some(&short)), None);
+    }
+
+    #[test]
+    fn test_parse_account_id_empty() {
+        let empty = Value::unnamed_composite(vec![]);
+        assert_eq!(parse_account_id(Some(&empty)), None);
+    }
+
+    // ── extract_bytes_as_string ──
+
+    #[test]
+    fn test_extract_bytes_as_string_empty() {
+        let value = Value::unnamed_composite(vec![]);
+        assert_eq!(extract_bytes_as_string(&value), "");
+    }
+
+    #[test]
+    fn test_extract_bytes_as_string_simple() {
+        let value = Value::unnamed_composite(vec![
+            Value::u128(104), // h
+            Value::u128(101), // e
+            Value::u128(108), // l
+            Value::u128(108), // l
+            Value::u128(111), // o
+        ]);
+        assert_eq!(extract_bytes_as_string(&value), "hello");
+    }
+
+    #[test]
+    fn test_extract_bytes_as_string_nested() {
+        let value = Value::unnamed_composite(vec![
+            Value::unnamed_composite(vec![Value::u128(119)]), // w
+            Value::unnamed_composite(vec![Value::u128(111)]), // o
+            Value::unnamed_composite(vec![Value::u128(114)]), // r
+            Value::unnamed_composite(vec![Value::u128(108)]), // l
+            Value::unnamed_composite(vec![Value::u128(100)]), // d
+        ]);
+        assert_eq!(extract_bytes_as_string(&value), "world");
+    }
+
+    #[test]
+    fn test_extract_bytes_as_string_filters_null_bytes() {
+        let value = Value::unnamed_composite(vec![
+            Value::u128(97), // a
+            Value::u128(0),  // null
+            Value::u128(98), // b
+        ]);
+        assert_eq!(extract_bytes_as_string(&value), "ab");
+    }
+
+    #[test]
+    fn test_extract_bytes_as_string_non_utf8() {
+        let value = Value::unnamed_composite(vec![Value::u128(0xC0), Value::u128(0x80)]);
+        let result = extract_bytes_as_string(&value);
+        assert!(result.contains('�'));
+    }
+
+    // ── parse_pool_nominations ──
+
+    #[test]
+    fn test_parse_pool_nominations_empty_targets() {
+        let decoded = Value::named_composite([("targets", Value::unnamed_composite(vec![]))]);
+        let stash = AccountId32::from([9u8; 32]);
+        let result = parse_pool_nominations(1, stash.clone(), &decoded);
+        assert_eq!(result.pool_id, 1);
+        assert_eq!(result.stash, stash);
+        assert!(result.targets.is_empty());
+    }
+
+    #[test]
+    fn test_parse_pool_nominations_single_target() {
+        let target = [1u8; 32];
+        let decoded = Value::named_composite([(
+            "targets",
+            Value::unnamed_composite(vec![make_account_value(target)]),
+        )]);
+        let stash = AccountId32::from([2u8; 32]);
+        let result = parse_pool_nominations(3, stash.clone(), &decoded);
+        assert_eq!(result.pool_id, 3);
+        assert_eq!(result.stash, stash);
+        assert_eq!(result.targets, vec![AccountId32::from(target)]);
+    }
+
+    #[test]
+    fn test_parse_pool_nominations_multiple_targets() {
+        let t1 = [1u8; 32];
+        let t2 = [2u8; 32];
+        let decoded = Value::named_composite([(
+            "targets",
+            Value::unnamed_composite(vec![make_account_value(t1), make_account_value(t2)]),
+        )]);
+        let stash = AccountId32::from([3u8; 32]);
+        let result = parse_pool_nominations(5, stash.clone(), &decoded);
+        assert_eq!(result.targets.len(), 2);
+        assert_eq!(result.targets[0], AccountId32::from(t1));
+        assert_eq!(result.targets[1], AccountId32::from(t2));
+    }
+
+    #[test]
+    fn test_parse_pool_nominations_missing_targets() {
+        let decoded = Value::named_composite::<&str, [(&str, Value); 0]>([]);
+        let stash = AccountId32::from([4u8; 32]);
+        let result = parse_pool_nominations(6, stash.clone(), &decoded);
+        assert!(result.targets.is_empty());
+    }
+
+    #[test]
+    fn test_parse_pool_nominations_skips_invalid_accounts() {
+        let valid = [5u8; 32];
+        let invalid = Value::unnamed_composite(vec![Value::u128(1); 16]);
+        let decoded = Value::named_composite([(
+            "targets",
+            Value::unnamed_composite(vec![invalid, make_account_value(valid)]),
+        )]);
+        let stash = AccountId32::from([6u8; 32]);
+        let result = parse_pool_nominations(7, stash.clone(), &decoded);
+        assert_eq!(result.targets.len(), 1);
+        assert_eq!(result.targets[0], AccountId32::from(valid));
+    }
 }

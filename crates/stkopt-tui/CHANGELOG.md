@@ -13,6 +13,7 @@ All notable changes to `stkopt-tui` are documented here.
 
 - Suppressed noisy light-client tracing targets in the default TUI log filter.
 - Delayed the Connected UI state until startup validator and pool data have loaded.
+- Batched nomination-pool nomination lookups when enriching pool APY.
 
 ### Fixed
 

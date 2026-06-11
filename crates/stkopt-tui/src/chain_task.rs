@@ -14,6 +14,26 @@ use tokio::sync::mpsc;
 
 const PEOPLE_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+fn pool_nomination_apy(
+    nominations: &stkopt_chain::PoolNominations,
+    validator_apy_map: &HashMap<String, f64>,
+) -> Option<f64> {
+    let mut total_apy = 0.0;
+    let mut count = 0;
+    for target in &nominations.targets {
+        if let Some(&validator_apy) = validator_apy_map.get(&target.to_string()) {
+            total_apy += validator_apy;
+            count += 1;
+        }
+    }
+
+    if count > 0 {
+        Some(total_apy / count as f64)
+    } else {
+        None
+    }
+}
+
 /// Staking operation to be performed by the chain task.
 #[derive(Debug)]
 pub enum StakingOp {
@@ -786,82 +806,45 @@ pub async fn chain_task(
 
     // Second pass: fetch APY for top pools
     let max_pools_to_query = 30.min(pools.len());
+    let pool_ids: Vec<u32> = pools
+        .iter()
+        .take(max_pools_to_query)
+        .map(|pool| pool.id)
+        .collect();
+    let nominations_map: HashMap<u32, stkopt_chain::PoolNominations> =
+        match client.get_pool_nominations_batch(&pool_ids).await {
+            Ok(nominations) => nominations
+                .into_iter()
+                .map(|nominations| (nominations.pool_id, nominations))
+                .collect(),
+            Err(e) => {
+                tracing::warn!("Failed to get batched pool nominations: {}", e);
+                HashMap::new()
+            }
+        };
+
     for (idx, p) in pools.iter().take(max_pools_to_query).enumerate() {
-        if idx > 0 && idx % 5 == 0 {
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        }
-
-        let mut nominations_result = None;
-        for attempt in 0..3 {
-            match client.get_pool_nominations(p.id).await {
-                Ok(noms) => {
-                    nominations_result = Some(Ok(noms));
-                    break;
-                }
-                Err(e) => {
-                    if attempt < 2 {
-                        tracing::debug!(
-                            "Pool {} nominations query failed (attempt {}), retrying: {}",
-                            p.id,
-                            attempt + 1,
-                            e
-                        );
-                        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-                    } else {
-                        tracing::warn!(
-                            "Failed to get nominations for pool {} after 3 attempts: {}",
-                            p.id,
-                            e
-                        );
-                        nominations_result = Some(Err(e));
-                    }
-                }
-            }
-        }
-
-        let apy = match nominations_result {
-            Some(Ok(Some(nominations))) if !nominations.targets.is_empty() => {
-                let mut total_apy = 0.0;
-                let mut count = 0;
-                for target in &nominations.targets {
-                    let target_str = target.to_string();
-                    if let Some(&validator_apy) = validator_apy_map.get(&target_str) {
-                        total_apy += validator_apy;
-                        count += 1;
-                    } else {
-                        tracing::debug!(
-                            "Pool {} nominated validator {} not in validator list",
-                            p.id,
-                            target_str
-                        );
-                    }
-                }
-                if count > 0 {
-                    tracing::debug!(
-                        "Pool {} has {} nominated validators with APY, avg: {:.2}%",
-                        p.id,
-                        count,
-                        (total_apy / count as f64) * 100.0
-                    );
-                    Some(total_apy / count as f64)
-                } else {
-                    tracing::debug!(
-                        "Pool {} has {} nominations but none found in validator map",
-                        p.id,
-                        nominations.targets.len()
-                    );
-                    None
-                }
-            }
-            Some(Ok(Some(_))) => {
+        let apy = if let Some(nominations) = nominations_map.get(&p.id) {
+            let apy = pool_nomination_apy(nominations, &validator_apy_map);
+            if let Some(apy) = apy {
+                tracing::debug!(
+                    "Pool {} has nominated validators with APY, avg: {:.2}%",
+                    p.id,
+                    apy * 100.0
+                );
+            } else if nominations.targets.is_empty() {
                 tracing::debug!("Pool {} has empty nominations", p.id);
-                None
+            } else {
+                tracing::debug!(
+                    "Pool {} has {} nominations but none found in validator map",
+                    p.id,
+                    nominations.targets.len()
+                );
             }
-            Some(Ok(None)) => {
-                tracing::debug!("Pool {} has no nominations", p.id);
-                None
-            }
-            Some(Err(_)) | None => None,
+            apy
+        } else {
+            tracing::debug!("Pool {} has no nominations", p.id);
+            None
         };
 
         display_pools[idx].apy = apy;
@@ -1527,4 +1510,164 @@ pub fn calculate_era_date(
     chrono::DateTime::from_timestamp_millis(era_start_ms as i64)
         .map(|dt| dt.format("%Y%m%d").to_string())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn account(byte: u8) -> AccountId32 {
+        AccountId32::from([byte; 32])
+    }
+
+    #[test]
+    fn pool_nomination_apy_averages_known_targets() {
+        let known_a = account(1);
+        let known_b = account(2);
+        let missing = account(3);
+        let nominations = stkopt_chain::PoolNominations {
+            pool_id: 7,
+            stash: account(9),
+            targets: vec![known_a, missing, known_b],
+        };
+        let validator_apy_map =
+            HashMap::from([(known_a.to_string(), 0.12), (known_b.to_string(), 0.06)]);
+
+        assert_eq!(
+            pool_nomination_apy(&nominations, &validator_apy_map),
+            Some(0.09)
+        );
+    }
+
+    #[test]
+    fn pool_nomination_apy_is_none_without_known_targets() {
+        let nominations = stkopt_chain::PoolNominations {
+            pool_id: 7,
+            stash: account(9),
+            targets: vec![account(3)],
+        };
+
+        assert_eq!(pool_nomination_apy(&nominations, &HashMap::new()), None);
+    }
+
+    // --- build_tx_info tests ---
+
+    fn make_test_unsigned_payload() -> stkopt_chain::UnsignedPayload {
+        stkopt_chain::UnsignedPayload {
+            call_data: vec![0x01, 0x02, 0x03],
+            description: "Staking.nominate".to_string(),
+            metadata_hash: [0u8; 32],
+            genesis_hash: [0u8; 32],
+            block_hash: [0u8; 32],
+            spec_version: 1_002_000,
+            tx_version: 26,
+            nonce: 42,
+            era: stkopt_chain::Era::Immortal,
+            include_metadata_hash: true,
+            use_asset_payment: false,
+            extension_ids: vec!["CheckNonce".to_string()],
+        }
+    }
+
+    #[test]
+    fn test_build_tx_info_maps_fields_correctly() {
+        let payload = make_test_unsigned_payload();
+        let signer = account(5);
+        let targets = vec!["target1".to_string(), "target2".to_string()];
+
+        let info = build_tx_info(&payload, &signer, targets.clone());
+
+        assert_eq!(info.signer, signer.to_string());
+        assert_eq!(info.call, "Staking.nominate");
+        assert_eq!(info.targets, targets);
+        assert_eq!(info.call_data_size, 3);
+        assert_eq!(info.spec_version, 1_002_000);
+        assert_eq!(info.tx_version, 26);
+        assert_eq!(info.nonce, 42);
+        assert!(info.include_metadata_hash);
+    }
+
+    #[test]
+    fn test_build_tx_info_empty_targets() {
+        let payload = make_test_unsigned_payload();
+        let signer = account(7);
+        let info = build_tx_info(&payload, &signer, vec![]);
+
+        assert!(info.targets.is_empty());
+        assert_eq!(info.signer, signer.to_string());
+    }
+
+    // --- get_db_path tests ---
+
+    #[test]
+    fn test_get_db_path_returns_non_empty() {
+        let path = get_db_path();
+        assert!(!path.as_os_str().is_empty());
+    }
+
+    #[test]
+    fn test_get_db_path_ends_with_history_db() {
+        let path = get_db_path();
+        assert_eq!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some("history.db")
+        );
+    }
+
+    // --- calculate_era_date tests ---
+
+    #[test]
+    fn test_calculate_era_date_current_era() {
+        // era == current_era, so eras_ago == 0
+        let date = calculate_era_date(100, 100, 1_700_000_000_000, 86_400_000);
+        // Should be 1_700_000_000_000 ms since epoch
+        let expected = chrono::DateTime::from_timestamp_millis(1_700_000_000_000)
+            .unwrap()
+            .format("%Y%m%d")
+            .to_string();
+        assert_eq!(date, expected);
+    }
+
+    #[test]
+    fn test_calculate_era_date_past_era() {
+        // 5 eras ago
+        let date = calculate_era_date(95, 100, 1_700_000_000_000, 86_400_000);
+        let expected_ms = 1_700_000_000_000u64 - 5 * 86_400_000;
+        let expected = chrono::DateTime::from_timestamp_millis(expected_ms as i64)
+            .unwrap()
+            .format("%Y%m%d")
+            .to_string();
+        assert_eq!(date, expected);
+    }
+
+    #[test]
+    fn test_calculate_era_date_zero_start_ms_fallback() {
+        // When current_era_start_ms is 0, it falls back to current time minus eras_ago
+        let date = calculate_era_date(90, 100, 0, 86_400_000);
+        // Should return a non-empty 8-digit date string (YYYYMMDD)
+        assert_eq!(date.len(), 8);
+        assert!(date.parse::<u64>().is_ok());
+    }
+
+    #[test]
+    fn test_calculate_era_date_era_greater_than_current() {
+        // era > current_era: saturating_sub yields 0, so it uses current_era_start_ms
+        let date = calculate_era_date(200, 100, 1_700_000_000_000, 86_400_000);
+        let expected = chrono::DateTime::from_timestamp_millis(1_700_000_000_000)
+            .unwrap()
+            .format("%Y%m%d")
+            .to_string();
+        assert_eq!(date, expected);
+    }
+
+    #[test]
+    fn test_calculate_era_date_zero_duration() {
+        // Zero duration should still work (no change in ms per era)
+        let date = calculate_era_date(99, 100, 1_700_000_000_000, 0);
+        let expected = chrono::DateTime::from_timestamp_millis(1_700_000_000_000)
+            .unwrap()
+            .format("%Y%m%d")
+            .to_string();
+        assert_eq!(date, expected);
+    }
 }

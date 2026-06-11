@@ -1782,3 +1782,850 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::log_buffer::{LogLevel, LogLine};
+    use stkopt_core::types::PoolState;
+
+    fn create_app() -> App {
+        App::new(Network::Polkadot, LogBuffer::new(), Theme::Dark)
+    }
+
+    fn make_validator(
+        address: &str,
+        name: Option<&str>,
+        commission: f64,
+        blocked: bool,
+        apy: Option<f64>,
+    ) -> DisplayValidator {
+        DisplayValidator::new(
+            address.to_string(),
+            name.map(|s| s.to_string()),
+            commission,
+            blocked,
+            1_000_000,
+            100_000,
+            10,
+            100,
+            apy,
+        )
+    }
+
+    fn make_pool(id: u32, name: &str, state: PoolState, apy: Option<f64>) -> DisplayPool {
+        DisplayPool::new(id, name.to_string(), state, 10, 1_000_000, None, apy)
+    }
+
+    // === ValidatorSortField ===
+
+    #[test]
+    fn test_validator_sort_field_all() {
+        let all = ValidatorSortField::all();
+        assert_eq!(all.len(), 9);
+        assert!(all.contains(&ValidatorSortField::Apy));
+    }
+
+    #[test]
+    fn test_validator_sort_field_label() {
+        assert_eq!(ValidatorSortField::Name.label(), "Name");
+        assert_eq!(ValidatorSortField::Apy.label(), "APY");
+        assert_eq!(ValidatorSortField::Blocked.label(), "Blocked");
+    }
+
+    #[test]
+    fn test_validator_sort_field_key() {
+        assert_eq!(ValidatorSortField::Name.key(), 'n');
+        assert_eq!(ValidatorSortField::Apy.key(), 'y');
+    }
+
+    #[test]
+    fn test_validator_sort_field_from_key_valid() {
+        assert_eq!(
+            ValidatorSortField::from_key('n'),
+            Some(ValidatorSortField::Name)
+        );
+        assert_eq!(
+            ValidatorSortField::from_key('y'),
+            Some(ValidatorSortField::Apy)
+        );
+    }
+
+    #[test]
+    fn test_validator_sort_field_from_key_invalid() {
+        assert_eq!(ValidatorSortField::from_key('z'), None);
+    }
+
+    // === PoolSortField ===
+
+    #[test]
+    fn test_pool_sort_field_all() {
+        let all = PoolSortField::all();
+        assert_eq!(all.len(), 6);
+        assert!(all.contains(&PoolSortField::Apy));
+    }
+
+    #[test]
+    fn test_pool_sort_field_label() {
+        assert_eq!(PoolSortField::Id.label(), "ID");
+        assert_eq!(PoolSortField::Apy.label(), "APY");
+    }
+
+    #[test]
+    fn test_pool_sort_field_key() {
+        assert_eq!(PoolSortField::Id.key(), 'i');
+        assert_eq!(PoolSortField::Apy.key(), 'y');
+    }
+
+    #[test]
+    fn test_pool_sort_field_from_key_valid() {
+        assert_eq!(PoolSortField::from_key('i'), Some(PoolSortField::Id));
+        assert_eq!(PoolSortField::from_key('y'), Some(PoolSortField::Apy));
+    }
+
+    #[test]
+    fn test_pool_sort_field_from_key_invalid() {
+        assert_eq!(PoolSortField::from_key('z'), None);
+    }
+
+    // === View ===
+
+    #[test]
+    fn test_view_all() {
+        let all = View::all();
+        assert_eq!(all.len(), 6);
+        assert!(all.contains(&View::AccountStatus));
+    }
+
+    #[test]
+    fn test_view_label() {
+        assert_eq!(View::AccountStatus.label(), "Account Status");
+        assert_eq!(View::Validators.label(), "Validators");
+    }
+
+    #[test]
+    fn test_view_index() {
+        assert_eq!(View::AccountStatus.index(), 0);
+        assert_eq!(View::Pools.index(), 5);
+    }
+
+    #[test]
+    fn test_view_from_index() {
+        assert_eq!(View::from_index(0), View::AccountStatus);
+        assert_eq!(View::from_index(5), View::Pools);
+    }
+
+    #[test]
+    fn test_view_from_index_out_of_bounds() {
+        assert_eq!(View::from_index(99), View::AccountStatus);
+    }
+
+    // === cycle_selection ===
+
+    #[test]
+    fn test_cycle_selection_next() {
+        assert_eq!(cycle_selection(Some(0), 3, Direction::Next), Some(1));
+        assert_eq!(cycle_selection(Some(1), 3, Direction::Next), Some(2));
+    }
+
+    #[test]
+    fn test_cycle_selection_previous() {
+        assert_eq!(cycle_selection(Some(1), 3, Direction::Previous), Some(0));
+        assert_eq!(cycle_selection(Some(2), 3, Direction::Previous), Some(1));
+    }
+
+    #[test]
+    fn test_cycle_selection_wrap_next() {
+        assert_eq!(cycle_selection(Some(2), 3, Direction::Next), Some(0));
+    }
+
+    #[test]
+    fn test_cycle_selection_wrap_previous() {
+        assert_eq!(cycle_selection(Some(0), 3, Direction::Previous), Some(2));
+    }
+
+    #[test]
+    fn test_cycle_selection_empty() {
+        assert_eq!(cycle_selection(Some(0), 0, Direction::Next), None);
+    }
+
+    #[test]
+    fn test_cycle_selection_none_start_next() {
+        assert_eq!(cycle_selection(None, 3, Direction::Next), Some(0));
+    }
+
+    #[test]
+    fn test_cycle_selection_none_start_previous() {
+        assert_eq!(cycle_selection(None, 3, Direction::Previous), Some(0));
+    }
+
+    // === App::new ===
+
+    #[test]
+    fn test_app_new_defaults() {
+        let app = create_app();
+        assert_eq!(app.network, Network::Polkadot);
+        assert_eq!(app.current_view, View::AccountStatus);
+        assert_eq!(app.tick_count(), 0);
+        assert!(!app.should_quit);
+        assert!(app.validators.is_empty());
+        assert!(app.pools.is_empty());
+        assert_eq!(app.address_book_len(), KNOWN_ADDRESSES.len());
+    }
+
+    // === App::tick ===
+
+    #[test]
+    fn test_app_tick_increments() {
+        let mut app = create_app();
+        app.tick();
+        assert_eq!(app.tick_count(), 1);
+    }
+
+    #[test]
+    fn test_app_tick_qr_animation() {
+        let mut app = create_app();
+        app.qr.showing = true;
+        app.qr.frame = 0;
+        app.tick();
+        assert_eq!(app.qr.frame, 1);
+    }
+
+    #[test]
+    fn test_app_tick_no_qr_when_hidden() {
+        let mut app = create_app();
+        app.qr.showing = false;
+        app.qr.frame = 0;
+        app.tick();
+        assert_eq!(app.qr.frame, 0);
+    }
+
+    #[test]
+    fn test_app_tick_spinner() {
+        let mut app = create_app();
+        app.loading.validators = true;
+        let before = app.loading.spinner_tick;
+        app.tick();
+        assert_eq!(app.loading.spinner_tick, before + 1);
+    }
+
+    #[test]
+    fn test_app_tick_no_spinner_when_idle() {
+        let mut app = create_app();
+        app.loading.chain = false;
+        app.loading.validators = false;
+        let before = app.loading.spinner_tick;
+        app.tick();
+        assert_eq!(app.loading.spinner_tick, before);
+    }
+
+    // === App::spinner_char ===
+
+    #[test]
+    fn test_spinner_char() {
+        let mut app = create_app();
+        app.loading.spinner_tick = 0;
+        assert_eq!(app.spinner_char(), '⠋');
+        app.loading.spinner_tick = 9;
+        assert_eq!(app.spinner_char(), '⠏');
+        app.loading.spinner_tick = 10;
+        assert_eq!(app.spinner_char(), '⠋');
+    }
+
+    // === App::estimated_remaining_secs ===
+
+    #[test]
+    fn test_estimated_remaining_secs() {
+        let mut app = create_app();
+        app.loading.progress = 0.5;
+        app.loading.bandwidth = Some(1_000_000.0);
+        // progress_rate = 1_000_000 / 10_000_000 = 0.1
+        // remaining = 0.5
+        // secs = 0.5 / 0.1 = 5.0
+        assert_eq!(app.estimated_remaining_secs(), Some(5.0));
+    }
+
+    #[test]
+    fn test_estimated_remaining_secs_no_bandwidth() {
+        let app = create_app();
+        assert_eq!(app.estimated_remaining_secs(), None);
+    }
+
+    #[test]
+    fn test_estimated_remaining_secs_zero_bandwidth() {
+        let mut app = create_app();
+        app.loading.bandwidth = Some(0.0);
+        assert_eq!(app.estimated_remaining_secs(), None);
+    }
+
+    #[test]
+    fn test_estimated_remaining_secs_negative_bandwidth() {
+        let mut app = create_app();
+        app.loading.bandwidth = Some(-1.0);
+        assert_eq!(app.estimated_remaining_secs(), None);
+    }
+
+    // === App::format_eta ===
+
+    #[test]
+    fn test_format_eta_seconds() {
+        let mut app = create_app();
+        app.loading.progress = 0.9;
+        app.loading.bandwidth = Some(1_000_000.0);
+        // remaining = 0.1, rate = 0.1, secs = 1.0
+        assert_eq!(app.format_eta(), Some("~1s".to_string()));
+    }
+
+    #[test]
+    fn test_format_eta_minutes() {
+        let mut app = create_app();
+        app.loading.progress = 0.0;
+        app.loading.bandwidth = Some(100_000.0);
+        // remaining = 1.0, rate = 0.01, secs = 100.0
+        assert_eq!(app.format_eta(), Some("~2m 40s".to_string()));
+    }
+
+    #[test]
+    fn test_format_eta_hours() {
+        let mut app = create_app();
+        app.loading.progress = 0.0;
+        app.loading.bandwidth = Some(1_000.0);
+        // remaining = 1.0, rate = 0.0001, secs = 10000.0 (~2.78h)
+        assert_eq!(app.format_eta(), Some("~3h".to_string()));
+    }
+
+    #[test]
+    fn test_format_eta_none() {
+        let app = create_app();
+        assert_eq!(app.format_eta(), None);
+    }
+
+    // === App::parse_amount ===
+
+    #[test]
+    fn test_parse_amount_whole() {
+        let app = create_app();
+        assert_eq!(app.parse_amount("1"), Some(10_000_000_000u128));
+    }
+
+    #[test]
+    fn test_parse_amount_with_decimals() {
+        let app = create_app();
+        // 1.5 DOT = 15_000_000_000 planck (10 decimals)
+        assert_eq!(app.parse_amount("1.5"), Some(15_000_000_000u128));
+    }
+
+    #[test]
+    fn test_parse_amount_fractional() {
+        let app = create_app();
+        // 0.1 DOT = 1_000_000_000 planck
+        assert_eq!(app.parse_amount("0.1"), Some(1_000_000_000u128));
+    }
+
+    #[test]
+    fn test_parse_amount_empty() {
+        let app = create_app();
+        assert_eq!(app.parse_amount(""), None);
+    }
+
+    #[test]
+    fn test_parse_amount_invalid() {
+        let app = create_app();
+        assert_eq!(app.parse_amount("abc"), None);
+    }
+
+    #[test]
+    fn test_parse_amount_too_many_dots() {
+        let app = create_app();
+        assert_eq!(app.parse_amount("1.2.3"), None);
+    }
+
+    #[test]
+    fn test_parse_amount_truncate_decimals() {
+        let app = create_app();
+        // 11 decimals provided, but Polkadot has 10 -> truncate to 10
+        assert_eq!(app.parse_amount("1.12345678901"), Some(11_234_567_890u128));
+    }
+
+    #[test]
+    fn test_parse_amount_pad_decimals() {
+        let app = create_app();
+        // 2 decimals provided, pad with 8 zeros
+        assert_eq!(app.parse_amount("1.12"), Some(11_200_000_000u128));
+    }
+
+    #[test]
+    fn test_parse_amount_zero() {
+        let app = create_app();
+        assert_eq!(app.parse_amount("0"), Some(0));
+    }
+
+    #[test]
+    fn test_parse_amount_kusama_decimals() {
+        let mut app = create_app();
+        app.network = Network::Kusama; // 12 decimals
+        assert_eq!(app.parse_amount("1"), Some(1_000_000_000_000u128));
+        assert_eq!(app.parse_amount("0.001"), Some(1_000_000_000u128));
+    }
+
+    // === App::address_book_len ===
+
+    #[test]
+    fn test_address_book_len_no_account() {
+        let app = create_app();
+        assert_eq!(app.address_book_len(), KNOWN_ADDRESSES.len());
+    }
+
+    #[test]
+    fn test_address_book_len_with_account() {
+        let mut app = create_app();
+        app.watched_account = Some(AccountId32::from([0u8; 32]));
+        assert_eq!(app.address_book_len(), KNOWN_ADDRESSES.len() + 1);
+    }
+
+    // === App::filtered_validators ===
+
+    #[test]
+    fn test_filtered_validators_empty() {
+        let app = create_app();
+        assert!(app.filtered_validators().is_empty());
+    }
+
+    #[test]
+    fn test_filtered_validators_blocked_filter() {
+        let mut app = create_app();
+        app.show_blocked = false;
+        app.validators = vec![
+            make_validator("addr1", None, 0.1, false, Some(0.15)),
+            make_validator("addr2", None, 0.1, true, Some(0.20)),
+        ];
+        let filtered = app.filtered_validators();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].address, "addr1");
+    }
+
+    #[test]
+    fn test_filtered_validators_show_blocked() {
+        let mut app = create_app();
+        app.show_blocked = true;
+        app.validators = vec![
+            make_validator("addr1", None, 0.1, false, Some(0.15)),
+            make_validator("addr2", None, 0.1, true, Some(0.20)),
+        ];
+        let filtered = app.filtered_validators();
+        assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn test_filtered_validators_search_by_name() {
+        let mut app = create_app();
+        app.search_query = "alice".to_string();
+        app.validators = vec![
+            make_validator("addr1", Some("AliceValidator"), 0.1, false, None),
+            make_validator("addr2", Some("BobValidator"), 0.1, false, None),
+        ];
+        let filtered = app.filtered_validators();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].address, "addr1");
+    }
+
+    #[test]
+    fn test_filtered_validators_search_by_address() {
+        let mut app = create_app();
+        app.search_query = "addr2".to_string();
+        app.validators = vec![
+            make_validator("addr1", None, 0.1, false, None),
+            make_validator("addr2", None, 0.1, false, None),
+        ];
+        let filtered = app.filtered_validators();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].address, "addr2");
+    }
+
+    #[test]
+    fn test_filtered_validators_search_no_match() {
+        let mut app = create_app();
+        app.search_query = "zzz".to_string();
+        app.validators = vec![make_validator("addr1", Some("Alice"), 0.1, false, None)];
+        let filtered = app.filtered_validators();
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn test_filtered_validators_sort_apy_desc() {
+        let mut app = create_app();
+        app.validator_sort = ValidatorSortField::Apy;
+        app.validator_sort_asc = false;
+        app.validators = vec![
+            make_validator("low", None, 0.1, false, Some(0.10)),
+            make_validator("high", None, 0.1, false, Some(0.20)),
+        ];
+        let filtered = app.filtered_validators();
+        assert_eq!(filtered[0].address, "high");
+        assert_eq!(filtered[1].address, "low");
+    }
+
+    #[test]
+    fn test_filtered_validators_sort_apy_asc() {
+        let mut app = create_app();
+        app.validator_sort = ValidatorSortField::Apy;
+        app.validator_sort_asc = true;
+        app.validators = vec![
+            make_validator("low", None, 0.1, false, Some(0.10)),
+            make_validator("high", None, 0.1, false, Some(0.20)),
+        ];
+        let filtered = app.filtered_validators();
+        assert_eq!(filtered[0].address, "low");
+        assert_eq!(filtered[1].address, "high");
+    }
+
+    #[test]
+    fn test_filtered_validators_sort_name() {
+        let mut app = create_app();
+        app.validator_sort = ValidatorSortField::Name;
+        app.validator_sort_asc = true;
+        app.validators = vec![
+            make_validator("addr1", Some("Bob"), 0.1, false, None),
+            make_validator("addr2", Some("Alice"), 0.1, false, None),
+        ];
+        let filtered = app.filtered_validators();
+        assert_eq!(filtered[0].address, "addr2");
+        assert_eq!(filtered[1].address, "addr1");
+    }
+
+    // === App::filtered_pools ===
+
+    #[test]
+    fn test_filtered_pools_empty() {
+        let app = create_app();
+        assert!(app.filtered_pools().is_empty());
+    }
+
+    #[test]
+    fn test_filtered_pools_search_by_name() {
+        let mut app = create_app();
+        app.search_query = "alpha".to_string();
+        app.pools = vec![
+            make_pool(1, "Alpha Pool", PoolState::Open, None),
+            make_pool(2, "Beta Pool", PoolState::Open, None),
+        ];
+        let filtered = app.filtered_pools();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, 1);
+    }
+
+    #[test]
+    fn test_filtered_pools_search_by_id() {
+        let mut app = create_app();
+        app.search_query = "2".to_string();
+        app.pools = vec![
+            make_pool(1, "Alpha Pool", PoolState::Open, None),
+            make_pool(2, "Beta Pool", PoolState::Open, None),
+        ];
+        let filtered = app.filtered_pools();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, 2);
+    }
+
+    #[test]
+    fn test_filtered_pools_search_no_match() {
+        let mut app = create_app();
+        app.search_query = "zzz".to_string();
+        app.pools = vec![make_pool(1, "Alpha", PoolState::Open, None)];
+        let filtered = app.filtered_pools();
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn test_filtered_pools_sort_apy_desc() {
+        let mut app = create_app();
+        app.pool_sort = PoolSortField::Apy;
+        app.pool_sort_asc = false;
+        app.pools = vec![
+            make_pool(1, "low", PoolState::Open, Some(0.10)),
+            make_pool(2, "high", PoolState::Open, Some(0.20)),
+        ];
+        let filtered = app.filtered_pools();
+        assert_eq!(filtered[0].id, 2);
+        assert_eq!(filtered[1].id, 1);
+    }
+
+    #[test]
+    fn test_filtered_pools_sort_apy_asc() {
+        let mut app = create_app();
+        app.pool_sort = PoolSortField::Apy;
+        app.pool_sort_asc = true;
+        app.pools = vec![
+            make_pool(1, "low", PoolState::Open, Some(0.10)),
+            make_pool(2, "high", PoolState::Open, Some(0.20)),
+        ];
+        let filtered = app.filtered_pools();
+        assert_eq!(filtered[0].id, 1);
+        assert_eq!(filtered[1].id, 2);
+    }
+
+    #[test]
+    fn test_filtered_pools_sort_id() {
+        let mut app = create_app();
+        app.pool_sort = PoolSortField::Id;
+        app.pool_sort_asc = true;
+        app.pools = vec![
+            make_pool(2, "b", PoolState::Open, None),
+            make_pool(1, "a", PoolState::Open, None),
+        ];
+        let filtered = app.filtered_pools();
+        assert_eq!(filtered[0].id, 1);
+        assert_eq!(filtered[1].id, 2);
+    }
+
+    // === scroll methods ===
+
+    #[test]
+    fn test_scroll_logs_up() {
+        let mut app = create_app();
+        for i in 0..10 {
+            app.log_buffer.push(LogLine {
+                level: LogLevel::Info,
+                target: "test".to_string(),
+                message: format!("msg {}", i),
+            });
+        }
+        app.scroll_logs_up();
+        assert_eq!(app.log_scroll, 1);
+        app.scroll_logs_up();
+        assert_eq!(app.log_scroll, 2);
+    }
+
+    #[test]
+    fn test_scroll_logs_down() {
+        let mut app = create_app();
+        for i in 0..10 {
+            app.log_buffer.push(LogLine {
+                level: LogLevel::Info,
+                target: "test".to_string(),
+                message: format!("msg {}", i),
+            });
+        }
+        app.scroll_logs_up();
+        app.scroll_logs_up();
+        assert_eq!(app.log_scroll, 2);
+        app.scroll_logs_down();
+        assert_eq!(app.log_scroll, 1);
+    }
+
+    #[test]
+    fn test_scroll_logs_to_bottom() {
+        let mut app = create_app();
+        for i in 0..10 {
+            app.log_buffer.push(LogLine {
+                level: LogLevel::Info,
+                target: "test".to_string(),
+                message: format!("msg {}", i),
+            });
+        }
+        app.scroll_logs_up();
+        app.scroll_logs_to_bottom();
+        assert_eq!(app.log_scroll, 0);
+    }
+
+    #[test]
+    fn test_scroll_logs_up_few_entries() {
+        let mut app = create_app();
+        app.log_buffer.push(LogLine {
+            level: LogLevel::Info,
+            target: "test".to_string(),
+            message: "msg".to_string(),
+        });
+        app.scroll_logs_up();
+        // log_count = 1, not > 3, so no change
+        assert_eq!(app.log_scroll, 0);
+    }
+
+    #[test]
+    fn test_scroll_logs_down_at_bottom() {
+        let mut app = create_app();
+        app.scroll_logs_down();
+        assert_eq!(app.log_scroll, 0);
+    }
+
+    // === next_view / prev_view ===
+
+    #[test]
+    fn test_next_view() {
+        let mut app = create_app();
+        app.next_view();
+        assert_eq!(app.current_view, View::AccountChanges);
+    }
+
+    #[test]
+    fn test_prev_view() {
+        let mut app = create_app();
+        app.prev_view();
+        assert_eq!(app.current_view, View::Pools);
+    }
+
+    #[test]
+    fn test_next_view_wraps() {
+        let mut app = create_app();
+        for _ in 0..6 {
+            app.next_view();
+        }
+        assert_eq!(app.current_view, View::AccountStatus);
+    }
+
+    #[test]
+    fn test_prev_view_wraps() {
+        let mut app = create_app();
+        for _ in 0..6 {
+            app.prev_view();
+        }
+        assert_eq!(app.current_view, View::AccountStatus);
+    }
+
+    // === next_network ===
+
+    #[test]
+    fn test_next_network() {
+        let mut app = create_app();
+        let action = app.next_network();
+        assert!(matches!(
+            action,
+            Some(Action::SwitchNetwork(Network::Kusama))
+        ));
+    }
+
+    #[test]
+    fn test_next_network_wraps() {
+        let mut app = create_app();
+        app.network = Network::Paseo;
+        let action = app.next_network();
+        assert!(matches!(
+            action,
+            Some(Action::SwitchNetwork(Network::Polkadot))
+        ));
+    }
+
+    // === select_next / select_previous ===
+
+    #[test]
+    fn test_select_next_validators() {
+        let mut app = create_app();
+        app.current_view = View::Validators;
+        app.validators = vec![
+            make_validator("v1", None, 0.1, false, None),
+            make_validator("v2", None, 0.1, false, None),
+        ];
+        app.select_next();
+        assert_eq!(app.validators_table_state.selected(), Some(0));
+        app.select_next();
+        assert_eq!(app.validators_table_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn test_select_previous_validators() {
+        let mut app = create_app();
+        app.current_view = View::Validators;
+        app.validators = vec![
+            make_validator("v1", None, 0.1, false, None),
+            make_validator("v2", None, 0.1, false, None),
+        ];
+        app.validators_table_state.select(Some(1));
+        app.select_previous();
+        assert_eq!(app.validators_table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn test_select_next_validators_wraps() {
+        let mut app = create_app();
+        app.current_view = View::Validators;
+        app.validators = vec![
+            make_validator("v1", None, 0.1, false, None),
+            make_validator("v2", None, 0.1, false, None),
+        ];
+        app.validators_table_state.select(Some(1));
+        app.select_next();
+        assert_eq!(app.validators_table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn test_select_previous_validators_wraps() {
+        let mut app = create_app();
+        app.current_view = View::Validators;
+        app.validators = vec![
+            make_validator("v1", None, 0.1, false, None),
+            make_validator("v2", None, 0.1, false, None),
+        ];
+        app.validators_table_state.select(Some(0));
+        app.select_previous();
+        assert_eq!(app.validators_table_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn test_select_next_pools() {
+        let mut app = create_app();
+        app.current_view = View::Pools;
+        app.pools = vec![
+            make_pool(1, "p1", PoolState::Open, None),
+            make_pool(2, "p2", PoolState::Open, None),
+        ];
+        app.select_next();
+        assert_eq!(app.pools_table_state.selected(), Some(0));
+        app.select_next();
+        assert_eq!(app.pools_table_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn test_select_previous_pools() {
+        let mut app = create_app();
+        app.current_view = View::Pools;
+        app.pools = vec![
+            make_pool(1, "p1", PoolState::Open, None),
+            make_pool(2, "p2", PoolState::Open, None),
+        ];
+        app.pools_table_state.select(Some(1));
+        app.select_previous();
+        assert_eq!(app.pools_table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn test_select_next_nominate() {
+        let mut app = create_app();
+        app.current_view = View::Nominate;
+        app.validators = vec![
+            make_validator("v1", None, 0.1, false, None),
+            make_validator("v2", None, 0.1, false, None),
+        ];
+        app.select_next();
+        assert_eq!(app.nominate_table_state.selected(), Some(0));
+        app.select_next();
+        assert_eq!(app.nominate_table_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn test_select_next_address_book() {
+        let mut app = create_app();
+        app.current_view = View::AccountStatus;
+        app.account_panel_focus = 1;
+        app.select_next();
+        assert_eq!(app.address_book_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn test_select_previous_address_book() {
+        let mut app = create_app();
+        app.current_view = View::AccountStatus;
+        app.account_panel_focus = 1;
+        app.address_book_state.select(Some(1));
+        app.select_previous();
+        assert_eq!(app.address_book_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn test_select_next_empty_list() {
+        let mut app = create_app();
+        app.current_view = View::Validators;
+        app.validators = vec![];
+        app.select_next();
+        assert_eq!(app.validators_table_state.selected(), None);
+    }
+}

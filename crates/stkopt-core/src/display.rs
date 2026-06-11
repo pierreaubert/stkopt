@@ -444,6 +444,141 @@ mod tests {
     }
 
     #[test]
+    fn test_display_validator_display_name_short_address() {
+        let v = DisplayValidator::new("short".to_string(), None, 0.0, false, 0, 0, 0, 0, None);
+        assert_eq!(v.display_name(), "short");
+    }
+
+    #[test]
+    fn test_display_validator_display_name_empty_address() {
+        let v = DisplayValidator::new("".to_string(), None, 0.0, false, 0, 0, 0, 0, None);
+        assert_eq!(v.display_name(), "");
+    }
+
+    #[test]
+    fn test_display_validator_display_name_empty_string_name() {
+        let v = DisplayValidator::new(
+            "1234567890abcdef1234567890abcdef".to_string(),
+            Some("".to_string()),
+            0.0,
+            false,
+            0,
+            0,
+            0,
+            0,
+            None,
+        );
+        assert_eq!(v.display_name(), "");
+    }
+
+    #[test]
+    fn test_display_validator_apy_percent_zero() {
+        let v = DisplayValidator::new("addr".to_string(), None, 0.0, false, 0, 0, 0, 0, Some(0.0));
+        assert!((v.apy_percent() - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_staking_history_point_apy_percent_zero() {
+        let p = StakingHistoryPoint::new_without_date(1, 100, 1000, 0.0);
+        assert!((p.apy_percent() - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_staking_history_point_apy_percent_negative() {
+        let p = StakingHistoryPoint::new_without_date(1, 100, 1000, -0.05);
+        assert!((p.apy_percent() - (-5.0)).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_staking_history_point_zero_values() {
+        let p = StakingHistoryPoint::new_without_date(0, 0, 0, 0.0);
+        assert_eq!(p.era, 0);
+        assert_eq!(p.reward, 0);
+        assert_eq!(p.bonded, 0);
+        assert!((p.apy_percent() - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_display_pool_apy_percent_zero() {
+        let pool = DisplayPool::new(
+            1,
+            "Pool".to_string(),
+            PoolState::Open,
+            0,
+            0,
+            None,
+            Some(0.0),
+        );
+        assert!((pool.apy_percent().unwrap() - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_display_pool_none_options() {
+        let pool = DisplayPool::new(
+            1,
+            "No Options".to_string(),
+            PoolState::Open,
+            0,
+            0,
+            None,
+            None,
+        );
+        assert!(pool.commission.is_none());
+        assert!(pool.apy.is_none());
+        assert!(pool.apy_percent().is_none());
+    }
+
+    #[test]
+    fn test_staking_info_with_values() {
+        let info = StakingInfo {
+            total_balance: 10_000,
+            transferable: 5_000,
+            bonded: 3_000,
+            unbonding: 1_000,
+            rewards_pending: 500,
+            is_nominating: true,
+            nomination_count: 5,
+        };
+        assert_eq!(info.total_balance, 10_000);
+        assert_eq!(info.transferable, 5_000);
+        assert_eq!(info.bonded, 3_000);
+        assert_eq!(info.unbonding, 1_000);
+        assert_eq!(info.rewards_pending, 500);
+        assert!(info.is_nominating);
+        assert_eq!(info.nomination_count, 5);
+        assert!(info.is_staking());
+        assert!(info.has_pending_rewards());
+    }
+
+    #[test]
+    fn test_staking_info_is_staking_max() {
+        let info = StakingInfo {
+            total_balance: 0,
+            transferable: 0,
+            bonded: u128::MAX,
+            unbonding: 0,
+            rewards_pending: 0,
+            is_nominating: false,
+            nomination_count: 0,
+        };
+        assert!(info.is_staking());
+    }
+
+    #[test]
+    fn test_staking_info_has_pending_rewards_max() {
+        let info = StakingInfo {
+            total_balance: 0,
+            transferable: 0,
+            bonded: 0,
+            unbonding: 0,
+            rewards_pending: u128::MAX,
+            is_nominating: false,
+            nomination_count: 0,
+        };
+        assert!(info.has_pending_rewards());
+    }
+
+    #[test]
     #[cfg(feature = "persistence")]
     fn test_display_validator_serialization() {
         let v = DisplayValidator::new(

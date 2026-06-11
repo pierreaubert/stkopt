@@ -879,4 +879,175 @@ mod tests {
         let parsed: SavedAccount = serde_json::from_str(&json).unwrap();
         assert_eq!(account.address, parsed.address);
     }
+
+    // ==================== File I/O & Utility Tests ====================
+
+    use std::sync::Mutex;
+
+    static FILE_IO_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_temp_home<F>(f: F)
+    where
+        F: FnOnce(),
+    {
+        let _guard = FILE_IO_LOCK.lock().unwrap();
+        let temp_dir = std::env::temp_dir().join(format!("stkopt_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let original_home = std::env::var("HOME").ok();
+        // SAFETY: we hold FILE_IO_LOCK so no other test thread
+        // reads HOME while it is temporarily changed.
+        unsafe {
+            std::env::set_var("HOME", &temp_dir);
+        }
+
+        f();
+
+        // SAFETY: same lock held for the entire duration.
+        unsafe {
+            match original_home {
+                Some(h) => std::env::set_var("HOME", h),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_default_auto_connect() {
+        assert!(default_auto_connect());
+    }
+
+    #[test]
+    fn test_backup_corrupted_config_success() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("stkopt_backup_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let config_path = temp_dir.join("config.json");
+        std::fs::write(&config_path, "corrupted data").unwrap();
+
+        backup_corrupted_config(&config_path).unwrap();
+
+        let entries: Vec<_> = std::fs::read_dir(&temp_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("config.backup.")
+            })
+            .collect();
+        assert_eq!(entries.len(), 1);
+
+        let backup_content = std::fs::read_to_string(entries[0].path()).unwrap();
+        assert_eq!(backup_content, "corrupted data");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_backup_corrupted_config_no_parent() {
+        let result = backup_corrupted_config(Path::new("config.json"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_config_missing_file() {
+        with_temp_home(|| {
+            let config = load_config().unwrap();
+            assert_eq!(config.network, NetworkConfig::Polkadot);
+            assert!(config.auto_connect);
+            assert!(!config.show_testnets);
+            assert!(config.accounts.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_load_config_invalid_json() {
+        with_temp_home(|| {
+            let path = get_config_path().unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "not valid json").unwrap();
+
+            let result = load_config();
+            assert!(matches!(result, Err(ConfigError::Json(_))));
+        });
+    }
+
+    #[test]
+    fn test_save_and_load_config_roundtrip() {
+        with_temp_home(|| {
+            let mut config = AppConfig::default();
+            config.network = NetworkConfig::Kusama;
+            config.connection_mode = ConnectionModeConfig::Rpc;
+            config.theme = ThemeConfig::Dark;
+            config.auto_connect = false;
+            config.show_testnets = true;
+            config.custom_rpc = Some("wss://example.com".to_string());
+            config.last_account = Some("addr1".to_string());
+            config.add_account(
+                "addr2".to_string(),
+                Some("label".to_string()),
+                Some("Kusama".to_string()),
+            );
+
+            save_config(&config).unwrap();
+
+            let loaded = load_config().unwrap();
+            assert_eq!(loaded.network, NetworkConfig::Kusama);
+            assert_eq!(loaded.connection_mode, ConnectionModeConfig::Rpc);
+            assert_eq!(loaded.theme, ThemeConfig::Dark);
+            assert!(!loaded.auto_connect);
+            assert!(loaded.show_testnets);
+            assert_eq!(loaded.custom_rpc, Some("wss://example.com".to_string()));
+            assert_eq!(loaded.last_account, Some("addr1".to_string()));
+            assert_eq!(loaded.accounts.len(), 1);
+            assert_eq!(loaded.accounts[0].address, "addr2");
+        });
+    }
+
+    #[test]
+    fn test_load_address_book_missing_file() {
+        with_temp_home(|| {
+            let book = load_address_book().unwrap();
+            assert!(book.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_load_address_book_invalid_json() {
+        with_temp_home(|| {
+            let path = get_address_book_path().unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "not valid json").unwrap();
+
+            let result = load_address_book();
+            assert!(matches!(result, Err(ConfigError::Json(_))));
+        });
+    }
+
+    #[test]
+    fn test_save_and_load_address_book_roundtrip() {
+        with_temp_home(|| {
+            let mut book = AddressBook::default();
+            book.add(AddressBookEntry {
+                address: "addr1".to_string(),
+                label: "Label1".to_string(),
+                network: NetworkConfig::Kusama,
+                notes: Some("notes".to_string()),
+                created_at: 1234567890,
+            })
+            .unwrap();
+
+            save_address_book(&book).unwrap();
+
+            let loaded = load_address_book().unwrap();
+            assert_eq!(loaded.len(), 1);
+            let entry = loaded.find("addr1").unwrap();
+            assert_eq!(entry.label, "Label1");
+            assert_eq!(entry.network, NetworkConfig::Kusama);
+            assert_eq!(entry.notes, Some("notes".to_string()));
+            assert_eq!(entry.created_at, 1234567890);
+        });
+    }
 }

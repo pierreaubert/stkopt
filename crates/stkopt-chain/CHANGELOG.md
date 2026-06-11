@@ -7,6 +7,7 @@ All notable changes to `stkopt-chain` are documented here.
 ### Added
 
 - Added batch storage helpers for AccountId-indexed maps to reduce light-client and RPC round trips.
+- Added batched nomination-pool nomination lookups for pool APY enrichment.
 - Added a network QA helper binary for checking supported networks and runtime compatibility.
 
 ### Changed

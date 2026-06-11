@@ -2505,3 +2505,368 @@ fn mode_pill(
             });
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ConnectionMode, ConnectionStatus, Network, PoolOperation, PoolState, QrModalTab, Section,
+        StakingOperation, clamp_log_pane_height, generate_mock_pools, parse_token_amount,
+        progress_steps_complete,
+    };
+
+    // clamp_log_pane_height tests
+    #[test]
+    fn test_clamp_log_pane_height_typical() {
+        assert_eq!(clamp_log_pane_height(120.0, 900.0), 120.0);
+        assert_eq!(clamp_log_pane_height(300.0, 900.0), 300.0);
+        assert_eq!(clamp_log_pane_height(900.0, 900.0), 680.0);
+    }
+
+    #[test]
+    fn test_clamp_log_pane_height_small_viewport() {
+        // viewport too small to allow more than minimum
+        assert_eq!(clamp_log_pane_height(200.0, 300.0), 120.0);
+        assert_eq!(clamp_log_pane_height(120.0, 300.0), 120.0);
+    }
+
+    #[test]
+    fn test_clamp_log_pane_height_below_minimum() {
+        assert_eq!(clamp_log_pane_height(50.0, 900.0), 120.0);
+    }
+
+    // progress_steps_complete tests
+    #[test]
+    fn test_progress_steps_complete_all_done_and_connected() {
+        let steps = [("a", true), ("b", true)];
+        assert!(progress_steps_complete(ConnectionStatus::Connected, &steps));
+    }
+
+    #[test]
+    fn test_progress_steps_complete_not_connected() {
+        let steps = [("a", true), ("b", true)];
+        assert!(!progress_steps_complete(
+            ConnectionStatus::Connecting,
+            &steps
+        ));
+        assert!(!progress_steps_complete(
+            ConnectionStatus::Disconnected,
+            &steps
+        ));
+    }
+
+    #[test]
+    fn test_progress_steps_complete_some_undone() {
+        let steps = [("a", true), ("b", false)];
+        assert!(!progress_steps_complete(
+            ConnectionStatus::Connected,
+            &steps
+        ));
+    }
+
+    #[test]
+    fn test_progress_steps_complete_empty_steps() {
+        let steps: [(&str, bool); 0] = [];
+        assert!(progress_steps_complete(ConnectionStatus::Connected, &steps));
+        assert!(!progress_steps_complete(
+            ConnectionStatus::Connecting,
+            &steps
+        ));
+    }
+
+    // parse_token_amount tests
+    #[test]
+    fn test_parse_token_amount_whole_number() {
+        assert_eq!(parse_token_amount("1", 10).unwrap(), 10_000_000_000);
+        assert_eq!(parse_token_amount("123", 10).unwrap(), 123 * 10_000_000_000);
+    }
+
+    #[test]
+    fn test_parse_token_amount_with_fraction() {
+        assert_eq!(parse_token_amount("1.5", 10).unwrap(), 15_000_000_000);
+        assert_eq!(parse_token_amount("0.0001", 10).unwrap(), 1_000_000);
+    }
+
+    #[test]
+    fn test_parse_token_amount_comma_as_decimal() {
+        assert_eq!(parse_token_amount("1,5", 10).unwrap(), 15_000_000_000);
+    }
+
+    #[test]
+    fn test_parse_token_amount_whitespace_trimmed() {
+        assert_eq!(parse_token_amount("  2.5  ", 10).unwrap(), 25_000_000_000);
+    }
+
+    #[test]
+    fn test_parse_token_amount_empty() {
+        assert!(parse_token_amount("", 10).is_err());
+        assert!(parse_token_amount("   ", 10).is_err());
+    }
+
+    #[test]
+    fn test_parse_token_amount_zero() {
+        assert!(parse_token_amount("0", 10).is_err());
+        assert!(parse_token_amount("0.0", 10).is_err());
+        assert!(parse_token_amount("0.0000", 10).is_err());
+    }
+
+    #[test]
+    fn test_parse_token_amount_negative() {
+        assert!(parse_token_amount("-1", 10).is_err());
+        assert!(parse_token_amount("-0.5", 10).is_err());
+    }
+
+    #[test]
+    fn test_parse_token_amount_multiple_dots() {
+        assert!(parse_token_amount("1.2.3", 10).is_err());
+    }
+
+    #[test]
+    fn test_parse_token_amount_too_many_decimals() {
+        assert!(parse_token_amount("1.12345678901", 10).is_err());
+    }
+
+    #[test]
+    fn test_parse_token_amount_exact_decimals() {
+        assert_eq!(
+            parse_token_amount("1.1234567890", 10).unwrap(),
+            11_234_567_890
+        );
+    }
+
+    #[test]
+    fn test_parse_token_amount_non_numeric() {
+        assert!(parse_token_amount("abc", 10).is_err());
+        assert!(parse_token_amount("1.2a", 10).is_err());
+    }
+
+    #[test]
+    fn test_parse_token_amount_fraction_only() {
+        assert_eq!(parse_token_amount(".5", 10).unwrap(), 5_000_000_000);
+    }
+
+    #[test]
+    fn test_parse_token_amount_trailing_dot() {
+        assert_eq!(parse_token_amount("1.", 10).unwrap(), 10_000_000_000);
+    }
+
+    #[test]
+    fn test_parse_token_amount_different_decimals() {
+        assert_eq!(parse_token_amount("1.5", 12).unwrap(), 1_500_000_000_000);
+        assert_eq!(parse_token_amount("1", 12).unwrap(), 1_000_000_000_000);
+    }
+
+    // generate_mock_pools tests
+    #[test]
+    fn test_generate_mock_pools_zero_count() {
+        let pools = generate_mock_pools(0);
+        assert!(pools.is_empty());
+    }
+
+    #[test]
+    fn test_generate_mock_pools_small_count() {
+        let pools = generate_mock_pools(3);
+        assert_eq!(pools.len(), 3);
+        assert_eq!(pools[0].id, 1);
+        assert_eq!(pools[1].id, 2);
+        assert_eq!(pools[2].id, 3);
+    }
+
+    #[test]
+    fn test_generate_mock_pools_name_wrapping() {
+        let pools = generate_mock_pools(12);
+        // Names wrap around every 10 pools, but all have #i+1 suffix
+        assert_eq!(pools[10].name, "Polkadot Community Pool #11");
+        assert_eq!(pools[11].name, "Kusama Validators #12");
+    }
+
+    #[test]
+    fn test_generate_mock_pools_blocked_state() {
+        let pools = generate_mock_pools(10);
+        assert_eq!(pools[8].state, PoolState::Open);
+        assert_eq!(pools[9].state, PoolState::Blocked);
+    }
+
+    #[test]
+    fn test_generate_mock_pools_incremental_ids() {
+        let pools = generate_mock_pools(5);
+        for (i, pool) in pools.iter().enumerate() {
+            assert_eq!(pool.id as usize, i + 1);
+        }
+    }
+
+    // Section enum tests
+    #[test]
+    fn test_section_all_contains_all_variants() {
+        let all = Section::all();
+        assert_eq!(all.len(), 6);
+        assert!(all.contains(&Section::Dashboard));
+        assert!(all.contains(&Section::Account));
+        assert!(all.contains(&Section::Validators));
+        assert!(all.contains(&Section::Optimization));
+        assert!(all.contains(&Section::Pools));
+        assert!(all.contains(&Section::History));
+    }
+
+    #[test]
+    fn test_section_label() {
+        assert_eq!(Section::Dashboard.label(), "Dashboard");
+        assert_eq!(Section::Account.label(), "Account");
+        assert_eq!(Section::Validators.label(), "Validators");
+        assert_eq!(Section::Optimization.label(), "Optimization");
+        assert_eq!(Section::Pools.label(), "Pools");
+        assert_eq!(Section::History.label(), "History");
+    }
+
+    #[test]
+    fn test_section_icon() {
+        assert_eq!(Section::Dashboard.icon(), "📊");
+        assert_eq!(Section::Account.icon(), "👤");
+        assert_eq!(Section::Validators.icon(), "✓");
+        assert_eq!(Section::Optimization.icon(), "⚡");
+        assert_eq!(Section::Pools.icon(), "🏊");
+        assert_eq!(Section::History.icon(), "📈");
+    }
+
+    // PoolOperation enum tests
+    #[test]
+    fn test_pool_operation_label() {
+        assert_eq!(PoolOperation::Join.label(), "Join Pool");
+        assert_eq!(PoolOperation::BondExtra.label(), "Bond Extra");
+        assert_eq!(PoolOperation::ClaimPayout.label(), "Claim Payout");
+        assert_eq!(PoolOperation::Unbond.label(), "Unbond");
+        assert_eq!(PoolOperation::Withdraw.label(), "Withdraw");
+    }
+
+    #[test]
+    fn test_pool_operation_requires_amount() {
+        assert!(PoolOperation::Join.requires_amount());
+        assert!(PoolOperation::BondExtra.requires_amount());
+        assert!(PoolOperation::Unbond.requires_amount());
+        assert!(!PoolOperation::ClaimPayout.requires_amount());
+        assert!(!PoolOperation::Withdraw.requires_amount());
+    }
+
+    // StakingOperation enum tests
+    #[test]
+    fn test_staking_operation_label() {
+        assert_eq!(StakingOperation::Bond.label(), "Bond");
+        assert_eq!(StakingOperation::Unbond.label(), "Unbond");
+        assert_eq!(StakingOperation::BondExtra.label(), "Bond Extra");
+        assert_eq!(StakingOperation::Rebond.label(), "Rebond");
+        assert_eq!(StakingOperation::WithdrawUnbonded.label(), "Withdraw");
+        assert_eq!(StakingOperation::Nominate.label(), "Nominate");
+        assert_eq!(StakingOperation::Chill.label(), "Stop Nominating");
+        assert_eq!(StakingOperation::ClaimRewards.label(), "Claim Rewards");
+        assert_eq!(StakingOperation::SetPayee.label(), "Set Payee");
+    }
+
+    #[test]
+    fn test_staking_operation_requires_amount() {
+        assert!(StakingOperation::Bond.requires_amount());
+        assert!(StakingOperation::Unbond.requires_amount());
+        assert!(StakingOperation::BondExtra.requires_amount());
+        assert!(StakingOperation::Rebond.requires_amount());
+        assert!(!StakingOperation::WithdrawUnbonded.requires_amount());
+        assert!(!StakingOperation::Nominate.requires_amount());
+        assert!(!StakingOperation::Chill.requires_amount());
+        assert!(!StakingOperation::ClaimRewards.requires_amount());
+        assert!(!StakingOperation::SetPayee.requires_amount());
+    }
+
+    // QrModalTab enum tests
+    #[test]
+    fn test_qr_modal_tab_all() {
+        let all = QrModalTab::all();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0], QrModalTab::QrCode);
+        assert_eq!(all[1], QrModalTab::ScanSignature);
+        assert_eq!(all[2], QrModalTab::Submit);
+    }
+
+    #[test]
+    fn test_qr_modal_tab_label() {
+        assert_eq!(QrModalTab::QrCode.label(), "QR Code");
+        assert_eq!(QrModalTab::ScanSignature.label(), "Scan Signature");
+        assert_eq!(QrModalTab::Submit.label(), "Submit");
+    }
+
+    // ConnectionMode enum tests
+    #[test]
+    fn test_connection_mode_from_config() {
+        assert_eq!(
+            ConnectionMode::from_config(crate::persistence::ConnectionModeConfig::Rpc),
+            ConnectionMode::Rpc
+        );
+        assert_eq!(
+            ConnectionMode::from_config(crate::persistence::ConnectionModeConfig::LightClient),
+            ConnectionMode::LightClient
+        );
+    }
+
+    #[test]
+    fn test_connection_mode_to_config() {
+        assert_eq!(
+            ConnectionMode::Rpc.to_config(),
+            crate::persistence::ConnectionModeConfig::Rpc
+        );
+        assert_eq!(
+            ConnectionMode::LightClient.to_config(),
+            crate::persistence::ConnectionModeConfig::LightClient
+        );
+    }
+
+    #[test]
+    fn test_connection_mode_uses_light_client() {
+        assert!(!ConnectionMode::Rpc.uses_light_client());
+        assert!(ConnectionMode::LightClient.uses_light_client());
+    }
+
+    #[test]
+    fn test_connection_mode_label() {
+        assert_eq!(ConnectionMode::Rpc.label(), "RPC");
+        assert_eq!(ConnectionMode::LightClient.label(), "Light Client");
+    }
+
+    #[test]
+    fn test_connection_mode_description() {
+        assert!(ConnectionMode::Rpc.description().contains("RPC"));
+        assert!(
+            ConnectionMode::LightClient
+                .description()
+                .contains("light client")
+        );
+    }
+
+    // Network enum tests
+    #[test]
+    fn test_network_label() {
+        assert_eq!(Network::Polkadot.label(), "Polkadot");
+        assert_eq!(Network::Kusama.label(), "Kusama");
+        assert_eq!(Network::Westend.label(), "Westend");
+        assert_eq!(Network::Paseo.label(), "Paseo");
+    }
+
+    #[test]
+    fn test_network_symbol() {
+        assert_eq!(Network::Polkadot.symbol(), "DOT");
+        assert_eq!(Network::Kusama.symbol(), "KSM");
+        assert_eq!(Network::Westend.symbol(), "WND");
+        assert_eq!(Network::Paseo.symbol(), "PAS");
+    }
+
+    #[test]
+    fn test_network_token_decimals() {
+        assert_eq!(Network::Polkadot.token_decimals(), 10);
+        assert_eq!(Network::Kusama.token_decimals(), 12);
+        assert_eq!(Network::Westend.token_decimals(), 12);
+        assert_eq!(Network::Paseo.token_decimals(), 10);
+    }
+
+    #[test]
+    fn test_network_to_core() {
+        assert_eq!(Network::Polkadot.to_core(), stkopt_core::Network::Polkadot);
+        assert_eq!(Network::Kusama.to_core(), stkopt_core::Network::Kusama);
+        assert_eq!(Network::Westend.to_core(), stkopt_core::Network::Westend);
+        assert_eq!(Network::Paseo.to_core(), stkopt_core::Network::Paseo);
+    }
+}

@@ -3269,3 +3269,322 @@ fn render_staking_modal(frame: &mut Frame, app: &App) {
 
     frame.render_widget(paragraph, modal_area);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── truncate_str ───
+
+    #[test]
+    fn test_truncate_str_short_unchanged() {
+        assert_eq!(truncate_str("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_str_exact_length() {
+        let s = "exact";
+        assert_eq!(truncate_str(s, 5), "exact");
+    }
+
+    #[test]
+    fn test_truncate_str_long_with_ellipsis() {
+        assert_eq!(truncate_str("hello world", 8), "hello...");
+    }
+
+    #[test]
+    fn test_truncate_str_max_chars_three_or_less() {
+        assert_eq!(truncate_str("hello", 3), "hel");
+        assert_eq!(truncate_str("hi", 1), "h");
+    }
+
+    #[test]
+    fn test_truncate_str_unicode_multibyte() {
+        assert_eq!(truncate_str("αβγδε", 4), "α...");
+        assert_eq!(truncate_str("🎉🎊🎁🎄🎃", 4), "🎉...");
+    }
+
+    #[test]
+    fn test_truncate_str_zero_max() {
+        assert_eq!(truncate_str("anything", 0), "");
+    }
+
+    // ─── truncate_address ───
+
+    #[test]
+    fn test_truncate_address_long() {
+        assert_eq!(
+            truncate_address("14dM4xVv7F9UePj8rFy1vG9r8ZqY7t6s5r4e3w2q1", 6, 6),
+            "14dM4x...e3w2q1"
+        );
+    }
+
+    #[test]
+    fn test_truncate_address_short_unchanged() {
+        assert_eq!(truncate_address("short", 3, 3), "short");
+    }
+
+    #[test]
+    fn test_truncate_address_exact_length() {
+        assert_eq!(truncate_address("abcdef", 3, 3), "abcdef");
+    }
+
+    #[test]
+    fn test_truncate_address_empty() {
+        assert_eq!(truncate_address("", 4, 4), "");
+    }
+
+    // ─── format_balance ───
+
+    #[test]
+    fn test_format_balance_zero() {
+        assert_eq!(format_balance(0, 10), "0.00");
+    }
+
+    #[test]
+    fn test_format_balance_small() {
+        // 1.2345 DOT (10 decimals)
+        assert_eq!(format_balance(1_234_500_000_0u128, 10), "1.23");
+    }
+
+    #[test]
+    fn test_format_balance_thousands() {
+        // 1_500.00 -> "1.50K"
+        let val = 1_500u128 * 10u128.pow(10);
+        assert_eq!(format_balance(val, 10), "1.50K");
+    }
+
+    #[test]
+    fn test_format_balance_millions() {
+        // 2_500_000.00 -> "2.50M"
+        let val = 2_500_000u128 * 10u128.pow(10);
+        assert_eq!(format_balance(val, 10), "2.50M");
+    }
+
+    #[test]
+    fn test_format_balance_fractional_part() {
+        // 123.45 DOT (10 decimals)
+        let val = 1_234_500_000_000u128;
+        assert_eq!(format_balance(val, 10), "123.45");
+    }
+
+    #[test]
+    fn test_format_balance_12_decimals() {
+        // 1 KSM with 12 decimals
+        assert_eq!(format_balance(1_000_000_000_000u128, 12), "1.00");
+    }
+
+    #[test]
+    fn test_format_balance_large_millions_with_12_decimals() {
+        let val = 3_456_789u128 * 1_000_000_000_000u128;
+        assert_eq!(format_balance(val, 12), "3.46M");
+    }
+
+    // ─── calculate_y_ticks ───
+
+    #[test]
+    fn test_calculate_y_ticks_zero_value() {
+        assert_eq!(calculate_y_ticks(0.0, 5), vec![0.0]);
+    }
+
+    #[test]
+    fn test_calculate_y_ticks_negative_value() {
+        assert_eq!(calculate_y_ticks(-5.0, 5), vec![0.0]);
+    }
+
+    #[test]
+    fn test_calculate_y_ticks_zero_ticks() {
+        assert_eq!(calculate_y_ticks(100.0, 0), vec![0.0]);
+    }
+
+    #[test]
+    fn test_calculate_y_ticks_small_value() {
+        let ticks = calculate_y_ticks(5.0, 5);
+        assert_eq!(ticks, vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn test_calculate_y_ticks_large_value() {
+        let ticks = calculate_y_ticks(1000.0, 5);
+        assert_eq!(ticks, vec![0.0, 200.0, 400.0, 600.0, 800.0, 1000.0]);
+    }
+
+    #[test]
+    fn test_calculate_y_ticks_uneven_max() {
+        let ticks = calculate_y_ticks(123.0, 5);
+        // raw_step = 24.6, magnitude = 10, normalized = 2.46 -> nice_step = 5*10 = 50
+        // nice_max = (123/50).ceil()*50 = 150
+        assert_eq!(ticks, vec![0.0, 50.0, 100.0, 150.0]);
+    }
+
+    #[test]
+    fn test_calculate_y_ticks_five_step() {
+        let ticks = calculate_y_ticks(45.0, 5);
+        // raw_step = 9.0, magnitude = 1, normalized = 9.0 -> nice_step = 10
+        // nice_max = 50
+        assert_eq!(ticks, vec![0.0, 10.0, 20.0, 30.0, 40.0, 50.0]);
+    }
+
+    // ─── calculate_trend ───
+
+    #[test]
+    fn test_calculate_trend_empty() {
+        assert_eq!(calculate_trend(&[], 3), Vec::<f64>::new());
+    }
+
+    #[test]
+    fn test_calculate_trend_zero_window() {
+        assert_eq!(calculate_trend(&[1.0, 2.0, 3.0], 0), Vec::<f64>::new());
+    }
+
+    #[test]
+    fn test_calculate_trend_typical() {
+        let values = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let trend = calculate_trend(&values, 3);
+        // window=3 -> for each i, slice from max(0,i-1) to min(len,i+2)
+        // i=0: [0..2] = [1,2] -> avg 1.5
+        // i=1: [0..3] = [1,2,3] -> avg 2.0
+        // i=2: [1..4] = [2,3,4] -> avg 3.0
+        // i=3: [2..5] = [3,4,5] -> avg 4.0
+        // i=4: [3..5] = [4,5] -> avg 4.5
+        let expected = vec![1.5, 2.0, 3.0, 4.0, 4.5];
+        assert_eq!(trend.len(), expected.len());
+        for (a, e) in trend.iter().zip(expected.iter()) {
+            assert!((a - e).abs() < f64::EPSILON, "got {} expected {}", a, e);
+        }
+    }
+
+    #[test]
+    fn test_calculate_trend_window_larger_than_data() {
+        let values = vec![10.0, 20.0];
+        let trend = calculate_trend(&values, 7);
+        // window/2 = 3, so for every i the slice covers the full array
+        // i=0: [0..2] -> 15.0
+        // i=1: [0..2] -> 15.0
+        assert_eq!(trend, vec![15.0, 15.0]);
+    }
+
+    #[test]
+    fn test_calculate_trend_single_value() {
+        assert_eq!(calculate_trend(&[42.0], 3), vec![42.0]);
+    }
+
+    #[test]
+    fn test_calculate_trend_constant() {
+        let values = vec![5.0; 4];
+        let trend = calculate_trend(&values, 3);
+        assert_eq!(trend, vec![5.0, 5.0, 5.0, 5.0]);
+    }
+
+    // ─── grayscale_to_braille ───
+
+    #[test]
+    fn test_grayscale_to_braille_empty() {
+        assert_eq!(grayscale_to_braille(&[], 0, 0, 128), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_grayscale_to_braille_all_dark() {
+        // 2x4 block, all pixels dark (0 < 128)
+        let pixels = vec![0; 8];
+        let result = grayscale_to_braille(&pixels, 2, 4, 128);
+        assert_eq!(result.len(), 1);
+        // All 8 dots set -> 0x2800 + 0xFF = U+28FF
+        assert_eq!(result[0], "⣿");
+    }
+
+    #[test]
+    fn test_grayscale_to_braille_all_light() {
+        // 2x4 block, all pixels light (255 >= 128)
+        let pixels = vec![255; 8];
+        let result = grayscale_to_braille(&pixels, 2, 4, 128);
+        assert_eq!(result.len(), 1);
+        // No dots -> base character U+2800
+        assert_eq!(result[0], "⠀");
+    }
+
+    #[test]
+    fn test_grayscale_to_braille_mixed() {
+        // 2x4: left column dark, right column light
+        // left: 0,0,0,0  right: 255,255,255,255
+        let pixels = vec![0, 255, 0, 255, 0, 255, 0, 255];
+        let result = grayscale_to_braille(&pixels, 2, 4, 128);
+        assert_eq!(result.len(), 1);
+        // dots 1,2,3,7 set -> 0x01+0x02+0x04+0x40 = 0x47 -> U+2847
+        assert_eq!(result[0], "⡇");
+    }
+
+    #[test]
+    fn test_grayscale_to_braille_small_1x1() {
+        let pixels = vec![0];
+        let result = grayscale_to_braille(&pixels, 1, 1, 128);
+        assert_eq!(result.len(), 1);
+        // Only dot 1 set -> 0x01 -> U+2801
+        assert_eq!(result[0], "⠁");
+    }
+
+    #[test]
+    fn test_grayscale_to_braille_2x2() {
+        // 2 cols, 2 rows: dots 1,2,4,5 possible
+        let pixels = vec![0, 0, 0, 0]; // all dark
+        let result = grayscale_to_braille(&pixels, 2, 2, 128);
+        assert_eq!(result.len(), 1);
+        // dots 1,2,4,5 -> 0x01+0x02+0x08+0x10 = 0x1B -> U+281B
+        assert_eq!(result[0], "⠛");
+    }
+
+    #[test]
+    fn test_grayscale_to_braille_multiple_lines() {
+        // 2x8 -> two braille chars stacked vertically
+        let pixels = vec![0; 16];
+        let result = grayscale_to_braille(&pixels, 2, 8, 128);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], "⣿");
+        assert_eq!(result[1], "⣿");
+    }
+
+    // ─── calculate_chunk_size ───
+
+    #[test]
+    fn test_calculate_chunk_size_large_terminal() {
+        // target_modules = min(200, 192) = 192 >= 65 -> 250
+        assert_eq!(calculate_chunk_size(100, 200), 250);
+    }
+
+    #[test]
+    fn test_calculate_chunk_size_medium_terminal() {
+        // height=30 -> max_modules_from_height=60
+        // width=70 -> max_modules_from_width=62
+        // target=60, between 55 and 65 -> 180
+        assert_eq!(calculate_chunk_size(30, 70), 180);
+    }
+
+    #[test]
+    fn test_calculate_chunk_size_small_terminal() {
+        // height=25 -> max_modules_from_height=50
+        // width=55 -> max_modules_from_width=47
+        // target=47, between 45 and 55 -> 120
+        assert_eq!(calculate_chunk_size(25, 55), 120);
+    }
+
+    #[test]
+    fn test_calculate_chunk_size_tiny_terminal() {
+        // height=10 -> max_modules_from_height=20
+        // width=30 -> max_modules_from_width=22
+        // target=20 < 45 -> 80
+        assert_eq!(calculate_chunk_size(10, 30), 80);
+    }
+
+    #[test]
+    fn test_calculate_chunk_size_zero_dimensions() {
+        // max_modules_from_height=0, max_modules_from_width=0 (saturating_sub)
+        // target=0 < 45 -> 80
+        assert_eq!(calculate_chunk_size(0, 0), 80);
+    }
+
+    #[test]
+    fn test_calculate_chunk_size_boundary_65() {
+        // target_modules exactly 65 -> should hit >=65 branch
+        assert_eq!(calculate_chunk_size(33, 73), 250);
+    }
+}

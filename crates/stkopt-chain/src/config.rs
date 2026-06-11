@@ -110,3 +110,136 @@ pub fn get_staking_indexer_url(network: Network) -> &'static str {
         Network::Paseo => "https://staking-eras.usepapi.app/pas",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_rpc_endpoints_polkadot() {
+        let endpoints = get_rpc_endpoints(Network::Polkadot);
+        assert!(!endpoints.is_empty());
+        assert!(endpoints.contains(&"wss://rpc.ibp.network/polkadot"));
+        assert!(endpoints.contains(&"wss://polkadot-rpc.dwellir.com"));
+    }
+
+    #[test]
+    fn test_get_rpc_endpoints_kusama() {
+        let endpoints = get_rpc_endpoints(Network::Kusama);
+        assert!(!endpoints.is_empty());
+        assert!(endpoints.contains(&"wss://rpc.ibp.network/kusama"));
+        assert!(endpoints.contains(&"wss://kusama-rpc.dwellir.com"));
+    }
+
+    #[test]
+    fn test_get_rpc_endpoints_westend() {
+        let endpoints = get_rpc_endpoints(Network::Westend);
+        assert!(!endpoints.is_empty());
+        assert!(endpoints.contains(&"wss://westend-rpc.polkadot.io"));
+        assert!(endpoints.contains(&"wss://rpc.ibp.network/westend"));
+    }
+
+    #[test]
+    fn test_get_rpc_endpoints_paseo() {
+        let endpoints = get_rpc_endpoints(Network::Paseo);
+        assert!(!endpoints.is_empty());
+        assert!(endpoints.contains(&"wss://rpc.ibp.network/paseo"));
+        assert!(endpoints.contains(&"wss://paseo-rpc.dwellir.com"));
+    }
+
+    #[test]
+    fn test_get_asset_hub_endpoints_polkadot() {
+        let endpoints = get_asset_hub_endpoints(Network::Polkadot);
+        assert!(!endpoints.is_empty());
+        assert!(endpoints.contains(&"wss://polkadot-asset-hub-rpc.polkadot.io"));
+        assert!(endpoints.contains(&"wss://asset-hub-polkadot-rpc.dwellir.com"));
+    }
+
+    #[test]
+    fn test_get_asset_hub_endpoints_kusama() {
+        let endpoints = get_asset_hub_endpoints(Network::Kusama);
+        assert!(!endpoints.is_empty());
+        assert!(endpoints.contains(&"wss://kusama-asset-hub-rpc.polkadot.io"));
+        assert!(endpoints.contains(&"wss://asset-hub-kusama-rpc.dwellir.com"));
+    }
+
+    #[test]
+    fn test_get_asset_hub_endpoints_westend() {
+        let endpoints = get_asset_hub_endpoints(Network::Westend);
+        assert!(!endpoints.is_empty());
+        assert!(endpoints.contains(&"wss://westend-asset-hub-rpc.polkadot.io"));
+        assert!(endpoints.contains(&"wss://asset-hub-westend-rpc.dwellir.com"));
+    }
+
+    #[test]
+    fn test_get_asset_hub_endpoints_paseo() {
+        let endpoints = get_asset_hub_endpoints(Network::Paseo);
+        assert!(!endpoints.is_empty());
+        assert!(endpoints.contains(&"wss://sys.ibp.network/asset-hub-paseo"));
+        assert!(endpoints.contains(&"wss://asset-hub-paseo-rpc.dwellir.com"));
+    }
+
+    #[test]
+    fn test_get_people_chain_endpoints_polkadot() {
+        let endpoints = get_people_chain_endpoints(Network::Polkadot);
+        assert!(!endpoints.is_empty());
+        assert!(endpoints.contains(&"wss://polkadot-people-rpc.polkadot.io"));
+        assert!(endpoints.contains(&"wss://rpc-people-polkadot.luckyfriday.io"));
+    }
+
+    #[test]
+    fn test_get_people_chain_endpoints_kusama() {
+        let endpoints = get_people_chain_endpoints(Network::Kusama);
+        assert!(!endpoints.is_empty());
+        assert!(endpoints.contains(&"wss://kusama-people-rpc.polkadot.io"));
+        assert!(endpoints.contains(&"wss://rpc-people-kusama.luckyfriday.io"));
+    }
+
+    #[test]
+    fn test_get_people_chain_endpoints_westend() {
+        let endpoints = get_people_chain_endpoints(Network::Westend);
+        assert!(!endpoints.is_empty());
+        assert!(endpoints.contains(&"wss://westend-people-rpc.polkadot.io"));
+        assert!(endpoints.contains(&"wss://people-westend.dotters.network"));
+    }
+
+    #[test]
+    fn test_get_people_chain_endpoints_paseo() {
+        let endpoints = get_people_chain_endpoints(Network::Paseo);
+        assert!(!endpoints.is_empty());
+        assert!(endpoints.contains(&"wss://sys.ibp.network/people-paseo"));
+        assert!(endpoints.contains(&"wss://people-paseo.dotters.network"));
+    }
+
+    #[test]
+    fn test_get_staking_indexer_url_polkadot() {
+        assert_eq!(
+            get_staking_indexer_url(Network::Polkadot),
+            "https://staking-eras.usepapi.app/dot"
+        );
+    }
+
+    #[test]
+    fn test_get_staking_indexer_url_kusama() {
+        assert_eq!(
+            get_staking_indexer_url(Network::Kusama),
+            "https://staking-eras.usepapi.app/ksm"
+        );
+    }
+
+    #[test]
+    fn test_get_staking_indexer_url_westend() {
+        assert_eq!(
+            get_staking_indexer_url(Network::Westend),
+            "https://staking-eras.usepapi.app/wnd"
+        );
+    }
+
+    #[test]
+    fn test_get_staking_indexer_url_paseo() {
+        assert_eq!(
+            get_staking_indexer_url(Network::Paseo),
+            "https://staking-eras.usepapi.app/pas"
+        );
+    }
+}
