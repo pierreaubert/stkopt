@@ -22,6 +22,13 @@ pub(crate) fn clamp_log_pane_height(height: f32, viewport_height: f32) -> f32 {
     height.clamp(LOG_PANE_MIN_HEIGHT, max_height)
 }
 
+pub(crate) fn progress_steps_complete(
+    status: ConnectionStatus,
+    steps: &[(&'static str, bool)],
+) -> bool {
+    status == ConnectionStatus::Connected && steps.iter().all(|(_, done)| *done)
+}
+
 pub(crate) fn parse_token_amount(input: &str, decimals: u8) -> Result<u128, String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -160,6 +167,8 @@ pub struct StkoptApp {
     pub network: Network,
     /// Staking info for the watched account
     pub staking_info: Option<StakingInfo>,
+    /// Whether watched account data is currently loading
+    pub account_loading: bool,
     /// List of validators
     pub validators: Vec<ValidatorInfo>,
     /// Selected validators for nomination
@@ -634,6 +643,7 @@ impl StkoptApp {
             connection_mode,
             network,
             staking_info: None,
+            account_loading: false,
             validators: Vec::new(),
             selected_validators: Vec::new(),
             validator_sort: crate::actions::ValidatorSortColumn::default(),
@@ -781,8 +791,22 @@ impl StkoptApp {
         match update {
             ChainUpdate::ConnectionStatus(status) => {
                 self.connection_status = match status {
-                    stkopt_core::ConnectionStatus::Disconnected => ConnectionStatus::Disconnected,
-                    stkopt_core::ConnectionStatus::Connecting => ConnectionStatus::Connecting,
+                    stkopt_core::ConnectionStatus::Disconnected => {
+                        self.operations_loading = false;
+                        self.validators_loading = false;
+                        self.pools_loading = false;
+                        self.account_loading = false;
+                        self.history_loading = false;
+                        ConnectionStatus::Disconnected
+                    }
+                    stkopt_core::ConnectionStatus::Connecting => {
+                        self.operations_loading = true;
+                        self.validators_loading = true;
+                        self.pools_loading = true;
+                        self.account_loading = false;
+                        self.history_loading = false;
+                        ConnectionStatus::Connecting
+                    }
                     stkopt_core::ConnectionStatus::Connected => {
                         self.operations_loading = false;
                         if self.watched_account.is_none() {
@@ -790,13 +814,29 @@ impl StkoptApp {
                         }
                         ConnectionStatus::Connected
                     }
-                    stkopt_core::ConnectionStatus::Syncing { .. } => ConnectionStatus::Connecting,
+                    stkopt_core::ConnectionStatus::Syncing { .. } => {
+                        self.operations_loading = true;
+                        self.validators_loading = true;
+                        self.pools_loading = true;
+                        ConnectionStatus::Connecting
+                    }
                     stkopt_core::ConnectionStatus::Error(e) => {
                         self.connection_error = Some(e);
                         self.operations_loading = false;
+                        self.validators_loading = false;
+                        self.pools_loading = false;
+                        self.account_loading = false;
+                        self.history_loading = false;
                         ConnectionStatus::Disconnected
                     }
                 };
+                if self.connection_status == ConnectionStatus::Connected
+                    && self.watched_account.is_some()
+                    && self.staking_info.is_none()
+                    && !self.account_loading
+                {
+                    self.fetch_watched_account(cx);
+                }
             }
             ChainUpdate::ValidatorsLoaded(validators) => {
                 self.validators = validators;
@@ -809,6 +849,7 @@ impl StkoptApp {
                 tracing::info!("Loaded {} pools from chain", self.pools.len());
             }
             ChainUpdate::AccountLoaded(account_data) => {
+                self.account_loading = false;
                 // Update staking info from account data
                 self.staking_info = Some(StakingInfo {
                     total_balance: account_data.free_balance + account_data.reserved_balance,
@@ -869,6 +910,7 @@ impl StkoptApp {
                 self.operations_loading = false;
                 self.validators_loading = false;
                 self.pools_loading = false;
+                self.account_loading = false;
                 self.history_loading = false;
             }
         }
@@ -919,9 +961,12 @@ impl StkoptApp {
                 self.operations_loading = true;
                 self.validators_loading = true;
                 self.pools_loading = true;
+                self.account_loading = false;
                 self.history_loading = false;
                 self.validators.clear();
                 self.pools.clear();
+                self.staking_info = None;
+                self.staking_history.clear();
 
                 cx.spawn(
                     move |_: gpui::WeakEntity<StkoptApp>, _: &mut gpui::AsyncApp| async move {
@@ -935,6 +980,7 @@ impl StkoptApp {
                 self.operations_loading = false;
                 self.validators_loading = false;
                 self.pools_loading = false;
+                self.account_loading = false;
                 self.history_loading = false;
                 self.connection_error = Some("Connection worker is not available".to_string());
             }
@@ -1052,8 +1098,97 @@ impl StkoptApp {
         self.network.symbol()
     }
 
+    /// Whether all initial chain data needed by the UI has finished loading.
+    pub fn data_download_complete(&self) -> bool {
+        progress_steps_complete(self.connection_status, &self.connection_progress_steps())
+    }
+
+    /// Whether transaction-oriented commands can run.
+    pub fn commands_available(&self) -> bool {
+        self.data_download_complete() && self.watched_account.is_some()
+    }
+
+    fn connection_progress_steps(&self) -> [(&'static str, bool); 4] {
+        let connected = self.connection_status == ConnectionStatus::Connected;
+        [
+            ("Operations", connected && !self.operations_loading),
+            ("Validators", connected && !self.validators_loading),
+            ("Pools", connected && !self.pools_loading),
+            ("History", connected && self.account_history_ready()),
+        ]
+    }
+
+    fn account_history_ready(&self) -> bool {
+        if self.watched_account.is_none() {
+            return !self.history_loading;
+        }
+
+        !self.account_loading && !self.history_loading && self.staking_info.is_some()
+    }
+
+    /// Select a watched account and reset stale account-specific data.
+    pub fn set_watched_account(&mut self, address: String) {
+        self.watched_account = Some(address.clone());
+        self.account_input = address;
+        self.account_error = None;
+        self.staking_info = None;
+        self.staking_history.clear();
+        self.account_loading = false;
+        self.history_loading = false;
+    }
+
+    /// Fetch account data for the currently watched account.
+    pub fn fetch_watched_account(&mut self, cx: &mut Context<Self>) {
+        let Some(ref handle) = self.chain_handle else {
+            return;
+        };
+        let Some(address) = self.watched_account.clone() else {
+            return;
+        };
+        if self.connection_status != ConnectionStatus::Connected || self.account_loading {
+            return;
+        }
+
+        self.account_loading = true;
+        self.history_loading = false;
+        cx.notify();
+
+        let handle = handle.clone();
+        let entity = self.entity.clone();
+        let mut async_cx = cx.to_async();
+        cx.spawn(
+            move |_this: gpui::WeakEntity<StkoptApp>, _cx: &mut gpui::AsyncApp| async move {
+                let result = handle.fetch_account(address).await;
+                let _ =
+                    entity.update(
+                        &mut async_cx,
+                        |this, cx: &mut Context<StkoptApp>| match result {
+                            Ok(account_data) => {
+                                this.apply_chain_update(
+                                    crate::chain::ChainUpdate::AccountLoaded(account_data),
+                                    cx,
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to fetch account: {}", e);
+                                this.account_loading = false;
+                                this.history_loading = false;
+                                this.connection_error =
+                                    Some(format!("Failed to fetch account: {}", e));
+                                cx.notify();
+                            }
+                        },
+                    );
+            },
+        )
+        .detach();
+    }
+
     /// Open the staking modal with a specific operation.
     pub fn open_staking_modal(&mut self, operation: StakingOperation, cx: &mut Context<Self>) {
+        if !self.commands_available() {
+            return;
+        }
         self.staking_operation = operation;
         self.staking_amount_input.clear();
         self.staking_action_message = None;
@@ -1064,6 +1199,13 @@ impl StkoptApp {
 
     /// Generate QR payload for the current staking operation.
     pub fn generate_staking_qr(&mut self, cx: &mut Context<Self>) {
+        if !self.commands_available() {
+            self.staking_action_generating = false;
+            self.staking_action_message = Some("Wait for all chain data to finish loading".into());
+            cx.notify();
+            return;
+        }
+
         let Some(ref chain_handle) = self.chain_handle else {
             self.staking_action_generating = false;
             self.staking_action_message = Some("Not connected".to_string());
@@ -1195,6 +1337,13 @@ impl StkoptApp {
         self.show_pool_modal = false;
         self.connection_error = None;
 
+        if !self.commands_available() {
+            self.connection_error =
+                Some("Wait for all chain data to finish loading before claiming rewards.".into());
+            cx.notify();
+            return;
+        }
+
         if self.chain_handle.is_none() {
             self.connection_error = Some("Connect to a network before claiming rewards.".into());
             cx.notify();
@@ -1228,6 +1377,13 @@ impl StkoptApp {
 
     /// Generate QR payload for nominating validators.
     pub fn generate_nominate_qr(&mut self, targets: Vec<String>, cx: &mut Context<Self>) {
+        if !self.commands_available() {
+            self.connection_error =
+                Some("Wait for all chain data to finish loading before nominating.".into());
+            cx.notify();
+            return;
+        }
+
         let Some(ref chain_handle) = self.chain_handle else {
             self.connection_error = Some("Not connected".to_string());
             cx.notify();
@@ -1317,6 +1473,9 @@ impl StkoptApp {
         pool_id: Option<u32>,
         cx: &mut Context<Self>,
     ) {
+        if !self.commands_available() {
+            return;
+        }
         self.pool_operation = operation;
         self.selected_pool_id = pool_id;
         self.pool_amount_input.clear();
@@ -1328,6 +1487,13 @@ impl StkoptApp {
 
     /// Generate QR payload for the current pool operation.
     pub fn generate_pool_qr(&mut self, cx: &mut Context<Self>) {
+        if !self.commands_available() {
+            self.pool_action_generating = false;
+            self.pool_action_message = Some("Wait for all chain data to finish loading".into());
+            cx.notify();
+            return;
+        }
+
         let Some(ref chain_handle) = self.chain_handle else {
             self.pool_action_generating = false;
             self.pool_action_message = Some("Not connected".to_string());
@@ -1936,17 +2102,11 @@ impl StkoptApp {
     fn render_connection_status(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
 
-        let all_done = self.connection_status == ConnectionStatus::Connected
-            && !self.operations_loading
-            && !self.validators_loading
-            && !self.pools_loading
-            && !self.history_loading;
-
         let (status_text, status_color) = match self.connection_status {
             ConnectionStatus::Disconnected => ("Disconnected", theme.error),
             ConnectionStatus::Connecting => ("Connecting...", theme.warning),
             ConnectionStatus::Connected => {
-                if all_done {
+                if self.data_download_complete() {
                     ("Connected", theme.success)
                 } else {
                     ("Loading data...", theme.warning)
@@ -1954,26 +2114,7 @@ impl StkoptApp {
             }
         };
 
-        let bars = [
-            (
-                "Operations",
-                !self.operations_loading && self.connection_status == ConnectionStatus::Connected,
-            ),
-            (
-                "Validators",
-                !self.validators_loading && self.connection_status == ConnectionStatus::Connected,
-            ),
-            (
-                "Pools",
-                !self.pools_loading && self.connection_status == ConnectionStatus::Connected,
-            ),
-            (
-                "History",
-                !self.history_loading
-                    && (self.watched_account.is_none()
-                        || self.connection_status == ConnectionStatus::Connected),
-            ),
-        ];
+        let bars = self.connection_progress_steps();
 
         div()
             .flex()
@@ -1989,6 +2130,9 @@ impl StkoptApp {
             )
             .children(bars.into_iter().map(|(label, done)| {
                 let fill_color = if done { theme.success } else { theme.border };
+                let fill = div().h_full().rounded_full().bg(fill_color);
+                let fill = if done { fill.w_full() } else { fill.w(px(0.0)) };
+
                 div()
                     .flex()
                     .flex_col()
@@ -2004,11 +2148,7 @@ impl StkoptApp {
                             .h(px(4.0))
                             .rounded_full()
                             .bg(theme.border)
-                            .child(div().h_full().rounded_full().bg(fill_color).w(if done {
-                                px(100.0)
-                            } else {
-                                px(0.0)
-                            })),
+                            .child(fill),
                     )
             }))
     }
@@ -2307,10 +2447,12 @@ fn network_pill(
                     // Clear cached data for old network
                     this.validators.clear();
                     this.pools.clear();
+                    this.staking_info = None;
                     this.staking_history.clear();
                     this.operations_loading = false;
                     this.validators_loading = false;
                     this.pools_loading = false;
+                    this.account_loading = false;
                     this.history_loading = false;
                     cx.notify();
                 }

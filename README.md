@@ -11,7 +11,7 @@ A terminal user interface (TUI) application for optimizing Polkadot staking. Bro
 ## Features
 
 - **Light client by default**: Uses smoldot embedded light client for fully decentralized connectivity (no trusted RPC required)
-- **Multi-network support**: Polkadot, Kusama, Westend
+- **Multi-network support**: Polkadot, Kusama, Westend, Paseo
 - **Validator browser**: View validators with APY, commission, and nomination counts
 - **Nomination pools**: Browse pools with aggregated APY
 - **Account status**: View balances, staking info, and nominations
@@ -24,11 +24,19 @@ A terminal user interface (TUI) application for optimizing Polkadot staking. Bro
 - **Theme support**: Auto-detects dark/light terminal background
 - **Batch mode**: Fetch and cache staking history from cron jobs
 
+## What's new in 0.1.7
+
+- Updated the chain client to Subxt 0.50 and refreshed bundled light-client chain specs.
+- Improved light-client startup so the UI waits for validator, pool, and identity data before enabling transaction actions.
+- Fixed Polkadot Vault QR signing for runtimes using `AuthorizeCall`, `EthSetOrigin`, and `StorageWeightReclaim` transaction extensions.
+- Fixed the TUI nomination optimizer so it shows status feedback and can select validators even when APY data is unavailable.
+- Hardened dynamic account decoding to reject malformed account IDs instead of silently truncating them.
+
 ## Installation
 
 ### From source
 
-Requires Rust 1.85 or later.
+Requires Rust 1.96 or later.
 
 ```bash
 git clone https://github.com/pierreaubert/stkopt.git
@@ -230,6 +238,7 @@ stkopt/
 ├── crates/
 │   ├── stkopt-chain/   # Chain client (subxt)
 │   ├── stkopt-core/    # Domain logic (APY calculations, optimizer)
+│   ├── stkopt-gpui/    # Desktop GUI application
 │   └── stkopt-tui/     # TUI application
 ├── scripts/
 │   ├── build-dmg.sh    # macOS DMG builder

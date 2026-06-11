@@ -152,6 +152,8 @@ pub enum Action {
     RunOptimizationWithStrategy(usize),
     /// Set optimization results.
     SetOptimizationResult(OptimizationResult),
+    /// Set a status message for the nomination optimizer panel.
+    SetNominationStatus(Option<String>),
     /// Toggle validator selection (for manual selection).
     ToggleValidatorSelection(usize),
     /// Clear nominations.

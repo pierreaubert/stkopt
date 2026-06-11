@@ -4,7 +4,7 @@ use super::decode_helpers::extract_account_id;
 use crate::ChainClient;
 use crate::error::ChainError;
 use stkopt_core::Balance;
-use subxt::dynamic::{At, DecodedValueThunk, Value};
+use subxt::dynamic::{At, Value};
 use subxt::utils::AccountId32;
 
 /// Nomination pool state.
@@ -97,17 +97,13 @@ impl ChainClient {
     pub async fn get_nomination_pools(&self) -> Result<Vec<PoolInfo>, ChainError> {
         use std::collections::HashMap;
 
-        let storage_query = subxt::dynamic::storage("NominationPools", "BondedPools", ());
+        let storage_query =
+            subxt::dynamic::storage::<Vec<Value>, Value>("NominationPools", "BondedPools");
 
         // Use HashMap to deduplicate by pool ID (light clients may return duplicates)
         let mut pools_map: HashMap<u32, PoolInfo> = HashMap::new();
-        let iter_result = self
-            .client()
-            .storage()
-            .at_latest()
-            .await?
-            .iter(storage_query)
-            .await;
+        let block = self.client().at_current_block().await?;
+        let iter_result = block.storage().iter(&storage_query, vec![]).await;
 
         let mut iter = match iter_result {
             Ok(iter) => iter,
@@ -120,8 +116,8 @@ impl ChainClient {
         loop {
             match iter.next().await {
                 Some(Ok(kv)) => {
-                    let key_bytes = kv.key_bytes;
-                    let value: DecodedValueThunk = kv.value;
+                    let key_bytes = kv.key_bytes();
+                    let value = kv.value();
 
                     // Extract pool ID from key (last 4 bytes as u32)
                     if key_bytes.len() < 4 {
@@ -139,17 +135,17 @@ impl ChainClient {
                         continue;
                     }
 
-                    let Ok(decoded) = value.to_value() else {
+                    let Ok(decoded) = value.decode() else {
                         continue;
                     };
 
                     // BondedPoolInner structure
                     let points = decoded
                         .at("points")
-                        .and_then(|v: &Value<u32>| v.as_u128())
+                        .and_then(|v: &Value| v.as_u128())
                         .unwrap_or(0);
 
-                    let state = match decoded.at("state").map(|v: &Value<u32>| &v.value) {
+                    let state = match decoded.at("state").map(|v: &Value| &v.value) {
                         Some(subxt::ext::scale_value::ValueDef::Variant(variant)) => {
                             match variant.name.as_str() {
                                 "Open" => PoolState::Open,
@@ -173,7 +169,7 @@ impl ChainClient {
 
                     let member_count = decoded
                         .at("member_counter")
-                        .and_then(|v: &Value<u32>| v.as_u128())
+                        .and_then(|v: &Value| v.as_u128())
                         .unwrap_or(0) as u32;
 
                     // Parse roles
@@ -248,17 +244,13 @@ impl ChainClient {
     pub async fn get_pool_metadata(&self) -> Result<Vec<PoolMetadata>, ChainError> {
         use std::collections::HashMap;
 
-        let storage_query = subxt::dynamic::storage("NominationPools", "Metadata", ());
+        let storage_query =
+            subxt::dynamic::storage::<Vec<Value>, Value>("NominationPools", "Metadata");
 
         // Use HashMap to deduplicate by pool ID
         let mut metadata_map: HashMap<u32, String> = HashMap::new();
-        let iter_result = self
-            .client()
-            .storage()
-            .at_latest()
-            .await?
-            .iter(storage_query)
-            .await;
+        let block = self.client().at_current_block().await?;
+        let iter_result = block.storage().iter(&storage_query, vec![]).await;
 
         let mut iter = match iter_result {
             Ok(iter) => iter,
@@ -273,8 +265,8 @@ impl ChainClient {
             match iter.next().await {
                 Some(Ok(kv)) => {
                     count += 1;
-                    let key_bytes = kv.key_bytes;
-                    let value: DecodedValueThunk = kv.value;
+                    let key_bytes = kv.key_bytes();
+                    let value = kv.value();
 
                     // Extract pool ID from key
                     if key_bytes.len() < 4 {
@@ -293,7 +285,7 @@ impl ChainClient {
                         continue;
                     }
 
-                    let Ok(decoded) = value.to_value() else {
+                    let Ok(decoded) = value.decode() else {
                         continue;
                     };
                     tracing::debug!("Pool {} raw metadata: {:?}", id, decoded);
@@ -339,25 +331,20 @@ impl ChainClient {
 
     /// Get metadata (name) for a specific pool.
     pub async fn get_pool_name(&self, pool_id: u32) -> Result<Option<String>, ChainError> {
-        let storage_query = subxt::dynamic::storage(
-            "NominationPools",
-            "Metadata",
-            vec![Value::u128(pool_id as u128)],
-        );
+        let storage_query =
+            subxt::dynamic::storage::<Vec<Value>, Value>("NominationPools", "Metadata");
 
-        let result: Option<DecodedValueThunk> = self
-            .client()
+        let block = self.client().at_current_block().await?;
+        let result = block
             .storage()
-            .at_latest()
-            .await?
-            .fetch(&storage_query)
+            .try_fetch(&storage_query, vec![Value::u128(pool_id as u128)])
             .await?;
 
         let Some(value) = result else {
             return Ok(None);
         };
 
-        let decoded = value.to_value()?;
+        let decoded: Value = value.decode()?;
         let name = extract_bytes_as_string(&decoded);
 
         if name.is_empty() {
@@ -377,17 +364,17 @@ impl ChainClient {
         let stash = derive_pool_account(pool_id, PoolAccountType::Bonded);
 
         // Query Staking.Nominators for this stash account
-        let storage_query = subxt::dynamic::storage(
-            "Staking",
-            "Nominators",
-            vec![Value::from_bytes(stash.clone())],
-        );
+        let storage_query = subxt::dynamic::storage::<Vec<Value>, Value>("Staking", "Nominators");
 
-        let storage = self.client().storage().at_latest().await?;
+        let block = self.client().at_current_block().await?;
 
         // Light clients can fail with "Storage query errors" when they can't retrieve
         // the storage proof. Treat this as "no nominations" rather than a fatal error.
-        let result: Option<DecodedValueThunk> = match storage.fetch(&storage_query).await {
+        let result = match block
+            .storage()
+            .try_fetch(&storage_query, vec![Value::from_bytes(stash.clone())])
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 let err_str = e.to_string();
@@ -407,7 +394,7 @@ impl ChainClient {
             return Ok(None);
         };
 
-        let decoded = value.to_value()?;
+        let decoded: Value = value.decode()?;
 
         // Nominations = { targets: Vec<AccountId>, submitted_in: EraIndex, suppressed: bool }
         let mut targets = Vec::new();
@@ -432,40 +419,35 @@ impl ChainClient {
     /// Get the reward pool state for a pool.
     /// Returns the current reward counter needed to calculate pending rewards.
     pub async fn get_reward_pool(&self, pool_id: u32) -> Result<Option<RewardPool>, ChainError> {
-        let storage_query = subxt::dynamic::storage(
-            "NominationPools",
-            "RewardPools",
-            vec![Value::u128(pool_id as u128)],
-        );
+        let storage_query =
+            subxt::dynamic::storage::<Vec<Value>, Value>("NominationPools", "RewardPools");
 
-        let result: Option<DecodedValueThunk> = self
-            .client()
+        let block = self.client().at_current_block().await?;
+        let result = block
             .storage()
-            .at_latest()
-            .await?
-            .fetch(&storage_query)
+            .try_fetch(&storage_query, vec![Value::u128(pool_id as u128)])
             .await?;
 
         let Some(value) = result else {
             return Ok(None);
         };
 
-        let decoded = value.to_value()?;
+        let decoded: Value = value.decode()?;
 
         // RewardPool = { last_recorded_reward_counter, last_recorded_total_payouts, total_rewards_claimed, total_commission_pending, total_commission_claimed }
         let last_recorded_reward_counter = decoded
             .at("last_recorded_reward_counter")
-            .and_then(|v: &Value<u32>| v.as_u128())
+            .and_then(|v: &Value| v.as_u128())
             .unwrap_or(0);
 
         let last_recorded_total_payouts = decoded
             .at("last_recorded_total_payouts")
-            .and_then(|v: &Value<u32>| v.as_u128())
+            .and_then(|v: &Value| v.as_u128())
             .unwrap_or(0);
 
         let total_rewards_claimed = decoded
             .at("total_rewards_claimed")
-            .and_then(|v: &Value<u32>| v.as_u128())
+            .and_then(|v: &Value| v.as_u128())
             .unwrap_or(0);
 
         Ok(Some(RewardPool {
@@ -538,7 +520,7 @@ pub struct RewardPool {
 
 /// Parse an AccountId from a dynamic Value.
 /// AccountId is stored as a 32-byte array in Option/Some variant.
-fn parse_account_id(value: Option<&Value<u32>>) -> Option<AccountId32> {
+fn parse_account_id(value: Option<&Value>) -> Option<AccountId32> {
     let v = value?;
 
     // For Option<AccountId32>, we need to check if it's Some variant
@@ -569,7 +551,7 @@ fn parse_account_id(value: Option<&Value<u32>>) -> Option<AccountId32> {
 
 /// Extract bytes from a Value and convert to String.
 /// Metadata is stored as a BoundedVec<u8>, which decodes as a sequence.
-fn extract_bytes_as_string(value: &Value<u32>) -> String {
+fn extract_bytes_as_string(value: &Value) -> String {
     // Try to iterate over indices to extract bytes
     let mut bytes = Vec::new();
     for i in 0..1024 {

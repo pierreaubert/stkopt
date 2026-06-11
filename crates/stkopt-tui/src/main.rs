@@ -21,7 +21,8 @@ use color_eyre::Result;
 use event::{Event, EventHandler};
 use log_buffer::{LogBuffer, LogBufferLayer};
 use ratatui::crossterm::event::KeyCode;
-use stkopt_core::Network;
+use std::cmp::Ordering;
+use stkopt_core::{Network, OptimizationResult, SelectionStrategy, ValidatorCandidate};
 use tokio::sync::mpsc;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -72,6 +73,76 @@ struct Args {
 // Re-export connection types from stkopt_chain
 use stkopt_chain::{ConnectionConfig, ConnectionMode, RpcEndpoints};
 
+fn validator_candidates(app: &App) -> Vec<ValidatorCandidate> {
+    app.validators
+        .iter()
+        .map(|v| ValidatorCandidate {
+            address: v.address.clone(),
+            commission: v.commission,
+            blocked: v.blocked,
+            apy: v.apy.unwrap_or(0.0),
+            total_stake: v.total_stake,
+            nominator_count: v.nominator_count,
+        })
+        .collect()
+}
+
+fn fallback_select_without_apy(
+    candidates: &[ValidatorCandidate],
+    criteria: &stkopt_core::OptimizationCriteria,
+) -> OptimizationResult {
+    let mut eligible: Vec<_> = candidates
+        .iter()
+        .filter(|v| v.commission <= criteria.max_commission && !v.blocked)
+        .cloned()
+        .collect();
+
+    eligible.sort_by(|a, b| {
+        a.commission
+            .partial_cmp(&b.commission)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| b.total_stake.cmp(&a.total_stake))
+            .then_with(|| b.nominator_count.cmp(&a.nominator_count))
+    });
+
+    OptimizationResult {
+        selected: eligible.into_iter().take(criteria.target_count).collect(),
+        estimated_apy_min: 0.0,
+        estimated_apy_max: 0.0,
+        estimated_apy_avg: 0.0,
+    }
+}
+
+fn optimize_nomination(
+    app: &App,
+    strategy: SelectionStrategy,
+) -> (OptimizationResult, Option<String>) {
+    let candidates = validator_candidates(app);
+    let criteria = stkopt_core::OptimizationCriteria {
+        strategy,
+        ..stkopt_core::OptimizationCriteria::default()
+    };
+    let result = stkopt_core::select_validators(&candidates, &criteria);
+
+    if !result.selected.is_empty() || candidates.iter().any(|v| v.apy > 0.0) {
+        return (result, None);
+    }
+
+    let fallback = fallback_select_without_apy(&candidates, &criteria);
+    let status = if fallback.selected.is_empty() {
+        Some(
+            "No eligible validators found. Try loading validator data or relaxing filters."
+                .to_string(),
+        )
+    } else {
+        Some(format!(
+            "APY is unavailable; selected {} low-commission active validators by stake.",
+            fallback.selected.len()
+        ))
+    };
+    (fallback, status)
+}
+
 /// Network argument that can be parsed from string.
 #[derive(Debug, Clone)]
 struct NetworkArg(Network);
@@ -108,7 +179,15 @@ async fn main() -> Result<()> {
     let env_filter = tracing_subscriber::EnvFilter::from_default_env()
         .add_directive("stkopt=info".parse()?)
         .add_directive("stkopt_chain=info".parse()?)
-        .add_directive("stkopt_core=info".parse()?);
+        .add_directive("stkopt_core=info".parse()?)
+        .add_directive("json-rpc=warn".parse()?)
+        .add_directive("network=info".parse()?)
+        .add_directive("runtime=info".parse()?)
+        .add_directive("sync-service=info".parse()?)
+        .add_directive("bitswap-service=info".parse()?)
+        .add_directive("tx-service=info".parse()?)
+        .add_directive("stkopt_chain::lightclient=info".parse()?)
+        .add_directive("stkopt_chain::queries::identity=info".parse()?);
 
     if args.update {
         // In update mode, log to stderr so user can see progress
@@ -339,47 +418,30 @@ async fn main() -> Result<()> {
                     }
                     Action::RunOptimization => {
                         // Run optimization with default strategy (TopApy)
-                        let candidates: Vec<_> = app.validators.iter().map(|v| {
-                            stkopt_core::ValidatorCandidate {
-                                address: v.address.clone(),
-                                commission: v.commission,
-                                blocked: v.blocked,
-                                apy: v.apy.unwrap_or(0.0),
-                                total_stake: v.total_stake,
-                                nominator_count: v.nominator_count,
-                            }
-                        }).collect();
-
-                        let criteria = stkopt_core::OptimizationCriteria::default();
-                        let result = stkopt_core::select_validators(&candidates, &criteria);
+                        let (result, status) =
+                            optimize_nomination(&app, SelectionStrategy::TopApy);
                         let _ = action_tx.send(Action::SetOptimizationResult(result)).await;
+                        if let Some(status) = status {
+                            let _ = action_tx
+                                .send(Action::SetNominationStatus(Some(status)))
+                                .await;
+                        }
                     }
                     Action::RunOptimizationWithStrategy(strategy_idx) => {
                         // Run optimization with selected strategy
-                        let candidates: Vec<_> = app.validators.iter().map(|v| {
-                            stkopt_core::ValidatorCandidate {
-                                address: v.address.clone(),
-                                commission: v.commission,
-                                blocked: v.blocked,
-                                apy: v.apy.unwrap_or(0.0),
-                                total_stake: v.total_stake,
-                                nominator_count: v.nominator_count,
-                            }
-                        }).collect();
-
                         let strategy = match strategy_idx {
-                            0 => stkopt_core::SelectionStrategy::TopApy,
-                            1 => stkopt_core::SelectionStrategy::RandomFromTop,
-                            2 => stkopt_core::SelectionStrategy::DiversifyByStake,
-                            _ => stkopt_core::SelectionStrategy::TopApy,
+                            0 => SelectionStrategy::TopApy,
+                            1 => SelectionStrategy::RandomFromTop,
+                            2 => SelectionStrategy::DiversifyByStake,
+                            _ => SelectionStrategy::TopApy,
                         };
-
-                        let criteria = stkopt_core::OptimizationCriteria {
-                            strategy,
-                            ..stkopt_core::OptimizationCriteria::default()
-                        };
-                        let result = stkopt_core::select_validators(&candidates, &criteria);
+                        let (result, status) = optimize_nomination(&app, strategy);
                         let _ = action_tx.send(Action::SetOptimizationResult(result)).await;
+                        if let Some(status) = status {
+                            let _ = action_tx
+                                .send(Action::SetNominationStatus(Some(status)))
+                                .await;
+                        }
                     }
                     Action::GenerateBondQR { value } => {
                         if let Some(account) = &app.watched_account {
@@ -490,7 +552,20 @@ async fn main() -> Result<()> {
                     }
                     Action::GenerateNominationQR => {
                         // Get selected validator addresses
-                        if let Some(account) = &app.watched_account {
+                        if app.watched_account.is_none() {
+                            let _ = action_tx
+                                .send(Action::SetNominationStatus(Some(
+                                    "Select an account before generating a nomination QR."
+                                        .to_string(),
+                                )))
+                                .await;
+                        } else if app.selected_validators.is_empty() {
+                            let _ = action_tx
+                                .send(Action::SetNominationStatus(Some(
+                                    "Select validators first, or press o to optimize.".to_string(),
+                                )))
+                                .await;
+                        } else if let Some(account) = &app.watched_account {
                             let targets: Vec<subxt::utils::AccountId32> = app
                                 .selected_validators
                                 .iter()
@@ -503,10 +578,23 @@ async fn main() -> Result<()> {
                                 .collect();
 
                             if !targets.is_empty() {
+                                let _ = action_tx
+                                    .send(Action::SetNominationStatus(Some(format!(
+                                        "Generating nomination QR for {} validators...",
+                                        targets.len()
+                                    ))))
+                                    .await;
                                 let _ = request_tx.send(ChainRequest::GenerateNominationQR {
                                     signer: account.clone(),
                                     targets,
                                 }).await;
+                            } else {
+                                let _ = action_tx
+                                    .send(Action::SetNominationStatus(Some(
+                                        "Selected validator addresses could not be encoded for nomination."
+                                            .to_string(),
+                                    )))
+                                    .await;
                             }
                         }
                     }
@@ -711,4 +799,67 @@ async fn main() -> Result<()> {
     tui.exit()?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use action::DisplayValidator;
+    use theme::Theme;
+
+    fn make_validator(
+        address: &str,
+        commission: f64,
+        blocked: bool,
+        total_stake: u128,
+        apy: Option<f64>,
+    ) -> DisplayValidator {
+        DisplayValidator {
+            address: address.to_string(),
+            name: None,
+            commission,
+            blocked,
+            total_stake,
+            own_stake: total_stake / 10,
+            nominator_count: 10,
+            points: 0,
+            apy,
+        }
+    }
+
+    #[test]
+    fn optimize_nomination_falls_back_when_apy_is_unavailable() {
+        let mut app = App::new(Network::Polkadot, LogBuffer::new(), Theme::Dark);
+        app.validators = vec![
+            make_validator("high-stake", 0.05, false, 1_000, None),
+            make_validator("blocked", 0.01, true, 10_000, None),
+            make_validator("low-commission", 0.01, false, 500, None),
+        ];
+
+        let (result, status) = optimize_nomination(&app, SelectionStrategy::TopApy);
+
+        assert_eq!(result.selected.len(), 2);
+        assert_eq!(result.selected[0].address, "low-commission");
+        assert_eq!(result.selected[1].address, "high-stake");
+        assert!(
+            status
+                .as_deref()
+                .is_some_and(|message| message.contains("APY is unavailable"))
+        );
+    }
+
+    #[test]
+    fn optimize_nomination_uses_apy_when_available() {
+        let mut app = App::new(Network::Polkadot, LogBuffer::new(), Theme::Dark);
+        app.validators = vec![
+            make_validator("lower-apy", 0.05, false, 1_000, Some(0.08)),
+            make_validator("higher-apy", 0.05, false, 500, Some(0.12)),
+        ];
+
+        let (result, status) = optimize_nomination(&app, SelectionStrategy::TopApy);
+
+        assert_eq!(result.selected.len(), 2);
+        assert_eq!(result.selected[0].address, "higher-apy");
+        assert!(status.is_none());
+    }
 }

@@ -13,13 +13,13 @@ parity-scale-codec.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
 futures.workspace = true
 reqwest.workspace = true
 # Force ed25519-zebra alloc feature for smoldot light client
 ed25519-zebra.workspace = true
 
-hex = "0.4"
-bs58 = "0.5"
+hex.workspace = true
+bs58.workspace = true
 
 [dev-dependencies]
-tracing-subscriber.workspace = true

@@ -11,7 +11,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Connected!");
 
-    let metadata = client.metadata();
+    let block = client.at_current_block().await?;
+    let metadata = block.metadata();
 
     println!("\nTransaction Extensions:");
 

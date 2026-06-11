@@ -23,7 +23,7 @@ gpui-px = { version="0.5", features = ["gpui"] }
 # Async runtime
 tokio = { workspace = true, features = ["full"] }
 futures.workspace = true
-rand = "0.8"
+rand.workspace = true
 
 # Serialization
 serde.workspace = true
@@ -43,19 +43,14 @@ clap.workspace = true
 
 # Utilities
 directories.workspace = true
-hex = "0.4"
-rusqlite = { workspace = true, features = ["bundled"] }
-nokhwa = { version = "0.10.10", features = ["input-native"] }
-rqrr = "0.10.0"
-qrcode = "0.14"
-chrono = "0.4.42"
+hex.workspace = true
+rusqlite.workspace = true
+nokhwa.workspace = true
+rqrr.workspace = true
+qrcode.workspace = true
+chrono.workspace = true
 
 [dev-dependencies]
-# Property-based testing
-proptest = "1.4"
-
-# Async testing
-tokio-test = "0.4"
-
-# Test utilities
-pretty_assertions = "1.4"
+proptest.workspace = true
+tokio-test.workspace = true
+pretty_assertions.workspace = true

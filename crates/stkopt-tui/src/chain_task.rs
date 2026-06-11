@@ -12,6 +12,8 @@ use stkopt_core::{ConnectionStatus, Network};
 use subxt::utils::AccountId32;
 use tokio::sync::mpsc;
 
+const PEOPLE_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Staking operation to be performed by the chain task.
 #[derive(Debug)]
 pub enum StakingOp {
@@ -158,6 +160,34 @@ async fn try_reconnect(client: &ChainClient, max_attempts: u32) -> Option<ChainC
     None
 }
 
+async fn connect_ready_people_client(
+    client: &ChainClient,
+    network: Network,
+) -> Option<stkopt_chain::PeopleChainClient> {
+    match client.connect_people_chain_client().await {
+        Ok(people) => match people.wait_until_ready(PEOPLE_READY_TIMEOUT).await {
+            Ok(block) => {
+                tracing::info!("Connected to {} People chain at block {}", network, block);
+                Some(people)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "People chain connected but did not become ready (identities unavailable): {}",
+                    e
+                );
+                None
+            }
+        },
+        Err(e) => {
+            tracing::warn!(
+                "Failed to connect to People chain (identities unavailable): {}",
+                e
+            );
+            None
+        }
+    }
+}
+
 /// Background task for chain operations.
 pub async fn chain_task(
     mut network: Network,
@@ -175,6 +205,12 @@ pub async fn chain_task(
     let action_tx_for_status = action_tx.clone();
     tokio::spawn(async move {
         while let Some(status) = status_rx.recv().await {
+            if matches!(status, ConnectionStatus::Connected) {
+                tracing::debug!(
+                    "Ignoring low-level chain Connected status until app startup data is ready"
+                );
+                continue;
+            }
             let _ = action_tx_for_status
                 .send(Action::UpdateConnectionStatus(status))
                 .await;
@@ -204,23 +240,17 @@ pub async fn chain_task(
     };
 
     // Send chain info for UI display and validation
-    let chain_info = client.get_chain_info();
-    let _ = action_tx.send(Action::SetChainInfo(chain_info)).await;
-
-    // Connect to People chain for identity queries
-    let mut people_client = match client.connect_people_chain().await {
-        Ok(subxt_client) => {
-            tracing::info!("Connected to {} People chain", network);
-            Some(stkopt_chain::PeopleChainClient::new(subxt_client))
+    match client.get_chain_info().await {
+        Ok(chain_info) => {
+            let _ = action_tx.send(Action::SetChainInfo(chain_info)).await;
         }
         Err(e) => {
-            tracing::warn!(
-                "Failed to connect to People chain (identities unavailable): {}",
-                e
-            );
-            None
+            tracing::warn!("Failed to get chain info: {}", e);
         }
-    };
+    }
+
+    // Connect to People chain for identity queries
+    let mut people_client = connect_ready_people_client(&client, network).await;
 
     // Longer delay to let light client connection stabilize
     if client.is_light_client() {
@@ -351,8 +381,14 @@ pub async fn chain_task(
 
             if let Some(new_client) = try_reconnect(&client, 3).await {
                 client = new_client;
-                let chain_info = client.get_chain_info();
-                let _ = action_tx.send(Action::SetChainInfo(chain_info)).await;
+                match client.get_chain_info().await {
+                    Ok(chain_info) => {
+                        let _ = action_tx.send(Action::SetChainInfo(chain_info)).await;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to get chain info after reconnect: {}", e);
+                    }
+                }
             } else {
                 tracing::error!("Reconnection failed - cannot continue");
                 break;
@@ -856,6 +892,9 @@ pub async fn chain_task(
         ))
         .await;
     let _ = action_tx.send(Action::SetDisplayPools(display_pools)).await;
+    let _ = action_tx
+        .send(Action::UpdateConnectionStatus(ConnectionStatus::Connected))
+        .await;
 
     tracing::info!("Nomination pools loaded successfully");
 
@@ -929,6 +968,12 @@ pub async fn chain_task(
                     Err(e) => {
                         tracing::error!("Failed to generate nomination payload: {}", e);
                         clear_staking_qr(&action_tx).await;
+                        let _ = action_tx
+                            .send(Action::QrScanFailed(format!(
+                                "Failed to generate nomination QR: {}",
+                                e
+                            )))
+                            .await;
                     }
                 }
             }
@@ -1264,23 +1309,20 @@ pub async fn chain_task(
                             new_client.genesis_hash()
                         );
                         client = new_client;
-                        let chain_info = client.get_chain_info();
-                        let _ = action_tx.send(Action::SetChainInfo(chain_info)).await;
+                        match client.get_chain_info().await {
+                            Ok(chain_info) => {
+                                let _ = action_tx.send(Action::SetChainInfo(chain_info)).await;
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to get chain info after network switch: {}",
+                                    e
+                                );
+                            }
+                        }
                         #[allow(unused_assignments)]
                         {
-                            people_client = match client.connect_people_chain().await {
-                                Ok(subxt_client) => {
-                                    tracing::info!("Connected to {} People chain", network);
-                                    Some(stkopt_chain::PeopleChainClient::new(subxt_client))
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "Failed to connect to People chain (identities unavailable): {}",
-                                        e
-                                    );
-                                    None
-                                }
-                            };
+                            people_client = connect_ready_people_client(&client, network).await;
                         }
                         let _ = action_tx
                             .send(Action::UpdateConnectionStatus(ConnectionStatus::Connected))

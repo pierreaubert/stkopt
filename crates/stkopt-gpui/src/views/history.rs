@@ -22,6 +22,7 @@ impl HistorySection {
         let entity = app.entity.clone();
         let is_loading = app.history_loading;
         let has_account = app.watched_account.is_some();
+        let data_ready = app.data_download_complete();
         let symbol = app.token_symbol();
         let decimals = app.token_decimals();
 
@@ -44,7 +45,7 @@ impl HistorySection {
         )
         .variant(ButtonVariant::Secondary)
         .size(ButtonSize::Xs)
-        .disabled(!has_account || is_loading)
+        .disabled(!has_account || is_loading || !data_ready)
         .on_click({
             let entity = entity.clone();
             move |_window, cx| {

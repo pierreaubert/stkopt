@@ -249,7 +249,8 @@ impl PoolModal {
         let amount_str = app.pool_amount_input.clone();
         let has_amount = !amount_str.trim().is_empty() || !operation.requires_amount();
         let has_pool = app.selected_pool_id.is_some() || operation != PoolOperation::Join;
-        let disabled = !has_amount || !has_pool || app.pool_action_generating;
+        let disabled =
+            !has_amount || !has_pool || app.pool_action_generating || !app.commands_available();
         let button_label = if app.pool_action_generating {
             "Generating..."
         } else {

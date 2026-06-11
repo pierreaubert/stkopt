@@ -1,6 +1,6 @@
 //! Integration test comparing RPC vs Light Client data fetching.
 //!
-//! Run with: cargo test --test compare_connection_modes -- --nocapture
+//! Run with: cargo test --test compare_connection_modes -- --ignored --nocapture
 
 use std::collections::HashSet;
 use stkopt_chain::{ChainClient, ConnectionConfig, ConnectionMode, RpcEndpoints};
@@ -18,6 +18,7 @@ fn create_status_channel() -> mpsc::Sender<ConnectionStatus> {
 }
 
 #[tokio::test]
+#[ignore = "live network diagnostic; requires reachable RPC endpoints and light-client sync"]
 async fn compare_validators_rpc_vs_lightclient() {
     // Initialize logging
     let _ = tracing_subscriber::fmt()
@@ -147,7 +148,7 @@ async fn compare_validators_rpc_vs_lightclient() {
         .iter()
         .map(|v| v.address.to_string())
         .collect();
-    let lc_iter_addrs: HashSet<_> = lc_validators_iter
+    let _lc_iter_addrs: HashSet<_> = lc_validators_iter
         .iter()
         .map(|v| v.address.to_string())
         .collect();
@@ -288,6 +289,7 @@ async fn compare_validators_rpc_vs_lightclient() {
 }
 
 #[tokio::test]
+#[ignore = "live network diagnostic; requires light-client sync"]
 async fn test_light_client_iteration_completeness() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("stkopt_chain=info")

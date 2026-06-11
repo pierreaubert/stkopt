@@ -91,6 +91,35 @@ mod tests {
     }
 
     #[test]
+    fn test_progress_steps_complete_requires_connected_status() {
+        let steps = [
+            ("Operations", true),
+            ("Validators", true),
+            ("Pools", true),
+            ("History", true),
+        ];
+        assert!(!progress_steps_complete(
+            ConnectionStatus::Connecting,
+            &steps
+        ));
+        assert!(progress_steps_complete(ConnectionStatus::Connected, &steps));
+    }
+
+    #[test]
+    fn test_progress_steps_complete_requires_all_steps_done() {
+        let steps = [
+            ("Operations", true),
+            ("Validators", true),
+            ("Pools", false),
+            ("History", true),
+        ];
+        assert!(!progress_steps_complete(
+            ConnectionStatus::Connected,
+            &steps
+        ));
+    }
+
+    #[test]
     fn test_connection_mode_default() {
         assert_eq!(ConnectionMode::default(), ConnectionMode::Rpc);
     }

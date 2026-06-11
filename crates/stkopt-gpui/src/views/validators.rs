@@ -6,7 +6,7 @@ use gpui_ui_kit::theme::ThemeExt;
 use gpui_ui_kit::*;
 
 use crate::actions::ValidatorSortColumn;
-use crate::app::{ConnectionStatus, StkoptApp};
+use crate::app::StkoptApp;
 use crate::validators::filter_validators;
 
 pub struct ValidatorsSection;
@@ -23,6 +23,8 @@ impl ValidatorsSection {
         let total = app.validators.len();
         let selected = app.selected_validators.len();
         let show_blocked = app.show_blocked;
+        let data_ready = app.data_download_complete();
+        let commands_available = app.commands_available();
 
         div()
             .flex()
@@ -82,10 +84,7 @@ impl ValidatorsSection {
                                 )
                                 .variant(ButtonVariant::Secondary)
                                 .size(ButtonSize::Xs)
-                                .disabled(
-                                    is_loading
-                                        || app.connection_status != ConnectionStatus::Connected,
-                                )
+                                .disabled(is_loading || !data_ready)
                                 .on_click({
                                     let entity = entity.clone();
                                     move |_window, cx| {
@@ -140,6 +139,7 @@ impl ValidatorsSection {
                             .variant(ButtonVariant::Primary)
                             .theme(crate::theme::button_theme_for_ui_theme(&theme))
                             .size(ButtonSize::Xs)
+                            .disabled(!commands_available)
                             .on_click(move |_window, cx| {
                                 entity.update(cx, |this, cx| {
                                     let targets: Vec<String> = this

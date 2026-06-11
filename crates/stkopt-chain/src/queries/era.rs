@@ -3,17 +3,17 @@
 use crate::ChainClient;
 use crate::error::ChainError;
 use stkopt_core::EraInfo;
-use subxt::dynamic::{At, DecodedValueThunk, Value};
+use subxt::dynamic::{At, Value};
 
 impl ChainClient {
     /// Get the active era information.
     pub async fn get_active_era(&self) -> Result<Option<EraInfo>, ChainError> {
-        let storage_query = subxt::dynamic::storage("Staking", "ActiveEra", ());
+        let storage_query = subxt::dynamic::storage::<Vec<Value>, Value>("Staking", "ActiveEra");
 
-        let storage = self.client().storage().at_latest().await?;
         tracing::debug!("Fetching ActiveEra storage...");
 
-        let result: Option<DecodedValueThunk> = storage.fetch(&storage_query).await?;
+        let block = self.client().at_current_block().await?;
+        let result = block.storage().try_fetch(&storage_query, vec![]).await?;
 
         let Some(value) = result else {
             tracing::debug!("ActiveEra storage returned None");
@@ -22,7 +22,7 @@ impl ChainClient {
 
         tracing::debug!("ActiveEra storage returned value");
 
-        let decoded = value.to_value()?;
+        let decoded: Value = value.decode()?;
 
         // ActiveEra is Option<ActiveEraInfo> where ActiveEraInfo = { index: u32, start: Option<u64> }
         let index = decoded
@@ -34,7 +34,7 @@ impl ChainClient {
 
         let start_timestamp_ms = decoded
             .at("start")
-            .and_then(|v: &Value<u32>| v.as_u128())
+            .and_then(|v: &Value| v.as_u128())
             .unwrap_or(0) as u64;
 
         let era_duration_ms = self.get_era_duration_ms().await?;
@@ -110,9 +110,9 @@ impl ChainClient {
 
     /// Helper to get a u32 constant from runtime.
     async fn get_constant_u32(&self, pallet: &str, name: &str) -> Result<u32, ChainError> {
-        let constant = subxt::dynamic::constant(pallet, name);
-        let value = self.client().constants().at(&constant)?;
-        let decoded = value.to_value()?;
+        let constant = (pallet, name);
+        let block = self.client().at_current_block().await?;
+        let decoded = block.constants().entry(&constant)?;
         decoded.as_u128().map(|v| v as u32).ok_or_else(|| {
             ChainError::InvalidData(format!("Invalid constant {}::{}", pallet, name))
         })
@@ -120,9 +120,9 @@ impl ChainClient {
 
     /// Helper to get a u64 constant from runtime.
     async fn get_constant_u64(&self, pallet: &str, name: &str) -> Result<u64, ChainError> {
-        let constant = subxt::dynamic::constant(pallet, name);
-        let value = self.client().constants().at(&constant)?;
-        let decoded = value.to_value()?;
+        let constant = (pallet, name);
+        let block = self.client().at_current_block().await?;
+        let decoded = block.constants().entry(&constant)?;
         decoded.as_u128().map(|v| v as u64).ok_or_else(|| {
             ChainError::InvalidData(format!("Invalid constant {}::{}", pallet, name))
         })

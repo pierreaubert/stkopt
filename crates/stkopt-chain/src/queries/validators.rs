@@ -1,10 +1,11 @@
 //! Validator-related chain queries.
 
+use super::decode_helpers::extract_account_id;
 use crate::ChainClient;
 use crate::error::ChainError;
 use std::collections::HashMap;
 use stkopt_core::{Balance, EraIndex, ValidatorPreferences};
-use subxt::dynamic::{At, DecodedValueThunk, Value};
+use subxt::dynamic::{At, Value};
 use subxt::utils::AccountId32;
 
 /// Raw validator data from chain.
@@ -30,6 +31,32 @@ pub struct ValidatorExposure {
     pub nominator_count: u32,
 }
 
+fn default_validator_preferences() -> ValidatorPreferences {
+    ValidatorPreferences {
+        commission: 0.0,
+        blocked: false,
+    }
+}
+
+fn parse_validator_preferences(decoded: &Value) -> ValidatorPreferences {
+    let commission_perbill = decoded
+        .at("commission")
+        .and_then(|v: &Value| v.as_u128())
+        .unwrap_or(0);
+    // Perbill is parts per billion (1_000_000_000 = 100%).
+    let commission = commission_perbill as f64 / 1_000_000_000.0;
+
+    let blocked = decoded
+        .at("blocked")
+        .and_then(|v: &Value| v.as_bool())
+        .unwrap_or(false);
+
+    ValidatorPreferences {
+        commission,
+        blocked,
+    }
+}
+
 impl ChainClient {
     /// Get all registered validators with their preferences.
     /// Note: This uses storage iteration which may be limited with light clients.
@@ -37,17 +64,12 @@ impl ChainClient {
     /// Deduplicates by address (light clients may return duplicates during iteration).
     /// For light client mode, prefer `get_validator_preferences_batch` with known addresses.
     pub async fn get_validators(&self) -> Result<Vec<ValidatorInfo>, ChainError> {
-        let storage_query = subxt::dynamic::storage("Staking", "Validators", ());
+        let storage_query = subxt::dynamic::storage::<Vec<Value>, Value>("Staking", "Validators");
 
         // Use HashMap to deduplicate by address (light clients may return duplicates)
         let mut validators_map: HashMap<[u8; 32], ValidatorInfo> = HashMap::new();
-        let iter_result = self
-            .client()
-            .storage()
-            .at_latest()
-            .await?
-            .iter(storage_query)
-            .await;
+        let block = self.client().at_current_block().await?;
+        let iter_result = block.storage().iter(&storage_query, vec![]).await;
 
         let mut iter = match iter_result {
             Ok(iter) => iter,
@@ -60,8 +82,8 @@ impl ChainClient {
         loop {
             match iter.next().await {
                 Some(Ok(kv)) => {
-                    let key_bytes = kv.key_bytes;
-                    let value: DecodedValueThunk = kv.value;
+                    let key_bytes = kv.key_bytes();
+                    let value = kv.value();
 
                     // Extract account ID from storage key (last 32 bytes)
                     if key_bytes.len() < 32 {
@@ -80,31 +102,17 @@ impl ChainClient {
 
                     let address = AccountId32::from(account_bytes);
 
-                    let Ok(decoded) = value.to_value() else {
+                    let Ok(decoded) = value.decode() else {
                         continue;
                     };
 
-                    // ValidatorPrefs = { commission: Perbill, blocked: bool }
-                    let commission_perbill = decoded
-                        .at("commission")
-                        .and_then(|v: &Value<u32>| v.as_u128())
-                        .unwrap_or(0);
-                    // Perbill is parts per billion (1_000_000_000 = 100%)
-                    let commission = commission_perbill as f64 / 1_000_000_000.0;
-
-                    let blocked = decoded
-                        .at("blocked")
-                        .and_then(|v: &Value<u32>| v.as_bool())
-                        .unwrap_or(false);
+                    let preferences = parse_validator_preferences(&decoded);
 
                     validators_map.insert(
                         account_bytes,
                         ValidatorInfo {
                             address,
-                            preferences: ValidatorPreferences {
-                                commission,
-                                blocked,
-                            },
+                            preferences,
                         },
                     );
                 }
@@ -134,41 +142,21 @@ impl ChainClient {
         &self,
         address: &AccountId32,
     ) -> Result<Option<ValidatorPreferences>, ChainError> {
-        let storage_query = subxt::dynamic::storage(
-            "Staking",
-            "Validators",
-            vec![Value::from_bytes(address.clone())],
-        );
+        let storage_query = subxt::dynamic::storage::<Vec<Value>, Value>("Staking", "Validators");
 
-        let result: Option<DecodedValueThunk> = self
-            .client()
+        let block = self.client().at_current_block().await?;
+        let result = block
             .storage()
-            .at_latest()
-            .await?
-            .fetch(&storage_query)
+            .try_fetch(&storage_query, vec![Value::from_bytes(address.clone())])
             .await?;
 
         let Some(value) = result else {
             return Ok(None);
         };
 
-        let decoded = value.to_value()?;
+        let decoded: Value = value.decode()?;
 
-        let commission_perbill = decoded
-            .at("commission")
-            .and_then(|v: &Value<u32>| v.as_u128())
-            .unwrap_or(0);
-        let commission = commission_perbill as f64 / 1_000_000_000.0;
-
-        let blocked = decoded
-            .at("blocked")
-            .and_then(|v: &Value<u32>| v.as_bool())
-            .unwrap_or(false);
-
-        Ok(Some(ValidatorPreferences {
-            commission,
-            blocked,
-        }))
+        Ok(Some(parse_validator_preferences(&decoded)))
     }
 
     /// Get validator preferences for a batch of validators.
@@ -180,36 +168,56 @@ impl ChainClient {
     ) -> Result<Vec<ValidatorInfo>, ChainError> {
         let mut validators = Vec::with_capacity(addresses.len());
 
-        // Fetch in smaller batches to avoid overwhelming the connection
+        // Fetch in smaller batches to avoid overwhelming the connection.
         for chunk in addresses.chunks(50) {
-            for address in chunk {
-                match self.get_validator_preferences(address).await {
-                    Ok(Some(preferences)) => {
+            match self
+                .batch_fetch_account_storage_values("Staking", "Validators", chunk)
+                .await
+            {
+                Ok(values) => {
+                    for address in chunk {
+                        let preferences = values
+                            .get(&crate::batch_storage::account_key(address))
+                            .map(parse_validator_preferences)
+                            .unwrap_or_else(default_validator_preferences);
                         validators.push(ValidatorInfo {
                             address: address.clone(),
                             preferences,
                         });
                     }
-                    Ok(None) => {
-                        // Validator not found, use defaults
-                        validators.push(ValidatorInfo {
-                            address: address.clone(),
-                            preferences: ValidatorPreferences {
-                                commission: 0.0,
-                                blocked: false,
-                            },
-                        });
-                    }
-                    Err(e) => {
-                        tracing::debug!("Failed to get preferences for {}: {}", address, e);
-                        // Use defaults on error
-                        validators.push(ValidatorInfo {
-                            address: address.clone(),
-                            preferences: ValidatorPreferences {
-                                commission: 0.0,
-                                blocked: false,
-                            },
-                        });
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        "Batch validator preference fetch failed for {} addresses: {}",
+                        chunk.len(),
+                        error
+                    );
+                    for address in chunk {
+                        match self.get_validator_preferences(address).await {
+                            Ok(Some(preferences)) => {
+                                validators.push(ValidatorInfo {
+                                    address: address.clone(),
+                                    preferences,
+                                });
+                            }
+                            Ok(None) => {
+                                validators.push(ValidatorInfo {
+                                    address: address.clone(),
+                                    preferences: default_validator_preferences(),
+                                });
+                            }
+                            Err(e) => {
+                                tracing::debug!(
+                                    "Failed to get preferences for {} after batch fallback: {}",
+                                    address,
+                                    e
+                                );
+                                validators.push(ValidatorInfo {
+                                    address: address.clone(),
+                                    preferences: default_validator_preferences(),
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -235,44 +243,27 @@ impl ChainClient {
         }
 
         // Session.Validators is on the relay chain, not Asset Hub
-        let storage_query = subxt::dynamic::storage("Session", "Validators", ());
+        let storage_query = subxt::dynamic::storage::<Vec<Value>, Value>("Session", "Validators");
 
-        let result: Option<DecodedValueThunk> = self
-            .relay_client()
-            .storage()
-            .at_latest()
-            .await?
-            .fetch(&storage_query)
-            .await?;
+        let block = self.relay_client().at_current_block().await?;
+        let result = block.storage().try_fetch(&storage_query, vec![]).await?;
 
         let Some(value) = result else {
             tracing::warn!("Session.Validators storage is empty (relay chain)");
             return Ok(Vec::new());
         };
 
-        let decoded = value.to_value()?;
+        let decoded: Value = value.decode()?;
         let mut validators = Vec::new();
 
-        // Session.Validators is a Vec<AccountId32>
-        let mut i = 0;
-        while let Some(account_val) = decoded.at(i) {
-            let mut bytes = Vec::with_capacity(32);
-            let mut k = 0;
-            while let Some(b_val) = account_val.at(k) {
-                if let Some(b) = b_val.as_u128() {
-                    bytes.push(b as u8);
-                }
-                k += 1;
+        let mut index = 0;
+        while let Some(account_val) = decoded.at(index) {
+            if let Some(account) = extract_account_id(account_val) {
+                validators.push(account);
+            } else {
+                tracing::debug!("Could not decode Session.Validators[{}]", index);
             }
-            if bytes.len() == 32 {
-                let arr: [u8; 32] = bytes.try_into().map_err(|_| {
-                    ChainError::InvalidData(
-                        "Validator address byte array is not 32 bytes".to_string(),
-                    )
-                })?;
-                validators.push(AccountId32::from(arr));
-            }
-            i += 1;
+            index += 1;
         }
 
         tracing::info!(
@@ -369,30 +360,25 @@ impl ChainClient {
         &self,
         era: EraIndex,
     ) -> Result<(u32, Vec<ValidatorPoints>), ChainError> {
-        let storage_query = subxt::dynamic::storage(
-            "Staking",
-            "ErasRewardPoints",
-            vec![Value::u128(era as u128)],
-        );
+        let storage_query =
+            subxt::dynamic::storage::<Vec<Value>, Value>("Staking", "ErasRewardPoints");
 
-        let result: Option<DecodedValueThunk> = self
-            .client()
+        let block = self.client().at_current_block().await?;
+        let result = block
             .storage()
-            .at_latest()
-            .await?
-            .fetch(&storage_query)
+            .try_fetch(&storage_query, vec![Value::u128(era as u128)])
             .await?;
 
         let Some(value) = result else {
             return Ok((0, Vec::new()));
         };
 
-        let decoded = value.to_value()?;
+        let decoded: Value = value.decode()?;
 
         // EraRewardPoints = { total: u32, individual: BTreeMap<AccountId, u32> }
         let total = decoded
             .at("total")
-            .and_then(|v: &Value<u32>| v.as_u128())
+            .and_then(|v: &Value| v.as_u128())
             .unwrap_or(0) as u32;
 
         tracing::debug!("EraRewardPoints total: {}", total);
@@ -406,25 +392,10 @@ impl ChainClient {
             while let Some(entry) = individual.at(i) {
                 i += 1;
                 // Each entry is a tuple (AccountId32, u32)
-                let account_id = entry.at(0).and_then(|v| {
-                    let mut bytes = [0u8; 32];
-                    let mut k = 0;
-                    while let Some(b) = v.at(k).and_then(|b| b.as_u128()) {
-                        bytes[k] = b as u8;
-                        k += 1;
-                        if k >= 32 {
-                            break;
-                        }
-                    }
-                    if k == 32 {
-                        Some(AccountId32::from(bytes))
-                    } else {
-                        None
-                    }
-                });
+                let account_id = entry.at(0).and_then(extract_account_id);
                 let points = entry
                     .at(1)
-                    .and_then(|v: &Value<u32>| v.as_u128())
+                    .and_then(|v: &Value| v.as_u128())
                     .map(|n| n as u32);
 
                 if let (Some(address), Some(points)) = (account_id, points) {
@@ -441,22 +412,17 @@ impl ChainClient {
         &self,
         era: EraIndex,
     ) -> Result<Option<Balance>, ChainError> {
-        let storage_query = subxt::dynamic::storage(
-            "Staking",
-            "ErasValidatorReward",
-            vec![Value::u128(era as u128)],
-        );
+        let storage_query =
+            subxt::dynamic::storage::<Vec<Value>, Value>("Staking", "ErasValidatorReward");
 
-        let result: Option<DecodedValueThunk> = self
-            .client()
+        let block = self.client().at_current_block().await?;
+        let result = block
             .storage()
-            .at_latest()
-            .await?
-            .fetch(&storage_query)
+            .try_fetch(&storage_query, vec![Value::u128(era as u128)])
             .await?;
 
         Ok(result
-            .and_then(|v| v.to_value().ok())
+            .and_then(|v| v.decode().ok())
             .and_then(|v| v.as_u128()))
     }
 
@@ -466,18 +432,16 @@ impl ChainClient {
     /// Prefer this over summing from `get_era_stakers_overview`, which may return partial results.
     pub async fn get_era_total_stake_direct(&self, era: EraIndex) -> Result<Balance, ChainError> {
         let storage_query =
-            subxt::dynamic::storage("Staking", "ErasTotalStake", vec![Value::u128(era as u128)]);
+            subxt::dynamic::storage::<Vec<Value>, Value>("Staking", "ErasTotalStake");
 
-        let result: Option<DecodedValueThunk> = self
-            .client()
+        let block = self.client().at_current_block().await?;
+        let result = block
             .storage()
-            .at_latest()
-            .await?
-            .fetch(&storage_query)
+            .try_fetch(&storage_query, vec![Value::u128(era as u128)])
             .await?;
 
         Ok(result
-            .and_then(|v| v.to_value().ok())
+            .and_then(|v| v.decode().ok())
             .and_then(|v| v.as_u128())
             .unwrap_or(0))
     }
@@ -496,18 +460,13 @@ impl ChainClient {
         // Retry loop for light client failures
         for attempt in 0..3 {
             // For iterating with a partial key, we need to use the era as the first key
-            let storage_query = subxt::dynamic::storage(
-                "Staking",
-                "ErasStakersOverview",
-                vec![Value::u128(era as u128)],
-            );
+            let storage_query =
+                subxt::dynamic::storage::<Vec<Value>, Value>("Staking", "ErasStakersOverview");
 
-            let iter_result = self
-                .client()
+            let block = self.client().at_current_block().await?;
+            let iter_result = block
                 .storage()
-                .at_latest()
-                .await?
-                .iter(storage_query)
+                .iter(&storage_query, vec![Value::u128(era as u128)])
                 .await;
 
             let mut iter = match iter_result {
@@ -534,8 +493,8 @@ impl ChainClient {
             loop {
                 match iter.next().await {
                     Some(Ok(kv)) => {
-                        let key_bytes = kv.key_bytes;
-                        let value: DecodedValueThunk = kv.value;
+                        let key_bytes = kv.key_bytes();
+                        let value = kv.value();
 
                         // Key format: prefix + era (4 bytes) + account (32 bytes)
                         if key_bytes.len() < 32 {
@@ -554,22 +513,22 @@ impl ChainClient {
 
                         let address = AccountId32::from(account_bytes);
 
-                        let Ok(decoded) = value.to_value() else {
+                        let Ok(decoded) = value.decode() else {
                             continue;
                         };
 
                         // PagedExposureMetadata = { total: Balance, own: Balance, nominator_count: u32, page_count: u32 }
                         let total = decoded
                             .at("total")
-                            .and_then(|v: &Value<u32>| v.as_u128())
+                            .and_then(|v: &Value| v.as_u128())
                             .unwrap_or(0);
                         let own = decoded
                             .at("own")
-                            .and_then(|v: &Value<u32>| v.as_u128())
+                            .and_then(|v: &Value| v.as_u128())
                             .unwrap_or(0);
                         let nominator_count = decoded
                             .at("nominator_count")
-                            .and_then(|v: &Value<u32>| v.as_u128())
+                            .and_then(|v: &Value| v.as_u128())
                             .unwrap_or(0) as u32;
 
                         exposures_map.insert(

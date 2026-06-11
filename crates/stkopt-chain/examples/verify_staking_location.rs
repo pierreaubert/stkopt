@@ -7,12 +7,11 @@
 //! For light client test: cargo run -p stkopt-chain --example verify_staking_location -- --light-client
 
 use std::env;
+use stkopt_chain::{get_asset_hub_endpoints, get_rpc_endpoints};
+use stkopt_core::Network;
 use subxt::dynamic::At;
 use subxt::lightclient::LightClient;
 use subxt::{OnlineClient, PolkadotConfig};
-
-const KUSAMA_RELAY: &str = "wss://rpc.ibp.network/kusama";
-const KUSAMA_ASSET_HUB: &str = "wss://kusama-asset-hub-rpc.polkadot.io";
 
 // Embedded chain specs (same as in lightclient.rs)
 const KUSAMA_SPEC: &str = include_str!("../chain_specs/kusama.json");
@@ -47,15 +46,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn test_rpc() -> Result<(), Box<dyn std::error::Error>> {
     // Test Kusama Relay Chain
     println!("--- Kusama Relay Chain (RPC) ---");
-    println!("Connecting to {}...", KUSAMA_RELAY);
-    let relay_client = OnlineClient::<PolkadotConfig>::from_url(KUSAMA_RELAY).await?;
+    let relay_client = connect_first(get_rpc_endpoints(Network::Kusama)).await?;
     println!("Connected!");
-    println!(
-        "Latest block: {:?}",
-        relay_client.blocks().at_latest().await?.number()
-    );
+    let relay_block = relay_client.at_current_block().await?;
+    println!("Latest block: {:?}", relay_block.block_number());
 
-    let relay_has_staking = check_staking_pallet(&relay_client);
+    let relay_has_staking = check_staking_pallet(&relay_client).await?;
     println!(
         "Staking pallet present: {}\n",
         if relay_has_staking {
@@ -71,11 +67,10 @@ async fn test_rpc() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test Kusama Asset Hub
     println!("\n--- Kusama Asset Hub (RPC) ---");
-    println!("Connecting to {}...", KUSAMA_ASSET_HUB);
-    let asset_hub_client = OnlineClient::<PolkadotConfig>::from_url(KUSAMA_ASSET_HUB).await?;
+    let asset_hub_client = connect_first(get_asset_hub_endpoints(Network::Kusama)).await?;
     println!("Connected!");
 
-    let asset_hub_has_staking = check_staking_pallet(&asset_hub_client);
+    let asset_hub_has_staking = check_staking_pallet(&asset_hub_client).await?;
     println!(
         "Staking pallet present: {}\n",
         if asset_hub_has_staking {
@@ -95,6 +90,30 @@ async fn test_rpc() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+async fn connect_first(
+    endpoints: &[&str],
+) -> Result<OnlineClient<PolkadotConfig>, Box<dyn std::error::Error>> {
+    let mut last_error = None;
+    for endpoint in endpoints {
+        println!("Connecting to {}...", endpoint);
+        match OnlineClient::<PolkadotConfig>::from_url(*endpoint).await {
+            Ok(client) => return Ok(client),
+            Err(e) => {
+                println!("  Failed: {}", e);
+                last_error = Some(e);
+            }
+        }
+    }
+
+    Err(format!(
+        "all endpoints failed; last error: {}",
+        last_error
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "no endpoints configured".to_string())
+    )
+    .into())
+}
+
 async fn test_light_client() -> Result<(), Box<dyn std::error::Error>> {
     println!("Starting light client (smoldot)...");
     println!("This may take 30-60 seconds for initial sync...\n");
@@ -107,7 +126,7 @@ async fn test_light_client() -> Result<(), Box<dyn std::error::Error>> {
     let relay_client = OnlineClient::<PolkadotConfig>::from_rpc_client(relay_rpc).await?;
     println!("Relay chain synced!");
 
-    let relay_has_staking = check_staking_pallet(&relay_client);
+    let relay_has_staking = check_staking_pallet(&relay_client).await?;
     println!(
         "Staking pallet present: {}\n",
         if relay_has_staking {
@@ -130,7 +149,7 @@ async fn test_light_client() -> Result<(), Box<dyn std::error::Error>> {
     let asset_hub_client = OnlineClient::<PolkadotConfig>::from_rpc_client(asset_hub_rpc).await?;
     println!("Asset Hub synced!");
 
-    let asset_hub_has_staking = check_staking_pallet(&asset_hub_client);
+    let asset_hub_has_staking = check_staking_pallet(&asset_hub_client).await?;
     println!(
         "Staking pallet present: {}\n",
         if asset_hub_has_staking {
@@ -169,14 +188,17 @@ fn print_summary(relay_has_staking: bool, asset_hub_has_staking: bool) {
     }
 }
 
-fn check_staking_pallet(client: &OnlineClient<PolkadotConfig>) -> bool {
-    let metadata = client.metadata();
+async fn check_staking_pallet(
+    client: &OnlineClient<PolkadotConfig>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let block = client.at_current_block().await?;
+    let metadata = block.metadata();
 
     // Show runtime version
-    let runtime = client.runtime_version();
     println!(
         "Runtime: spec_version={}, tx_version={}",
-        runtime.spec_version, runtime.transaction_version
+        block.spec_version(),
+        block.transaction_version()
     );
 
     // List all pallets for debugging
@@ -193,27 +215,31 @@ fn check_staking_pallet(client: &OnlineClient<PolkadotConfig>) -> bool {
         }
     }
 
-    metadata.pallet_by_name("Staking").is_some()
+    Ok(metadata.pallet_by_name("Staking").is_some())
 }
 
 async fn test_active_era(client: &OnlineClient<PolkadotConfig>) {
     println!("\nTesting ActiveEra query...");
 
-    let storage_query = subxt::dynamic::storage("Staking", "ActiveEra", ());
-    let storage = match client.storage().at_latest().await {
-        Ok(s) => s,
+    let storage_query = subxt::dynamic::storage("Staking", "ActiveEra");
+    let block = match client.at_current_block().await {
+        Ok(block) => block,
         Err(e) => {
-            println!("  Failed to get storage: {}", e);
+            println!("  Failed to get current block: {}", e);
             return;
         }
     };
 
-    match storage.fetch(&storage_query).await {
+    match block
+        .storage()
+        .try_fetch(&storage_query, Vec::<subxt::dynamic::Value<()>>::new())
+        .await
+    {
         Ok(Some(value)) => {
-            let decoded = value.to_value().unwrap();
+            let decoded: subxt::dynamic::Value<()> = value.decode().unwrap();
             if let Some(index) = decoded
                 .at("index")
-                .and_then(|v: &subxt::dynamic::Value<u32>| v.as_u128())
+                .and_then(|v: &subxt::dynamic::Value<()>| v.as_u128())
             {
                 println!("  ActiveEra index: {} ✓", index);
             } else {

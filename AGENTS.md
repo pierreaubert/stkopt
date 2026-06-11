@@ -8,7 +8,7 @@ Guidance for AI coding agents working in this repository.
 
 - **Repository**: `https://github.com/pierreaubert/stkopt.git`
 - **License**: ISC
-- **Version**: `0.1.6`
+- **Version**: `0.1.7`
 - **Rust MSRV**: `1.96` (specified in workspace `Cargo.toml`)
 - **Rust Edition**: `2024`
 - **Workspace Resolver**: `3`
@@ -229,6 +229,13 @@ Native Swift app, separate from the Rust workspace.
 - **E2E tests**: `stkopt-gpui` has a minimal E2E harness under `src/tests/e2e/` (currently mostly scaffolding).
 - **iOS tests**: `stkoptTests/stkoptTests.swift`.
 
+### Verification Gate for Agents
+
+- After making Rust code changes, run the relevant `cargo test` command and do not report the work as done unless it passes cleanly.
+- Prefer the narrowest meaningful test command while iterating (for example `cargo test -p stkopt-gpui --lib` for GPUI-only changes), but run broader tests when the change touches shared crates, transaction logic, persistence, or cross-crate behavior.
+- If `cargo test` cannot be run or does not pass, the final response must say the work is not done and include the exact failing or blocked command.
+- `cargo check`, `cargo clippy`, and formatting checks are useful supporting verification, but they do not replace a passing `cargo test` after code changes.
+
 ### Running Tests
 ```bash
 # Fast unit-test-only run
@@ -317,5 +324,5 @@ GitHub Actions workflow: `.github/workflows/rust.yml`
 ### Running Integration Tests Against Live Networks
 Integration tests in `stkopt-chain/tests/` connect to real RPC endpoints and may take 30–60 seconds for light client sync. They are not run by `just test` (which uses `--lib`). Run them explicitly with:
 ```bash
-cargo test --test compare_connection_modes -- --nocapture
+cargo test --test compare_connection_modes -- --ignored --nocapture
 ```

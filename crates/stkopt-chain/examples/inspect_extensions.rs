@@ -8,13 +8,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = OnlineClient::<PolkadotConfig>::from_url(url).await?;
 
     println!("Connected!");
-    let metadata = client.metadata();
+    let block = client.at_current_block().await?;
+    let metadata = block.metadata();
     let extrinsic = metadata.extrinsic();
 
-    println!(
-        "Transaction Version: {}",
-        client.runtime_version().transaction_version
-    );
+    println!("Transaction Version: {}", block.transaction_version());
 
     for version in 0..=5 {
         if let Some(exts) = extrinsic.transaction_extensions_by_version(version) {

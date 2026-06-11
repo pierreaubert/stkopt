@@ -1,9 +1,17 @@
 //! Identity queries from the People chain.
 
+use crate::batch_storage::{account_key, fetch_account_storage_values};
 use crate::error::ChainError;
-use subxt::dynamic::{At, DecodedValueThunk, Value};
+use std::sync::Arc;
+use subxt::backend::CombinedBackend;
+use subxt::dynamic::{At, Value};
 use subxt::utils::AccountId32;
 use subxt::{OnlineClient, PolkadotConfig};
+
+const IDENTITY_BATCH_SIZE: usize = 20;
+const IDENTITY_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const PEOPLE_READY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+const PEOPLE_READY_ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Validator identity information.
 #[derive(Debug, Clone)]
@@ -20,12 +28,75 @@ pub struct ValidatorIdentity {
 /// People chain client for identity queries.
 pub struct PeopleChainClient {
     client: OnlineClient<PolkadotConfig>,
+    backend: Option<Arc<CombinedBackend<PolkadotConfig>>>,
 }
 
 impl PeopleChainClient {
     /// Create a new People chain client from an existing subxt client.
     pub fn new(client: OnlineClient<PolkadotConfig>) -> Self {
-        Self { client }
+        Self {
+            client,
+            backend: None,
+        }
+    }
+
+    /// Create a new People chain client with access to the underlying Subxt backend.
+    pub fn with_backend(
+        client: OnlineClient<PolkadotConfig>,
+        backend: Arc<CombinedBackend<PolkadotConfig>>,
+    ) -> Self {
+        Self {
+            client,
+            backend: Some(backend),
+        }
+    }
+
+    /// Access the underlying Subxt client.
+    pub fn online_client(&self) -> &OnlineClient<PolkadotConfig> {
+        &self.client
+    }
+
+    /// Wait until the People chain client can answer block queries.
+    pub async fn wait_until_ready(&self, timeout: std::time::Duration) -> Result<u32, ChainError> {
+        let start = std::time::Instant::now();
+        let mut last_error = None;
+
+        loop {
+            let Some(remaining) = timeout.checked_sub(start.elapsed()) else {
+                break;
+            };
+            if remaining.is_zero() {
+                break;
+            }
+
+            let attempt_timeout = std::cmp::min(remaining, PEOPLE_READY_ATTEMPT_TIMEOUT);
+            match tokio::time::timeout(attempt_timeout, self.client.at_current_block()).await {
+                Ok(Ok(block)) => return Ok(block.block_number() as u32),
+                Ok(Err(error)) => {
+                    last_error = Some(error.to_string());
+                }
+                Err(_) => {
+                    last_error = Some(format!(
+                        "attempt timed out after {}s",
+                        attempt_timeout.as_secs()
+                    ));
+                }
+            }
+
+            tokio::time::sleep(std::cmp::min(
+                PEOPLE_READY_POLL_INTERVAL,
+                timeout.saturating_sub(start.elapsed()),
+            ))
+            .await;
+        }
+
+        Err(ChainError::Connection(format!(
+            "People chain did not become ready within {}s{}",
+            timeout.as_secs(),
+            last_error
+                .map(|error| format!(" (last error: {error})"))
+                .unwrap_or_default()
+        )))
     }
 
     /// Get identity for a single address.
@@ -48,18 +119,12 @@ impl PeopleChainClient {
         address: &AccountId32,
     ) -> Result<Option<ValidatorIdentity>, ChainError> {
         // Query Identity.IdentityOf storage
-        let storage_query = subxt::dynamic::storage(
-            "Identity",
-            "IdentityOf",
-            vec![Value::from_bytes(address.clone())],
-        );
+        let storage_query = subxt::dynamic::storage("Identity", "IdentityOf");
 
-        let result: Option<DecodedValueThunk> = self
-            .client
+        let block = self.client.at_current_block().await?;
+        let result = block
             .storage()
-            .at_latest()
-            .await?
-            .fetch(&storage_query)
+            .try_fetch(&storage_query, vec![Value::from_bytes(address.clone())])
             .await?;
 
         let Some(value) = result else {
@@ -67,55 +132,11 @@ impl PeopleChainClient {
             return Ok(None);
         };
 
-        let decoded = value.to_value()?;
+        let decoded: Value = value.decode()?;
 
         tracing::debug!("Raw identity data for {}: {:?}", address, decoded);
 
-        // IdentityOf returns (Registration, Option<Username>)
-        // Registration contains: { judgements, deposit, info }
-        // info is IdentityInfo with: { display, legal, web, riot, email, ... }
-
-        // Try to get the registration (first element of tuple or direct struct)
-        let registration = decoded.at(0).unwrap_or(&decoded);
-        tracing::debug!("Registration for {}: {:?}", address, registration);
-
-        // Try multiple approaches to find the info field
-        let info = registration
-            .at("info")
-            .or_else(|| registration.at(2)) // info might be at index 2 after judgements and deposit
-            .or_else(|| decoded.at("info")); // Direct access on decoded
-
-        tracing::debug!("Info field for {}: {:?}", address, info);
-
-        // Try multiple approaches to find the display name
-        let display_field = info.and_then(|i| {
-            // Try named field first
-            let field = i.at("display").or_else(|| i.at(0));
-            tracing::debug!("Display field for {}: {:?}", address, field);
-            field
-        });
-
-        let display_name = display_field.and_then(extract_data_field);
-
-        if display_name.is_some() {
-            tracing::info!("Found identity for {}: {:?}", address, display_name);
-        } else {
-            tracing::debug!("No display name found for {}", address);
-        }
-
-        // Check judgements for verification
-        let verified = registration
-            .at("judgements")
-            .or_else(|| registration.at(0))
-            .map(has_positive_judgement)
-            .unwrap_or(false);
-
-        Ok(Some(ValidatorIdentity {
-            address: address.clone(),
-            display_name,
-            verified,
-            sub_identity: None,
-        }))
+        Ok(Some(parse_direct_identity(address, &decoded)))
     }
 
     /// Check if this is a sub-identity and get parent's name.
@@ -124,25 +145,19 @@ impl PeopleChainClient {
         address: &AccountId32,
     ) -> Result<Option<ValidatorIdentity>, ChainError> {
         // Query Identity.SuperOf storage
-        let storage_query = subxt::dynamic::storage(
-            "Identity",
-            "SuperOf",
-            vec![Value::from_bytes(address.clone())],
-        );
+        let storage_query = subxt::dynamic::storage("Identity", "SuperOf");
 
-        let result: Option<DecodedValueThunk> = self
-            .client
+        let block = self.client.at_current_block().await?;
+        let result = block
             .storage()
-            .at_latest()
-            .await?
-            .fetch(&storage_query)
+            .try_fetch(&storage_query, vec![Value::from_bytes(address.clone())])
             .await?;
 
         let Some(value) = result else {
             return Ok(None);
         };
 
-        let decoded = value.to_value()?;
+        let decoded: Value = value.decode()?;
 
         // SuperOf returns (parent_account, sub_name)
         let parent_bytes = extract_account_bytes(decoded.at(0));
@@ -177,15 +192,16 @@ impl PeopleChainClient {
         &self,
         addresses: &[AccountId32],
     ) -> Result<Vec<ValidatorIdentity>, ChainError> {
+        if self.backend.is_none() {
+            return self.get_identities_fallback(addresses).await;
+        }
+
         let mut identities = Vec::new();
 
-        // Process in batches to speed up fetching while avoiding overwhelming the RPC
-        const BATCH_SIZE: usize = 50;
-
-        let total_batches = addresses.len().div_ceil(BATCH_SIZE);
+        let total_batches = addresses.len().div_ceil(IDENTITY_BATCH_SIZE);
         let mut batch_num = 0;
 
-        for chunk in addresses.chunks(BATCH_SIZE) {
+        for chunk in addresses.chunks(IDENTITY_BATCH_SIZE) {
             batch_num += 1;
             tracing::info!(
                 "Fetching identity batch {}/{} ({} addresses)...",
@@ -194,15 +210,49 @@ impl PeopleChainClient {
                 chunk.len()
             );
 
-            // Create futures for all addresses in this batch
+            let results =
+                tokio::time::timeout(IDENTITY_QUERY_TIMEOUT, self.get_identity_batch(chunk)).await;
+
+            let mut batch_found = 0;
+            match results {
+                Ok(Ok(batch_identities)) => {
+                    batch_found = batch_identities.len();
+                    identities.extend(batch_identities);
+                }
+                Ok(Err(error)) => {
+                    tracing::debug!("Failed to fetch identity batch {}: {}", batch_num, error);
+                }
+                Err(_) => {
+                    tracing::trace!("Timeout fetching identity batch {}", batch_num);
+                }
+            }
+            tracing::debug!("Batch {}: found {} identities", batch_num, batch_found);
+        }
+
+        Ok(identities)
+    }
+
+    async fn get_identities_fallback(
+        &self,
+        addresses: &[AccountId32],
+    ) -> Result<Vec<ValidatorIdentity>, ChainError> {
+        let mut identities = Vec::new();
+        let total_batches = addresses.len().div_ceil(IDENTITY_BATCH_SIZE);
+
+        for (idx, chunk) in addresses.chunks(IDENTITY_BATCH_SIZE).enumerate() {
+            let batch_num = idx + 1;
+            tracing::info!(
+                "Fetching identity batch {}/{} ({} addresses, single-key fallback)...",
+                batch_num,
+                total_batches,
+                chunk.len()
+            );
+
             let futures: Vec<_> = chunk
                 .iter()
                 .map(|address| self.get_identity_with_timeout(address))
                 .collect();
-
-            // Execute batch concurrently
             let results = futures::future::join_all(futures).await;
-
             let mut batch_found = 0;
             for identity in results.into_iter().flatten() {
                 identities.push(identity);
@@ -214,29 +264,146 @@ impl PeopleChainClient {
         Ok(identities)
     }
 
+    async fn get_identity_batch(
+        &self,
+        addresses: &[AccountId32],
+    ) -> Result<Vec<ValidatorIdentity>, ChainError> {
+        let direct_values = self.fetch_storage_values("IdentityOf", addresses).await?;
+
+        let mut identities = Vec::new();
+        let mut misses = Vec::new();
+        for address in addresses {
+            if let Some(decoded) = direct_values.get(&account_key(address)) {
+                identities.push(parse_direct_identity(address, decoded));
+            } else {
+                misses.push(address.clone());
+            }
+        }
+
+        if misses.is_empty() {
+            return Ok(identities);
+        }
+
+        let super_values = self.fetch_storage_values("SuperOf", &misses).await?;
+        if super_values.is_empty() {
+            return Ok(identities);
+        }
+
+        let mut sub_accounts = Vec::new();
+        let mut parent_accounts = Vec::new();
+        for address in misses {
+            let Some(decoded) = super_values.get(&account_key(&address)) else {
+                continue;
+            };
+            if let Some(parent_bytes) = extract_account_bytes(decoded.at(0)) {
+                let parent = AccountId32::from(parent_bytes);
+                let sub_name = decoded.at(1).and_then(extract_data_field);
+                sub_accounts.push((address, parent.clone(), sub_name));
+                parent_accounts.push(parent);
+            }
+        }
+
+        if parent_accounts.is_empty() {
+            return Ok(identities);
+        }
+
+        let parent_values = self
+            .fetch_storage_values("IdentityOf", &parent_accounts)
+            .await?;
+        for (address, parent, sub_name) in sub_accounts {
+            let Some(parent_decoded) = parent_values.get(&account_key(&parent)) else {
+                continue;
+            };
+            let parent_identity = parse_direct_identity(&parent, parent_decoded);
+            let full_name = match (&parent_identity.display_name, &sub_name) {
+                (Some(parent), Some(sub)) => Some(format!("{}/{}", parent, sub)),
+                (Some(parent), None) => Some(parent.clone()),
+                (None, Some(sub)) => Some(sub.clone()),
+                (None, None) => None,
+            };
+
+            identities.push(ValidatorIdentity {
+                address,
+                display_name: full_name,
+                verified: parent_identity.verified,
+                sub_identity: sub_name,
+            });
+        }
+
+        Ok(identities)
+    }
+
+    async fn fetch_storage_values(
+        &self,
+        entry_name: &str,
+        addresses: &[AccountId32],
+    ) -> Result<std::collections::HashMap<[u8; 32], Value>, ChainError> {
+        let backend = self.backend.as_ref().ok_or_else(|| {
+            ChainError::InvalidData("People chain batch backend unavailable".to_string())
+        })?;
+        fetch_account_storage_values(&self.client, backend, "Identity", entry_name, addresses).await
+    }
+
     /// Get identity with a timeout to prevent hanging.
     async fn get_identity_with_timeout(&self, address: &AccountId32) -> Option<ValidatorIdentity> {
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            self.get_identity(address),
-        )
-        .await
-        {
+        match tokio::time::timeout(IDENTITY_QUERY_TIMEOUT, self.get_identity(address)).await {
             Ok(Ok(identity)) => identity,
             Ok(Err(e)) => {
                 tracing::debug!("Failed to fetch identity for {}: {}", address, e);
                 None
             }
             Err(_) => {
-                tracing::debug!("Timeout fetching identity for {}", address);
+                tracing::trace!("Timeout fetching identity for {}", address);
                 None
             }
         }
     }
 }
 
+fn parse_direct_identity(address: &AccountId32, decoded: &Value) -> ValidatorIdentity {
+    // IdentityOf returns (Registration, Option<Username>)
+    // Registration contains: { judgements, deposit, info }
+    // info is IdentityInfo with: { display, legal, web, riot, email, ... }
+    let registration = decoded.at(0).unwrap_or(decoded);
+    tracing::debug!("Registration for {}: {:?}", address, registration);
+
+    let info = registration
+        .at("info")
+        .or_else(|| registration.at(2))
+        .or_else(|| decoded.at("info"));
+
+    tracing::debug!("Info field for {}: {:?}", address, info);
+
+    let display_field = info.and_then(|i| {
+        let field = i.at("display").or_else(|| i.at(0));
+        tracing::debug!("Display field for {}: {:?}", address, field);
+        field
+    });
+
+    let display_name = display_field.and_then(extract_data_field);
+
+    if display_name.is_some() {
+        tracing::info!("Found identity for {}: {:?}", address, display_name);
+    } else {
+        tracing::debug!("No display name found for {}", address);
+    }
+
+    let verified = registration
+        .at("judgements")
+        .or_else(|| registration.at(0))
+        .map(has_positive_judgement)
+        .unwrap_or(false);
+
+    ValidatorIdentity {
+        address: address.clone(),
+        display_name,
+        verified,
+        sub_identity: None,
+    }
+}
+
 /// Extract string from a Data field (Raw, BlakeTwo256, etc).
-fn extract_data_field(value: &Value<u32>) -> Option<String> {
+fn extract_data_field(value: &Value) -> Option<String> {
     // Data enum variants: None, Raw0-32, BlakeTwo256, Keccak256, ShaThree256
     // Most common is Raw which contains bytes
 
@@ -293,11 +460,11 @@ fn extract_data_field(value: &Value<u32>) -> Option<String> {
 }
 
 /// Extract bytes from a value and convert to UTF-8 string.
-fn extract_bytes_as_string(value: &Value<u32>) -> Option<String> {
+fn extract_bytes_as_string(value: &Value) -> Option<String> {
     // The value might be a Composite containing primitives, or directly a primitive
     // We need to handle both cases
 
-    fn extract_bytes_recursive(val: &Value<u32>, bytes: &mut Vec<u8>) {
+    fn extract_bytes_recursive(val: &Value, bytes: &mut Vec<u8>) {
         // Check if this is a composite (tuple/struct)
         // scale_value::Value doesn't expose is_composite directly, but we can try accessing elements
         for i in 0..256 {
@@ -337,7 +504,7 @@ fn extract_bytes_as_string(value: &Value<u32>) -> Option<String> {
 }
 
 /// Extract account ID bytes from a Value.
-fn extract_account_bytes(value: Option<&Value<u32>>) -> Option<[u8; 32]> {
+fn extract_account_bytes(value: Option<&Value>) -> Option<[u8; 32]> {
     let v = value?;
     let mut bytes = Vec::with_capacity(32);
 
@@ -358,7 +525,7 @@ fn extract_account_bytes(value: Option<&Value<u32>>) -> Option<[u8; 32]> {
 }
 
 /// Check if judgements contain a positive judgement (Reasonable, KnownGood).
-fn has_positive_judgement(judgements: &Value<u32>) -> bool {
+fn has_positive_judgement(judgements: &Value) -> bool {
     // Judgements is a BoundedVec of (RegistrarIndex, Judgement)
     let mut i = 0;
     while let Some(judgement_tuple) = judgements.at(i) {

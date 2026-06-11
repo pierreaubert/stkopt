@@ -22,6 +22,36 @@ const MAX_REALISTIC_APY: f64 = 0.50;
 /// Maximum reward as fraction of stake (0.5% per era).
 const MAX_REWARD_FRACTION: u128 = 200;
 
+const PEOPLE_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+async fn connect_ready_people_client(
+    client: &ChainClient,
+    network: Network,
+) -> Option<PeopleChainClient> {
+    match client.connect_people_chain_client().await {
+        Ok(people) => match people.wait_until_ready(PEOPLE_READY_TIMEOUT).await {
+            Ok(block) => {
+                tracing::info!("Connected to {} People chain at block {}", network, block);
+                Some(people)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "People chain connected but did not become ready (identity data will be unavailable): {}",
+                    e
+                );
+                None
+            }
+        },
+        Err(e) => {
+            tracing::warn!(
+                "Failed to connect to People chain (identity data will be unavailable): {}",
+                e
+            );
+            None
+        }
+    }
+}
+
 /// Check if an APY value is realistic (not corrupted data).
 fn is_realistic_apy(apy: f64) -> bool {
     apy <= MAX_REALISTIC_APY
@@ -835,6 +865,12 @@ impl ChainWorker {
         let update_tx = self.update_tx.clone();
         tokio::spawn(async move {
             while let Some(status) = status_rx.recv().await {
+                if matches!(status, ConnectionStatus::Connected) {
+                    tracing::debug!(
+                        "Ignoring low-level chain Connected status until app startup data is ready"
+                    );
+                    continue;
+                }
                 let _ = update_tx.send(ChainUpdate::ConnectionStatus(status)).await;
             }
         });
@@ -843,31 +879,21 @@ impl ChainWorker {
             Ok(client) => {
                 tracing::info!("Connected to {} via {:?}", network, config.mode);
                 self.client = Some(client);
-                let _ = self
-                    .update_tx
-                    .send(ChainUpdate::ConnectionStatus(ConnectionStatus::Connected))
-                    .await;
 
-                // Connect to People chain for identity queries
+                // Connect to People chain for identity queries before validator enrichment.
                 if let Some(ref client) = self.client {
-                    match client.connect_people_chain().await {
-                        Ok(people_subxt) => {
-                            tracing::info!("Connected to {} People chain", network);
-                            self.people_client = Some(PeopleChainClient::new(people_subxt));
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to connect to People chain (identity data will be unavailable): {}",
-                                e
-                            );
-                            self.people_client = None;
-                        }
-                    }
+                    self.people_client = connect_ready_people_client(client, network).await;
                 }
 
                 // Fetch and persist chain metadata
                 if let Some(ref client) = self.client {
-                    let info = client.get_chain_info();
+                    let info = match client.get_chain_info().await {
+                        Ok(info) => info,
+                        Err(e) => {
+                            tracing::warn!("Failed to get chain info: {}", e);
+                            return;
+                        }
+                    };
                     let genesis_hash = hex::encode(client.genesis_hash());
 
                     // Fetch dynamic data
@@ -913,6 +939,10 @@ impl ChainWorker {
                 // Delay before pool fetch: light client needs time for storage iteration
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 self.fetch_pools_internal(network).await;
+                let _ = self
+                    .update_tx
+                    .send(ChainUpdate::ConnectionStatus(ConnectionStatus::Connected))
+                    .await;
             }
             Err(e) => {
                 tracing::error!("Failed to connect: {}", e);

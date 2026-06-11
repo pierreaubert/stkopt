@@ -16,6 +16,7 @@ impl DashboardSection {
         let symbol = app.token_symbol();
         let decimals = app.token_decimals();
         let entity = app.entity.clone();
+        let commands_available = app.commands_available();
 
         let (total_balance, bonded, unbonding, rewards) = if let Some(ref info) = app.staking_info {
             (
@@ -68,6 +69,7 @@ impl DashboardSection {
                                 Button::new("btn-bond", "Bond")
                                     .variant(ButtonVariant::Primary)
                                     .theme(crate::theme::button_theme_for_ui_theme(&theme))
+                                    .disabled(!commands_available)
                                     .on_click({
                                         let entity = entity.clone();
                                         move |_window, cx| {
@@ -80,6 +82,7 @@ impl DashboardSection {
                             .child(
                                 Button::new("btn-unbond", "Unbond")
                                     .variant(ButtonVariant::Secondary)
+                                    .disabled(!commands_available)
                                     .on_click({
                                         let entity = entity.clone();
                                         move |_window, cx| {
@@ -95,6 +98,7 @@ impl DashboardSection {
                             .child(
                                 Button::new("btn-rebond", "Rebond")
                                     .variant(ButtonVariant::Secondary)
+                                    .disabled(!commands_available)
                                     .on_click({
                                         let entity = entity.clone();
                                         move |_window, cx| {
@@ -110,6 +114,7 @@ impl DashboardSection {
                             .child(
                                 Button::new("btn-claim", "Claim Rewards")
                                     .variant(ButtonVariant::Secondary)
+                                    .disabled(!commands_available)
                                     .on_click({
                                         let entity = entity.clone();
                                         move |_window, cx| {
@@ -122,6 +127,7 @@ impl DashboardSection {
                             .child(
                                 Button::new("btn-nominate", "Nominate")
                                     .variant(ButtonVariant::Secondary)
+                                    .disabled(!commands_available)
                                     .on_click({
                                         let entity = entity.clone();
                                         move |_window, cx| {
@@ -137,6 +143,7 @@ impl DashboardSection {
                             .child(
                                 Button::new("btn-set-payee", "Set Payee")
                                     .variant(ButtonVariant::Secondary)
+                                    .disabled(!commands_available)
                                     .on_click({
                                         let entity = entity.clone();
                                         move |_window, cx| {

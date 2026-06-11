@@ -8,7 +8,7 @@ use qrcode::{EcLevel, QrCode, Version};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
-    style::{Modifier, Style, Stylize},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Tabs},
 };
@@ -848,7 +848,7 @@ fn render_nominate(frame: &mut Frame, app: &mut App, area: Rect) {
     let decimals = app.network.token_decimals();
 
     // Split into info panel and validator table
-    let chunks = Layout::vertical([Constraint::Length(8), Constraint::Min(0)]).split(area);
+    let chunks = Layout::vertical([Constraint::Length(9), Constraint::Min(0)]).split(area);
 
     // Info panel
     let mut info_lines = Vec::new();
@@ -880,6 +880,14 @@ fn render_nominate(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     info_lines.push(Line::from(""));
+    if let Some(status) = &app.nomination_status {
+        info_lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(status.clone(), Style::default().fg(pal.accent)),
+        ]));
+    } else {
+        info_lines.push(Line::from(""));
+    }
     info_lines.push(Line::from(vec![
         Span::raw("  "),
         Span::styled("o", Style::default().fg(pal.primary).bold()),

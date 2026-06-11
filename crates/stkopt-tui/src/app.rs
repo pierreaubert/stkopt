@@ -372,6 +372,8 @@ pub struct App {
     pub validator_sort_asc: bool,
     /// Nomination optimization result.
     pub optimization_result: Option<OptimizationResult>,
+    /// Status message for nomination optimization and QR generation.
+    pub nomination_status: Option<String>,
     /// Optimization strategy selection index.
     pub strategy_index: usize,
 
@@ -497,6 +499,7 @@ impl App {
             validator_sort: ValidatorSortField::default(),
             validator_sort_asc: false, // Default descending (highest APY first)
             optimization_result: None,
+            nomination_status: None,
             strategy_index: 0,
 
             // Pools state
@@ -829,9 +832,7 @@ impl App {
                 return Some(Action::ClearNominations);
             }
             KeyCode::Char('g') if self.current_view == View::Nominate => {
-                if !self.selected_validators.is_empty() && self.watched_account.is_some() {
-                    return Some(Action::GenerateNominationQR);
-                }
+                return Some(Action::GenerateNominationQR);
             }
             // History view keys
             KeyCode::Char('l') if self.current_view == View::AccountHistory => {
@@ -1397,7 +1398,21 @@ impl App {
                         self.selected_validators.insert(idx);
                     }
                 }
+                self.nomination_status = if result.selected.is_empty() {
+                    Some(
+                        "No eligible validators found for the current optimizer filters."
+                            .to_string(),
+                    )
+                } else {
+                    Some(format!(
+                        "Selected {} validators. Press g to generate the signing QR.",
+                        result.selected.len()
+                    ))
+                };
                 self.optimization_result = Some(result);
+            }
+            Action::SetNominationStatus(status) => {
+                self.nomination_status = status;
             }
             Action::ToggleValidatorSelection(idx) => {
                 if self.selected_validators.contains(&idx) {
@@ -1408,10 +1423,15 @@ impl App {
                 }
                 // Clear optimization result since we're now manually selecting
                 self.optimization_result = None;
+                self.nomination_status = Some(format!(
+                    "{} validators selected. Press g to generate the signing QR.",
+                    self.selected_validators.len()
+                ));
             }
             Action::ClearNominations => {
                 self.selected_validators.clear();
                 self.optimization_result = None;
+                self.nomination_status = Some("Cleared nomination selection.".to_string());
             }
             Action::GenerateNominationQR => {
                 // Handled in main.rs
@@ -1422,6 +1442,10 @@ impl App {
                 self.qr.frame = 0; // Reset animation frame for new QR
                 self.qr.modal_tab = 0; // Reset to QR tab
                 self.qr.showing = self.qr.data.is_some();
+                if self.qr.showing {
+                    self.nomination_status =
+                        Some("Signing QR ready. Scan it with Polkadot Vault.".to_string());
+                }
             }
             Action::SetPendingUnsignedTx(pending) => {
                 self.qr.pending_unsigned = pending;
@@ -1439,6 +1463,7 @@ impl App {
                 tracing::error!("QR scan failed: {}", error);
                 self.camera.scanning = false;
                 self.camera.status = Some(CameraScanStatus::Error);
+                self.nomination_status = Some(error.clone());
             }
             Action::UpdateScanStatus(status) => {
                 // Increment frame counter on each scan update (activity indicator)

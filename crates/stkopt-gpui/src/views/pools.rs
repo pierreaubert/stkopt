@@ -5,7 +5,7 @@ use gpui::*;
 use gpui_ui_kit::theme::ThemeExt;
 use gpui_ui_kit::*;
 
-use crate::app::{ConnectionStatus, PoolOperation, StkoptApp};
+use crate::app::{PoolOperation, StkoptApp};
 use crate::gpui_tokio::Tokio;
 
 pub struct PoolsSection;
@@ -14,6 +14,7 @@ impl PoolsSection {
     pub fn render(app: &StkoptApp, cx: &Context<StkoptApp>) -> impl IntoElement {
         let theme = cx.theme();
         let entity = app.entity.clone();
+        let data_ready = app.data_download_complete();
 
         div()
             .flex()
@@ -29,7 +30,7 @@ impl PoolsSection {
                         Button::new("btn-refresh-pools", "Refresh")
                             .variant(ButtonVariant::Secondary)
                             .size(ButtonSize::Xs)
-                            .disabled(app.connection_status != ConnectionStatus::Connected)
+                            .disabled(!data_ready)
                             .on_click({
                                 let entity = entity.clone();
                                 move |_window, cx| {
@@ -160,6 +161,7 @@ impl PoolsSection {
             };
             let pool_id = pool.id;
             let is_open = pool.state == crate::app::PoolState::Open;
+            let commands_available = app.commands_available();
 
             list = list.child(
                 div()
@@ -206,7 +208,7 @@ impl PoolsSection {
                             .size(ButtonSize::Xs)
                             .variant(ButtonVariant::Primary)
                             .theme(crate::theme::button_theme_for_ui_theme(theme))
-                            .disabled(!is_open)
+                            .disabled(!is_open || !commands_available)
                             .on_click({
                                 let entity = entity.clone();
                                 move |_window, cx| {

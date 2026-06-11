@@ -57,9 +57,10 @@ impl ChainClient {
         use_mortal_era: bool,
     ) -> Result<UnsignedPayload, ChainError> {
         let client = self.client();
-        let call_data = client.tx().call_data(&call)?;
+        let call_data = client.tx().await?.call_data(&call)?;
 
-        let metadata = client.metadata();
+        let block = client.at_current_block().await?;
+        let metadata = block.metadata();
         let extensions: Vec<_> = metadata
             .extrinsic()
             .transaction_extensions_to_use_for_encoding()
@@ -73,7 +74,8 @@ impl ChainClient {
             .any(|e| e.identifier() == "ChargeAssetTxPayment");
 
         let genesis_hash: [u8; 32] = self.genesis_hash();
-        let runtime = client.runtime_version();
+        let spec_version = block.spec_version();
+        let tx_version = block.transaction_version();
         let nonce = self.get_account_nonce(signer).await?;
 
         let (era, block_hash) = if use_mortal_era {
@@ -98,8 +100,8 @@ impl ChainClient {
             metadata_hash: [0u8; 32],
             genesis_hash,
             block_hash,
-            spec_version: runtime.spec_version,
-            tx_version: runtime.transaction_version,
+            spec_version,
+            tx_version,
             nonce,
             era,
             include_metadata_hash,
@@ -422,24 +424,18 @@ impl ChainClient {
         client: &subxt::OnlineClient<subxt::PolkadotConfig>,
         account: &AccountId32,
     ) -> Result<u64, ChainError> {
-        let storage_query = subxt::dynamic::storage(
-            "System",
-            "Account",
-            vec![Value::from_bytes(account.clone())],
-        );
-
-        let result = client
+        let storage_query = subxt::dynamic::storage("System", "Account");
+        let block = client.at_current_block().await?;
+        let result = block
             .storage()
-            .at_latest()
-            .await?
-            .fetch(&storage_query)
+            .try_fetch(&storage_query, vec![Value::from_bytes(account.clone())])
             .await?;
 
         if let Some(value) = result {
-            let decoded = value.to_value()?;
+            let decoded: Value = value.decode()?;
             let nonce = decoded
                 .at("nonce")
-                .and_then(|v: &subxt::dynamic::Value<u32>| v.as_u128())
+                .and_then(|v: &subxt::dynamic::Value<()>| v.as_u128())
                 .unwrap_or(0);
             Ok(nonce as u64)
         } else {
@@ -516,8 +512,15 @@ fn encode_extension_extra(
     payload: &UnsignedPayload,
 ) -> Result<(), ChainError> {
     match id {
-        "CheckNonZeroSender" | "CheckSpecVersion" | "CheckTxVersion" | "CheckGenesis"
-        | "CheckWeight" | "PrevalidateAttests" => {
+        "CheckNonZeroSender"
+        | "CheckSpecVersion"
+        | "CheckTxVersion"
+        | "CheckGenesis"
+        | "CheckWeight"
+        | "PrevalidateAttests"
+        | "AuthorizeCall"
+        | "EthSetOrigin"
+        | "StorageWeightReclaim" => {
             // Nothing to encode
         }
         "CheckMortality" => match payload.era {
@@ -564,7 +567,10 @@ fn encode_extension_additional_signed(
         | "CheckWeight"
         | "ChargeTransactionPayment"
         | "ChargeAssetTxPayment"
-        | "PrevalidateAttests" => {
+        | "PrevalidateAttests"
+        | "AuthorizeCall"
+        | "EthSetOrigin"
+        | "StorageWeightReclaim" => {
             // Nothing to encode
         }
         "CheckSpecVersion" => {
@@ -1337,6 +1343,59 @@ mod tests {
 
         let signed_err = build_signed_extrinsic(&payload, &signer, &decoded_sig).unwrap_err();
         assert!(matches!(signed_err, ChainError::InvalidData(_)));
+    }
+
+    #[test]
+    fn test_authorize_call_extension_is_supported() {
+        let mut payload = make_test_payload();
+        payload.extension_ids.push("AuthorizeCall".to_string());
+        let signer = make_test_signer();
+        let decoded_sig = DecodedSignature {
+            signature: [0xCD; 64],
+            sig_type: SignatureType::Sr25519,
+        };
+
+        let qr_data = encode_for_qr(&payload, &signer).unwrap();
+        assert!(!qr_data.is_empty());
+
+        let signed = build_signed_extrinsic(&payload, &signer, &decoded_sig).unwrap();
+        assert!(!signed.encoded.is_empty());
+    }
+
+    #[test]
+    fn test_eth_set_origin_extension_is_supported() {
+        let mut payload = make_test_payload();
+        payload.extension_ids.push("EthSetOrigin".to_string());
+        let signer = make_test_signer();
+        let decoded_sig = DecodedSignature {
+            signature: [0xCD; 64],
+            sig_type: SignatureType::Sr25519,
+        };
+
+        let qr_data = encode_for_qr(&payload, &signer).unwrap();
+        assert!(!qr_data.is_empty());
+
+        let signed = build_signed_extrinsic(&payload, &signer, &decoded_sig).unwrap();
+        assert!(!signed.encoded.is_empty());
+    }
+
+    #[test]
+    fn test_storage_weight_reclaim_extension_is_supported() {
+        let mut payload = make_test_payload();
+        payload
+            .extension_ids
+            .push("StorageWeightReclaim".to_string());
+        let signer = make_test_signer();
+        let decoded_sig = DecodedSignature {
+            signature: [0xCD; 64],
+            sig_type: SignatureType::Sr25519,
+        };
+
+        let qr_data = encode_for_qr(&payload, &signer).unwrap();
+        assert!(!qr_data.is_empty());
+
+        let signed = build_signed_extrinsic(&payload, &signer, &decoded_sig).unwrap();
+        assert!(!signed.encoded.is_empty());
     }
 
     #[test]

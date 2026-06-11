@@ -10,6 +10,17 @@ use stkopt_chain::{ChainClient, RpcEndpoints};
 use stkopt_core::{ConnectionStatus, Network};
 use tokio::sync::mpsc;
 
+type DynamicStorageAddress =
+    subxt::storage::DynamicAddress<Vec<subxt::dynamic::Value<()>>, subxt::dynamic::Value<()>>;
+
+fn dynamic_storage(pallet: &str, entry: &str) -> DynamicStorageAddress {
+    subxt::dynamic::storage(pallet, entry)
+}
+
+fn no_keys() -> Vec<subxt::dynamic::Value<()>> {
+    Vec::new()
+}
+
 #[tokio::main]
 async fn main() {
     // Initialize logging
@@ -64,17 +75,17 @@ async fn main() {
 
             // Debug: try raw storage query for ActiveEra
             println!("--- Debugging ActiveEra storage ---");
-            let storage_query = subxt::dynamic::storage("Staking", "ActiveEra", ());
-            let storage = client.client().storage().at_latest().await.unwrap();
-            let metadata = client.client().metadata();
+            let block = client.client().at_current_block().await.unwrap();
+            let storage = block.storage();
+            let metadata = block.metadata();
 
             // First, let's check if we can get runtime constants (to verify metadata works)
             println!("Checking runtime constants...");
-            let sessions_per_era = subxt::dynamic::constant("Staking", "SessionsPerEra");
-            match client.client().constants().at(&sessions_per_era) {
+            let sessions_per_era =
+                subxt::dynamic::constant::<subxt::dynamic::Value<()>>("Staking", "SessionsPerEra");
+            match block.constants().entry(&sessions_per_era) {
                 Ok(val) => {
-                    let decoded = val.to_value().unwrap();
-                    println!("SessionsPerEra constant: {:?}", decoded);
+                    println!("SessionsPerEra constant: {:?}", val);
                 }
                 Err(e) => {
                     println!("Failed to get SessionsPerEra: {}", e);
@@ -82,38 +93,22 @@ async fn main() {
             }
 
             // Try to get validators count (a simple value)
-            println!("\nTrying Staking.ValidatorCount with () key...");
-            let validator_count_query = subxt::dynamic::storage("Staking", "ValidatorCount", ());
-            match storage.fetch(&validator_count_query).await {
+            println!("\nTrying Staking.ValidatorCount...");
+            let validator_count_query = dynamic_storage("Staking", "ValidatorCount");
+            match storage.try_fetch(&validator_count_query, no_keys()).await {
                 Ok(Some(value)) => {
-                    let decoded = value.to_value().unwrap();
+                    let decoded: subxt::dynamic::Value<()> = value.decode().unwrap();
                     println!("ValidatorCount: {:?}", decoded);
                 }
                 Ok(None) => println!("ValidatorCount: None"),
                 Err(e) => println!("ValidatorCount error: {}", e),
             }
 
-            // Try with Vec<Value> empty key
-            println!("\nTrying Staking.ValidatorCount with vec![] key...");
-            let validator_count_query2 = subxt::dynamic::storage(
-                "Staking",
-                "ValidatorCount",
-                Vec::<subxt::dynamic::Value<()>>::new(),
-            );
-            match storage.fetch(&validator_count_query2).await {
-                Ok(Some(value)) => {
-                    let decoded = value.to_value().unwrap();
-                    println!("ValidatorCount (vec): {:?}", decoded);
-                }
-                Ok(None) => println!("ValidatorCount (vec): None"),
-                Err(e) => println!("ValidatorCount (vec) error: {}", e),
-            }
-
-            // Try using fetch_or_default
+            // Try using fetch, which applies the runtime default if present
             println!("\nTrying Staking.ValidatorCount with fetch_or_default...");
-            match storage.fetch_or_default(&validator_count_query).await {
+            match storage.fetch(&validator_count_query, no_keys()).await {
                 Ok(value) => {
-                    let decoded = value.to_value().unwrap();
+                    let decoded: subxt::dynamic::Value<()> = value.decode().unwrap();
                     println!("ValidatorCount (default): {:?}", decoded);
                 }
                 Err(e) => println!("ValidatorCount (default) error: {}", e),
@@ -121,34 +116,39 @@ async fn main() {
 
             // Try to get raw bytes
             println!("\nTrying raw storage fetch for ValidatorCount...");
-            let storage_key = validator_count_query.to_root_bytes();
+            let storage_key = storage
+                .entry(&validator_count_query)
+                .and_then(|entry| entry.fetch_key(no_keys()))
+                .unwrap();
             println!("Storage key: 0x{}", hex::encode(&storage_key));
             match storage.fetch_raw(storage_key).await {
-                Ok(Some(bytes)) => {
+                Ok(bytes) => {
                     println!("Raw bytes: 0x{}", hex::encode(&bytes));
                 }
-                Ok(None) => println!("Raw bytes: None"),
                 Err(e) => println!("Raw fetch error: {}", e),
             }
 
             // Try ActiveEra raw
             println!("\nTrying raw storage fetch for ActiveEra...");
-            let active_era_key = storage_query.to_root_bytes();
+            let storage_query = dynamic_storage("Staking", "ActiveEra");
+            let active_era_key = storage
+                .entry(&storage_query)
+                .and_then(|entry| entry.fetch_key(no_keys()))
+                .unwrap();
             println!("ActiveEra key: 0x{}", hex::encode(&active_era_key));
             match storage.fetch_raw(active_era_key).await {
-                Ok(Some(bytes)) => {
+                Ok(bytes) => {
                     println!("Raw bytes: 0x{}", hex::encode(&bytes));
                 }
-                Ok(None) => println!("Raw bytes: None"),
                 Err(e) => println!("Raw fetch error: {}", e),
             }
 
             // Try ActiveEra
             println!("\nTrying Staking.ActiveEra...");
-            match storage.fetch(&storage_query).await {
+            match storage.try_fetch(&storage_query, no_keys()).await {
                 Ok(Some(value)) => {
                     println!("ActiveEra raw value found!");
-                    let decoded = value.to_value().unwrap();
+                    let decoded: subxt::dynamic::Value<()> = value.decode().unwrap();
                     println!("Decoded value: {:?}", decoded);
                 }
                 Ok(None) => {
@@ -156,10 +156,10 @@ async fn main() {
 
                     // Try to list available storage entries
                     println!("\nTrying to fetch CurrentEra instead...");
-                    let current_era_query = subxt::dynamic::storage("Staking", "CurrentEra", ());
-                    match storage.fetch(&current_era_query).await {
+                    let current_era_query = dynamic_storage("Staking", "CurrentEra");
+                    match storage.try_fetch(&current_era_query, no_keys()).await {
                         Ok(Some(value)) => {
-                            let decoded = value.to_value().unwrap();
+                            let decoded: subxt::dynamic::Value<()> = value.decode().unwrap();
                             println!("CurrentEra: {:?}", decoded);
                         }
                         Ok(None) => println!("CurrentEra also None"),
@@ -173,10 +173,10 @@ async fn main() {
 
             // Try System.Number to verify we can read storage at all
             println!("\nTrying System.Number (block number)...");
-            let number_query = subxt::dynamic::storage("System", "Number", ());
-            match storage.fetch(&number_query).await {
+            let number_query = dynamic_storage("System", "Number");
+            match storage.try_fetch(&number_query, no_keys()).await {
                 Ok(Some(value)) => {
-                    let decoded = value.to_value().unwrap();
+                    let decoded: subxt::dynamic::Value<()> = value.decode().unwrap();
                     println!("System.Number: {:?}", decoded);
                 }
                 Ok(None) => println!("System.Number: None"),
@@ -217,12 +217,11 @@ async fn main() {
 
             // Try iterating over Staking storage to see if anything exists
             println!("\n--- Iterating over some Staking storage ---");
-            let bonded_iter = subxt::dynamic::storage("Staking", "Bonded", ());
-            let iter = storage.iter(bonded_iter).await;
+            let bonded_iter = dynamic_storage("Staking", "Bonded");
+            let iter = storage.iter(&bonded_iter, no_keys()).await;
             match iter {
                 Ok(mut stream) => {
                     println!("Bonded iterator created");
-                    use futures::StreamExt;
                     let mut count = 0;
                     while let Some(item) = stream.next().await {
                         if count >= 3 {
@@ -230,8 +229,8 @@ async fn main() {
                         }
                         match item {
                             Ok(kv) => {
-                                println!("  Bonded entry key: 0x{}", hex::encode(&kv.key_bytes));
-                                let val = kv.value.to_value().unwrap();
+                                println!("  Bonded entry key: 0x{}", hex::encode(kv.key_bytes()));
+                                let val: subxt::dynamic::Value<()> = kv.value().decode().unwrap();
                                 println!("  Value: {:?}", val);
                             }
                             Err(e) => println!("  Error: {}", e),
@@ -247,10 +246,10 @@ async fn main() {
 
             // Check StakingAhClient pallet
             println!("\n--- Checking StakingAhClient pallet ---");
-            let mode_query = subxt::dynamic::storage("StakingAhClient", "Mode", ());
-            match storage.fetch(&mode_query).await {
+            let mode_query = dynamic_storage("StakingAhClient", "Mode");
+            match storage.try_fetch(&mode_query, no_keys()).await {
                 Ok(Some(value)) => {
-                    let decoded = value.to_value().unwrap();
+                    let decoded: subxt::dynamic::Value<()> = value.decode().unwrap();
                     println!("StakingAhClient.Mode: {:?}", decoded);
                 }
                 Ok(None) => println!("StakingAhClient.Mode: None"),
@@ -259,10 +258,10 @@ async fn main() {
 
             // Check Session.CurrentIndex
             println!("\n--- Checking Session pallet ---");
-            let session_idx = subxt::dynamic::storage("Session", "CurrentIndex", ());
-            match storage.fetch(&session_idx).await {
+            let session_idx = dynamic_storage("Session", "CurrentIndex");
+            match storage.try_fetch(&session_idx, no_keys()).await {
                 Ok(Some(value)) => {
-                    let decoded = value.to_value().unwrap();
+                    let decoded: subxt::dynamic::Value<()> = value.decode().unwrap();
                     println!("Session.CurrentIndex: {:?}", decoded);
                 }
                 Ok(None) => println!("Session.CurrentIndex: None"),
@@ -271,12 +270,10 @@ async fn main() {
 
             // Check StakingAhClient.ValidatorSet
             println!("\n--- Checking StakingAhClient.ValidatorSet ---");
-            let validator_set_query =
-                subxt::dynamic::storage("StakingAhClient", "ValidatorSet", ());
-            let iter = storage.iter(validator_set_query).await;
+            let validator_set_query = dynamic_storage("StakingAhClient", "ValidatorSet");
+            let iter = storage.iter(&validator_set_query, no_keys()).await;
             match iter {
                 Ok(mut stream) => {
-                    use futures::StreamExt;
                     let mut count = 0;
                     while let Some(item) = stream.next().await {
                         if count >= 5 {
@@ -285,7 +282,7 @@ async fn main() {
                         }
                         match item {
                             Ok(kv) => {
-                                let val = kv.value.to_value().unwrap();
+                                let val: subxt::dynamic::Value<()> = kv.value().decode().unwrap();
                                 println!("  Validator: {:?}", val);
                             }
                             Err(e) => println!("  Error: {}", e),
@@ -301,10 +298,10 @@ async fn main() {
 
             // Check Session.Validators for the actual validator set
             println!("\n--- Checking Session.Validators ---");
-            let session_validators = subxt::dynamic::storage("Session", "Validators", ());
-            match storage.fetch(&session_validators).await {
+            let session_validators = dynamic_storage("Session", "Validators");
+            match storage.try_fetch(&session_validators, no_keys()).await {
                 Ok(Some(value)) => {
-                    let decoded = value.to_value().unwrap();
+                    let decoded: subxt::dynamic::Value<()> = value.decode().unwrap();
                     println!(
                         "Session.Validators (first part): {:?}",
                         format!("{:?}", decoded)
@@ -321,51 +318,51 @@ async fn main() {
             println!("\n--- Checking era duration constants ---");
 
             // Check if Aura exists
-            let aura_slot = subxt::dynamic::constant("Aura", "SlotDuration");
-            match client.client().constants().at(&aura_slot) {
+            let aura_slot =
+                subxt::dynamic::constant::<subxt::dynamic::Value<()>>("Aura", "SlotDuration");
+            match block.constants().entry(&aura_slot) {
                 Ok(val) => {
-                    let decoded = val.to_value().unwrap();
-                    println!("Aura.SlotDuration: {:?}", decoded);
+                    println!("Aura.SlotDuration: {:?}", val);
                 }
                 Err(e) => println!("Aura.SlotDuration error: {}", e),
             }
 
             // Check ParachainSystem for block time
-            let system_block_time = subxt::dynamic::constant("System", "BlockTime");
-            match client.client().constants().at(&system_block_time) {
+            let system_block_time =
+                subxt::dynamic::constant::<subxt::dynamic::Value<()>>("System", "BlockTime");
+            match block.constants().entry(&system_block_time) {
                 Ok(val) => {
-                    let decoded = val.to_value().unwrap();
-                    println!("System.BlockTime: {:?}", decoded);
+                    println!("System.BlockTime: {:?}", val);
                 }
                 Err(e) => println!("System.BlockTime error: {}", e),
             }
 
             // Check Staking.SessionsPerEra
-            let sessions = subxt::dynamic::constant("Staking", "SessionsPerEra");
-            match client.client().constants().at(&sessions) {
+            let sessions =
+                subxt::dynamic::constant::<subxt::dynamic::Value<()>>("Staking", "SessionsPerEra");
+            match block.constants().entry(&sessions) {
                 Ok(val) => {
-                    let decoded = val.to_value().unwrap();
-                    println!("Staking.SessionsPerEra: {:?}", decoded);
+                    println!("Staking.SessionsPerEra: {:?}", val);
                 }
                 Err(e) => println!("Staking.SessionsPerEra error: {}", e),
             }
 
             // Check Staking.MaxEraDuration
-            let max_era = subxt::dynamic::constant("Staking", "MaxEraDuration");
-            match client.client().constants().at(&max_era) {
+            let max_era =
+                subxt::dynamic::constant::<subxt::dynamic::Value<()>>("Staking", "MaxEraDuration");
+            match block.constants().entry(&max_era) {
                 Ok(val) => {
-                    let decoded = val.to_value().unwrap();
-                    println!("Staking.MaxEraDuration: {:?}", decoded);
+                    println!("Staking.MaxEraDuration: {:?}", val);
                 }
                 Err(e) => println!("Staking.MaxEraDuration error: {}", e),
             }
 
             // Check Session.Period if it exists
-            let session_period = subxt::dynamic::constant("Session", "Period");
-            match client.client().constants().at(&session_period) {
+            let session_period =
+                subxt::dynamic::constant::<subxt::dynamic::Value<()>>("Session", "Period");
+            match block.constants().entry(&session_period) {
                 Ok(val) => {
-                    let decoded = val.to_value().unwrap();
-                    println!("Session.Period: {:?}", decoded);
+                    println!("Session.Period: {:?}", val);
                 }
                 Err(e) => println!("Session.Period error: {}", e),
             }
@@ -412,7 +409,14 @@ async fn test_people_chain(client: &stkopt_chain::ChainClient, _network: Network
 
             // List available pallets to verify Identity pallet exists
             println!("\n--- Checking People chain pallets ---");
-            let metadata = subxt_client.metadata();
+            let block = match subxt_client.at_current_block().await {
+                Ok(block) => block,
+                Err(e) => {
+                    println!("Failed to get People chain block: {}", e);
+                    return;
+                }
+            };
+            let metadata = block.metadata();
             for pallet in metadata.pallets() {
                 if pallet.name() == "Identity" {
                     println!("Found Identity pallet!");

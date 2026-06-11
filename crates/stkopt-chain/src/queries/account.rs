@@ -4,7 +4,7 @@ use super::decode_helpers::extract_account_id;
 use crate::ChainClient;
 use crate::error::ChainError;
 use stkopt_core::{Balance, EraIndex};
-use subxt::dynamic::{At, DecodedValueThunk, Value};
+use subxt::dynamic::{At, Value};
 use subxt::utils::AccountId32;
 
 /// Account balance information.
@@ -85,18 +85,12 @@ impl ChainClient {
         &self,
         account: &AccountId32,
     ) -> Result<AccountBalance, ChainError> {
-        let storage_query = subxt::dynamic::storage(
-            "System",
-            "Account",
-            vec![Value::from_bytes(account.clone())],
-        );
+        let storage_query = subxt::dynamic::storage("System", "Account");
 
-        let result: Option<DecodedValueThunk> = self
-            .client()
+        let block = self.client().at_current_block().await?;
+        let result = block
             .storage()
-            .at_latest()
-            .await?
-            .fetch(&storage_query)
+            .try_fetch(&storage_query, vec![Value::from_bytes(account.clone())])
             .await?;
 
         let Some(value) = result else {
@@ -107,7 +101,7 @@ impl ChainClient {
             });
         };
 
-        let decoded = value.to_value()?;
+        let decoded: Value = value.decode()?;
 
         // AccountInfo = { nonce, consumers, providers, sufficients, data: AccountData }
         // AccountData = { free, reserved, frozen, flags }
@@ -115,17 +109,17 @@ impl ChainClient {
 
         let free = data
             .and_then(|d| d.at("free"))
-            .and_then(|v: &Value<u32>| v.as_u128())
+            .and_then(|v: &Value| v.as_u128())
             .unwrap_or(0);
 
         let reserved = data
             .and_then(|d| d.at("reserved"))
-            .and_then(|v: &Value<u32>| v.as_u128())
+            .and_then(|v: &Value| v.as_u128())
             .unwrap_or(0);
 
         let frozen = data
             .and_then(|d| d.at("frozen"))
-            .and_then(|v: &Value<u32>| v.as_u128())
+            .and_then(|v: &Value| v.as_u128())
             .unwrap_or(0);
 
         Ok(AccountBalance {
@@ -141,32 +135,29 @@ impl ChainClient {
         stash: &AccountId32,
     ) -> Result<Option<StakingLedger>, ChainError> {
         // In newer runtimes, the stash is used directly (no separate controller)
-        let storage_query =
-            subxt::dynamic::storage("Staking", "Ledger", vec![Value::from_bytes(stash.clone())]);
+        let storage_query = subxt::dynamic::storage("Staking", "Ledger");
 
-        let result: Option<DecodedValueThunk> = self
-            .client()
+        let block = self.client().at_current_block().await?;
+        let result = block
             .storage()
-            .at_latest()
-            .await?
-            .fetch(&storage_query)
+            .try_fetch(&storage_query, vec![Value::from_bytes(stash.clone())])
             .await?;
 
         let Some(value) = result else {
             return Ok(None);
         };
 
-        let decoded = value.to_value()?;
+        let decoded: Value = value.decode()?;
 
         // StakingLedger = { stash, total, active, unlocking, legacy_claimed_rewards }
         let total = decoded
             .at("total")
-            .and_then(|v: &Value<u32>| v.as_u128())
+            .and_then(|v: &Value| v.as_u128())
             .unwrap_or(0);
 
         let active = decoded
             .at("active")
-            .and_then(|v: &Value<u32>| v.as_u128())
+            .and_then(|v: &Value| v.as_u128())
             .unwrap_or(0);
 
         // Parse unlocking chunks
@@ -176,11 +167,11 @@ impl ChainClient {
             while let Some(chunk) = unlocking_val.at(i) {
                 let chunk_value = chunk
                     .at("value")
-                    .and_then(|v: &Value<u32>| v.as_u128())
+                    .and_then(|v: &Value| v.as_u128())
                     .unwrap_or(0);
                 let chunk_era = chunk
                     .at("era")
-                    .and_then(|v: &Value<u32>| v.as_u128())
+                    .and_then(|v: &Value| v.as_u128())
                     .unwrap_or(0) as u32;
 
                 if chunk_value > 0 {
@@ -206,30 +197,24 @@ impl ChainClient {
         &self,
         stash: &AccountId32,
     ) -> Result<Option<NominatorInfo>, ChainError> {
-        let storage_query = subxt::dynamic::storage(
-            "Staking",
-            "Nominators",
-            vec![Value::from_bytes(stash.clone())],
-        );
+        let storage_query = subxt::dynamic::storage("Staking", "Nominators");
 
-        let result: Option<DecodedValueThunk> = self
-            .client()
+        let block = self.client().at_current_block().await?;
+        let result = block
             .storage()
-            .at_latest()
-            .await?
-            .fetch(&storage_query)
+            .try_fetch(&storage_query, vec![Value::from_bytes(stash.clone())])
             .await?;
 
         let Some(value) = result else {
             return Ok(None);
         };
 
-        let decoded = value.to_value()?;
+        let decoded: Value = value.decode()?;
 
         // Nominations = { targets, submitted_in, suppressed }
         let submitted_in = decoded
             .at("submitted_in")
-            .and_then(|v: &Value<u32>| v.as_u128())
+            .and_then(|v: &Value| v.as_u128())
             .unwrap_or(0) as u32;
 
         let mut targets = Vec::new();
@@ -254,41 +239,35 @@ impl ChainClient {
         &self,
         account: &AccountId32,
     ) -> Result<Option<PoolMembership>, ChainError> {
-        let storage_query = subxt::dynamic::storage(
-            "NominationPools",
-            "PoolMembers",
-            vec![Value::from_bytes(account.clone())],
-        );
+        let storage_query = subxt::dynamic::storage("NominationPools", "PoolMembers");
 
-        let result: Option<DecodedValueThunk> = self
-            .client()
+        let block = self.client().at_current_block().await?;
+        let result = block
             .storage()
-            .at_latest()
-            .await?
-            .fetch(&storage_query)
+            .try_fetch(&storage_query, vec![Value::from_bytes(account.clone())])
             .await?;
 
         let Some(value) = result else {
             return Ok(None);
         };
 
-        let decoded = value.to_value()?;
+        let decoded: Value = value.decode()?;
 
         // PoolMember = { pool_id, points, last_recorded_reward_counter, unbonding_eras }
         let pool_id = decoded
             .at("pool_id")
-            .and_then(|v: &Value<u32>| v.as_u128())
+            .and_then(|v: &Value| v.as_u128())
             .unwrap_or(0) as u32;
 
         let points = decoded
             .at("points")
-            .and_then(|v: &Value<u32>| v.as_u128())
+            .and_then(|v: &Value| v.as_u128())
             .unwrap_or(0);
 
         // Parse last_recorded_reward_counter (U256 stored as a composite type)
         let last_recorded_reward_counter = decoded
             .at("last_recorded_reward_counter")
-            .and_then(|v: &Value<u32>| v.as_u128())
+            .and_then(|v: &Value| v.as_u128())
             .unwrap_or(0);
 
         // Parse unbonding eras (BTreeMap<EraIndex, Balance>)
@@ -297,14 +276,8 @@ impl ChainClient {
             // BTreeMap is serialized as array of [key, value] pairs
             let mut i = 0;
             while let Some(pair) = unbonding_val.at(i) {
-                let era = pair
-                    .at(0)
-                    .and_then(|v: &Value<u32>| v.as_u128())
-                    .unwrap_or(0) as u32;
-                let amount = pair
-                    .at(1)
-                    .and_then(|v: &Value<u32>| v.as_u128())
-                    .unwrap_or(0);
+                let era = pair.at(0).and_then(|v: &Value| v.as_u128()).unwrap_or(0) as u32;
+                let amount = pair.at(1).and_then(|v: &Value| v.as_u128()).unwrap_or(0);
                 if amount > 0 {
                     unbonding_eras.push((era, amount));
                 }
@@ -322,30 +295,24 @@ impl ChainClient {
 
     /// Get the number of slashing spans for a stash account.
     pub async fn get_slashing_spans(&self, stash: &AccountId32) -> Result<u32, ChainError> {
-        let storage_query = subxt::dynamic::storage(
-            "Staking",
-            "SlashingSpans",
-            vec![Value::from_bytes(stash.clone())],
-        );
+        let storage_query = subxt::dynamic::storage("Staking", "SlashingSpans");
 
-        let result: Option<DecodedValueThunk> = self
-            .client()
+        let block = self.client().at_current_block().await?;
+        let result = block
             .storage()
-            .at_latest()
-            .await?
-            .fetch(&storage_query)
+            .try_fetch(&storage_query, vec![Value::from_bytes(stash.clone())])
             .await?;
 
         let Some(value) = result else {
             return Ok(0);
         };
 
-        let decoded = value.to_value()?;
+        let decoded: Value = value.decode()?;
 
         // SlashingSpans = { span_index, last_start, last_nonzero_punish, prior }
         let span_index = decoded
             .at("span_index")
-            .and_then(|v: &Value<u32>| v.as_u128())
+            .and_then(|v: &Value| v.as_u128())
             .unwrap_or(0) as u32;
 
         Ok(span_index.saturating_add(1))

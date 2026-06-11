@@ -7,7 +7,7 @@ use gpui_ui_kit::*;
 use tokio::sync::mpsc;
 
 use crate::account::{ValidationResult, validate_address};
-use crate::app::{ConnectionStatus, StkoptApp};
+use crate::app::StkoptApp;
 use crate::chain::ChainUpdate;
 use crate::gpui_tokio::Tokio;
 
@@ -77,7 +77,7 @@ impl AccountSection {
                         Button::new("btn-watch", "Watch")
                             .variant(ButtonVariant::Primary)
                             .theme(crate::theme::button_theme_for_ui_theme(&theme))
-                            .disabled(app.connection_status != ConnectionStatus::Connected)
+                            .disabled(!app.data_download_complete())
                             .on_click({
                                 let entity = entity.clone();
                                 move |_window, cx| {
@@ -86,44 +86,19 @@ impl AccountSection {
 
                                         match validate_address(&input) {
                                             ValidationResult::Valid(_addr_type) => {
-                                                this.watched_account = Some(input.clone());
-                                                this.account_error = None;
+                                                this.set_watched_account(input.clone());
                                                 this.add_to_address_book(input.clone());
                                                 this.save_config();
-
-                                                // Fetch account data if connected
-                                                if this.connection_status == ConnectionStatus::Connected
-                                                    && let Some(ref handle) = this.chain_handle
-                                                {
-                                                    let handle = handle.clone();
-                                                    let address = input.clone();
-                                                    let entity = this.entity.clone();
-                                                    let mut async_cx = cx.to_async();
-
-                                                    cx.spawn(move |_this: gpui::WeakEntity<StkoptApp>, _cx: &mut gpui::AsyncApp| async move {
-                                                        let result = handle.fetch_account(address).await;
-                                                        let _ = entity.update(&mut async_cx, |this, cx: &mut Context<StkoptApp>| {
-                                                            match result {
-                                                                Ok(account_data) => {
-                                                                    this.apply_chain_update(ChainUpdate::AccountLoaded(account_data), cx);
-                                                                }
-                                                                Err(e) => {
-                                                                    tracing::error!("Failed to fetch account: {}", e);
-                                                                    this.connection_error = Some(format!("Failed to fetch account: {}", e));
-                                                                    cx.notify();
-                                                                }
-                                                            }
-                                                        });
-                                                    }).detach();
-                                                }
-
-                                                this.current_section = crate::app::Section::Dashboard;
+                                                this.fetch_watched_account(cx);
+                                                this.current_section =
+                                                    crate::app::Section::Dashboard;
                                             }
                                             ValidationResult::Invalid(msg) => {
                                                 this.account_error = Some(msg);
                                             }
                                             ValidationResult::Empty => {
-                                                this.account_error = Some("Please enter an address".to_string());
+                                                this.account_error =
+                                                    Some("Please enter an address".to_string());
                                             }
                                         }
                                         cx.notify();
@@ -266,16 +241,26 @@ impl AccountSection {
                             .child(
                                 Text::new(truncate_address(&address))
                                     .size(TextSize::Xs)
-                                    .weight(if is_active { TextWeight::Semibold } else { TextWeight::Normal }),
+                                    .weight(if is_active {
+                                        TextWeight::Semibold
+                                    } else {
+                                        TextWeight::Normal
+                                    }),
                             )
                             .when(is_active, |el| {
-                                el.child(Badge::new("watching").variant(BadgeVariant::Success).size(BadgeSize::Sm))
+                                el.child(
+                                    Badge::new("watching")
+                                        .variant(BadgeVariant::Success)
+                                        .size(BadgeSize::Sm),
+                                )
                             }),
                     )
                     .child(
-                        div()
-                            .w(px(100.0))
-                            .child(Text::new(entry.network.symbol()).size(TextSize::Xs).color(theme.text_secondary)),
+                        div().w(px(100.0)).child(
+                            Text::new(entry.network.symbol())
+                                .size(TextSize::Xs)
+                                .color(theme.text_secondary),
+                        ),
                     )
                     .child(
                         div()
@@ -288,39 +273,13 @@ impl AccountSection {
                                 Button::new(SharedString::from(format!("watch-{}", i)), "Watch")
                                     .variant(ButtonVariant::Secondary)
                                     .size(ButtonSize::Xs)
-                                    .disabled(app.connection_status != ConnectionStatus::Connected)
+                                    .disabled(!app.data_download_complete())
                                     .on_click(move |_window, cx| {
                                         let addr = addr.clone();
                                         entity.update(cx, |this, cx| {
-                                            this.watched_account = Some(addr.clone());
-                                            this.account_input = addr.clone();
+                                            this.set_watched_account(addr.clone());
                                             this.save_config();
-
-                                            // Fetch account data if connected
-                                            if this.connection_status == ConnectionStatus::Connected
-                                                && let Some(ref handle) = this.chain_handle
-                                            {
-                                                let handle = handle.clone();
-                                                let entity = this.entity.clone();
-                                                let mut async_cx = cx.to_async();
-
-                                                cx.spawn(move |_this: gpui::WeakEntity<StkoptApp>, _cx: &mut gpui::AsyncApp| async move {
-                                                    let result = handle.fetch_account(addr).await;
-                                                    let _ = entity.update(&mut async_cx, |this, cx: &mut Context<StkoptApp>| {
-                                                        match result {
-                                                            Ok(account_data) => {
-                                                                this.apply_chain_update(ChainUpdate::AccountLoaded(account_data), cx);
-                                                            }
-                                                            Err(e) => {
-                                                                tracing::error!("Failed to fetch account: {}", e);
-                                                                this.connection_error = Some(format!("Failed to fetch account: {}", e));
-                                                                cx.notify();
-                                                            }
-                                                        }
-                                                    });
-                                                }).detach();
-                                            }
-
+                                            this.fetch_watched_account(cx);
                                             this.current_section = crate::app::Section::Dashboard;
                                             cx.notify();
                                         });

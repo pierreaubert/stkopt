@@ -20,8 +20,11 @@
 //! Light clients cannot query historical state beyond what's in the current
 //! block. For historical staking data, use the RPC fallback or indexer.
 
+use crate::PeopleChainClient;
 use crate::error::ChainError;
+use std::sync::Arc;
 use stkopt_core::Network;
+use subxt::backend::CombinedBackend;
 use subxt::lightclient::LightClient;
 use subxt::{OnlineClient, PolkadotConfig};
 
@@ -82,6 +85,8 @@ pub struct LightClientConnections {
     light_client: LightClient,
     /// Asset Hub subxt client.
     pub asset_hub: OnlineClient<PolkadotConfig>,
+    /// Asset Hub Subxt backend for batch storage reads.
+    pub asset_hub_backend: Arc<CombinedBackend<PolkadotConfig>>,
     /// Relay chain subxt client.
     pub relay: OnlineClient<PolkadotConfig>,
     /// Network this connection is for.
@@ -172,7 +177,14 @@ impl LightClientConnections {
 
         tracing::info!("Waiting for Asset Hub to sync...");
         let start = std::time::Instant::now();
-        let asset_hub = OnlineClient::<PolkadotConfig>::from_rpc_client(asset_hub_rpc)
+        let asset_hub_backend = CombinedBackend::<PolkadotConfig>::builder()
+            .build_with_background_driver(asset_hub_rpc)
+            .await
+            .map_err(|e| {
+                ChainError::LightClient(format!("Failed to create Asset Hub backend: {}", e))
+            })?;
+        let asset_hub_backend = Arc::new(asset_hub_backend);
+        let asset_hub = OnlineClient::<PolkadotConfig>::from_backend(asset_hub_backend.clone())
             .await
             .map_err(|e| {
                 ChainError::LightClient(format!("Failed to create Asset Hub client: {}", e))
@@ -188,6 +200,7 @@ impl LightClientConnections {
         Ok(Self {
             light_client,
             asset_hub,
+            asset_hub_backend,
             relay,
             network,
         })
@@ -204,6 +217,14 @@ impl LightClientConnections {
     /// Returns an error if People chain spec is not available for this network.
     #[allow(clippy::result_large_err)]
     pub async fn connect_people_chain(&self) -> Result<OnlineClient<PolkadotConfig>, ChainError> {
+        self.connect_people_chain_client()
+            .await
+            .map(|client| client.online_client().clone())
+    }
+
+    /// Connect to the People chain and keep the Subxt backend for batch identity queries.
+    #[allow(clippy::result_large_err)]
+    pub async fn connect_people_chain_client(&self) -> Result<PeopleChainClient, ChainError> {
         let total_start = std::time::Instant::now();
 
         let people_spec = get_people_chain_spec(self.network).ok_or_else(|| {
@@ -235,7 +256,14 @@ impl LightClientConnections {
 
         tracing::info!("Waiting for People chain to sync...");
         let start = std::time::Instant::now();
-        let client = OnlineClient::<PolkadotConfig>::from_rpc_client(people_rpc)
+        let backend = CombinedBackend::<PolkadotConfig>::builder()
+            .build_with_background_driver(people_rpc)
+            .await
+            .map_err(|e| {
+                ChainError::LightClient(format!("Failed to create People chain backend: {}", e))
+            })?;
+        let backend = Arc::new(backend);
+        let client = OnlineClient::<PolkadotConfig>::from_backend(backend.clone())
             .await
             .map_err(|e| {
                 ChainError::LightClient(format!("Failed to create People chain client: {}", e))
@@ -247,6 +275,6 @@ impl LightClientConnections {
             total_start.elapsed()
         );
 
-        Ok(client)
+        Ok(PeopleChainClient::with_backend(client, backend))
     }
 }

@@ -26,6 +26,7 @@ use app::StkoptApp;
 use gpui::prelude::*;
 use gpui_ui_kit::{MiniApp, MiniAppConfig};
 
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 
 fn main() {
@@ -36,14 +37,17 @@ fn main() {
     let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
     let handle = runtime.handle().clone();
 
-    // Setup tracing with DEBUG level filter (no TRACE)
+    // Setup tracing with DEBUG level filter (no TRACE) while suppressing
+    // smoldot's local light-client chatter.
     // LogBuffer is already Arc<Mutex<...>> internally, so we just clone the handle
     let logger = crate::log::LogBuffer::new();
     let app_logger = logger.clone(); // Cheap clone - just clones the inner Arc
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
+    let env_filter = suppress_light_client_chatter(env_filter);
     tracing_subscriber::registry()
+        .with(env_filter)
         .with(crate::log::LogBufferLayer::new(logger))
         .with(tracing_subscriber::fmt::layer())
-        .with(tracing_subscriber::filter::LevelFilter::DEBUG)
         .init();
 
     MiniApp::run(
@@ -62,4 +66,20 @@ fn main() {
 
     // Keep runtime alive - it will be dropped when main exits
     drop(runtime);
+}
+
+fn suppress_light_client_chatter(mut filter: EnvFilter) -> EnvFilter {
+    for directive in [
+        "json-rpc=warn",
+        "network=info",
+        "runtime=info",
+        "sync-service=info",
+        "bitswap-service=info",
+        "tx-service=info",
+        "stkopt_chain::lightclient=info",
+        "stkopt_chain::queries::identity=info",
+    ] {
+        filter = filter.add_directive(directive.parse().expect("log directive is valid"));
+    }
+    filter
 }

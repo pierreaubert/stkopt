@@ -328,7 +328,7 @@ impl StakingModal {
         let operation = app.staking_operation;
         let amount_str = app.staking_amount_input.clone();
         let has_amount = !amount_str.trim().is_empty() || !operation.requires_amount();
-        let disabled = !has_amount || app.staking_action_generating;
+        let disabled = !has_amount || app.staking_action_generating || !app.commands_available();
         let button_label = if app.staking_action_generating {
             "Generating..."
         } else {

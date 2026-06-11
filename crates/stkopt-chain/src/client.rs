@@ -16,11 +16,15 @@
 //! - Relay Chain: Transaction submission, block/session data
 //! - People Chain: Identity data
 
+use crate::PeopleChainClient;
 use crate::config::get_asset_hub_endpoints;
 use crate::error::ChainError;
 use crate::lightclient::LightClientConnections;
+use std::sync::Arc;
 use stkopt_core::{ConnectionStatus, Network};
 
+use subxt::backend::CombinedBackend;
+use subxt::tx::TransactionStatus;
 use subxt::{OnlineClient, PolkadotConfig};
 use tokio::sync::mpsc;
 
@@ -93,6 +97,8 @@ pub struct ChainClient {
     rpc_endpoints: RpcEndpoints,
     /// Asset Hub client (for reading staking data).
     client: OnlineClient<PolkadotConfig>,
+    /// Asset Hub backend (for batched storage reads).
+    asset_hub_backend: Option<Arc<CombinedBackend<PolkadotConfig>>>,
     /// Relay chain client (for block/session data, kept for potential future use).
     relay_client: Option<OnlineClient<PolkadotConfig>>,
     /// Light client connections (stored for connecting to People chain later).
@@ -167,6 +173,7 @@ impl ChainClient {
             connection_mode: ConnectionMode::LightClient,
             rpc_endpoints: RpcEndpoints::default(),
             client: light_client_conns.asset_hub.clone(),
+            asset_hub_backend: Some(light_client_conns.asset_hub_backend.clone()),
             relay_client: Some(light_client_conns.relay.clone()),
             light_client_conns: Some(light_client_conns),
             status_tx,
@@ -200,15 +207,15 @@ impl ChainClient {
         }
 
         let mut endpoint_errors: Vec<String> = Vec::new();
-        let mut asset_hub_client = None;
+        let mut asset_hub_connection = None;
 
         for endpoint in endpoints {
             tracing::info!("Trying {} Asset Hub via {}", network, endpoint);
 
-            match OnlineClient::<PolkadotConfig>::from_url(endpoint).await {
-                Ok(client) => {
+            match connect_asset_hub_endpoint_rpc(endpoint).await {
+                Ok(connection) => {
                     tracing::info!("Connected to {} Asset Hub via {}", network, endpoint);
-                    asset_hub_client = Some(client);
+                    asset_hub_connection = Some(connection);
                     break;
                 }
                 Err(e) => {
@@ -218,7 +225,7 @@ impl ChainClient {
             }
         }
 
-        let client = asset_hub_client.ok_or_else(|| {
+        let (client, asset_hub_backend) = asset_hub_connection.ok_or_else(|| {
             if endpoint_errors.is_empty() {
                 ChainError::Connection("All endpoints failed".to_string())
             } else {
@@ -248,6 +255,7 @@ impl ChainClient {
             connection_mode: ConnectionMode::Rpc,
             rpc_endpoints: rpc_endpoints.clone(),
             client,
+            asset_hub_backend: Some(asset_hub_backend),
             relay_client,
             light_client_conns: None,
             status_tx,
@@ -298,6 +306,25 @@ impl ChainClient {
         &self.client
     }
 
+    pub(crate) async fn batch_fetch_account_storage_values(
+        &self,
+        pallet_name: &str,
+        entry_name: &str,
+        addresses: &[subxt::utils::AccountId32],
+    ) -> Result<std::collections::HashMap<[u8; 32], subxt::dynamic::Value>, ChainError> {
+        let backend = self.asset_hub_backend.as_ref().ok_or_else(|| {
+            ChainError::InvalidData("Asset Hub batch backend unavailable".to_string())
+        })?;
+        crate::batch_storage::fetch_account_storage_values(
+            &self.client,
+            backend,
+            pallet_name,
+            entry_name,
+            addresses,
+        )
+        .await
+    }
+
     /// Get the relay chain client (for transactions).
     /// Falls back to Asset Hub client if relay chain is not connected.
     pub fn relay_client(&self) -> &OnlineClient<PolkadotConfig> {
@@ -336,17 +363,17 @@ impl ChainClient {
 
     /// Get the latest block number and hash to verify connection.
     pub async fn get_latest_block(&self) -> Result<(u32, [u8; 32]), ChainError> {
-        let block = self.client.blocks().at_latest().await?;
-        let number = block.number();
-        let hash: [u8; 32] = block.hash().0;
+        let block = self.client.at_current_block().await?;
+        let number = block.block_number() as u32;
+        let hash: [u8; 32] = block.block_hash().0;
         Ok((number, hash))
     }
 
     /// Get chain info with metadata validation.
-    pub fn get_chain_info(&self) -> ChainInfo {
-        let runtime = self.client.runtime_version();
-        let spec_version = runtime.spec_version;
-        let tx_version = runtime.transaction_version;
+    pub async fn get_chain_info(&self) -> Result<ChainInfo, ChainError> {
+        let block = self.client.at_current_block().await?;
+        let spec_version = block.spec_version();
+        let tx_version = block.transaction_version();
 
         // Build a human-friendly chain name based on network
         let chain_name = format!("{} Asset Hub", self.network);
@@ -367,12 +394,12 @@ impl ChainClient {
             tx_version
         );
 
-        ChainInfo {
+        Ok(ChainInfo {
             chain_name,
             spec_name,
             spec_version,
             tx_version,
-        }
+        })
     }
 
     /// Attempt to reconnect to the chain.
@@ -415,8 +442,8 @@ impl ChainClient {
         );
         tracing::debug!("Extrinsic hex: 0x{}", hex::encode(encoded));
 
-        // Submit via backend which returns a stream of transaction status updates
-        let status_stream = self.client.backend().submit_transaction(encoded).await?;
+        let tx = self.client.tx().await?.from_bytes(encoded.to_vec());
+        let status_stream = tx.submit_and_watch().await?;
 
         // Calculate the extrinsic hash for logging
         let tx_hash = sp_crypto_hashing::blake2_256(encoded);
@@ -424,7 +451,7 @@ impl ChainClient {
 
         Ok(TxSubmissionProgress {
             tx_hash,
-            status_stream: Box::pin(status_stream),
+            status_stream,
         })
     }
 
@@ -433,36 +460,36 @@ impl ChainClient {
     /// Uses light client if available (when main connection is via light client),
     /// otherwise falls back to RPC.
     pub async fn connect_people_chain(&self) -> Result<OnlineClient<PolkadotConfig>, ChainError> {
+        self.connect_people_chain_client()
+            .await
+            .map(|client| client.online_client().clone())
+    }
+
+    /// Connect to People chain for identity queries, preserving the backend for batch reads.
+    pub async fn connect_people_chain_client(&self) -> Result<PeopleChainClient, ChainError> {
         // If we have light client connections, use them for People chain too
         if let Some(ref lc_conns) = self.light_client_conns {
             tracing::info!(
                 "Connecting to {} People chain via light client...",
                 self.network
             );
-            return lc_conns.connect_people_chain().await;
+            return lc_conns.connect_people_chain_client().await;
         }
 
         // Fall back to RPC
         tracing::info!("Connecting to {} People chain via RPC...", self.network);
-        connect_people_chain_rpc(self.network, self.rpc_endpoints.people.as_deref()).await
+        connect_people_chain_rpc_client(self.network, self.rpc_endpoints.people.as_deref()).await
     }
 }
-
-use futures::Stream;
-use std::pin::Pin;
-use subxt::backend::TransactionStatus;
 
 /// Progress of a submitted transaction.
 pub struct TxSubmissionProgress {
     /// The transaction hash (blake2-256 of encoded extrinsic).
     pub tx_hash: [u8; 32],
     /// Stream of status updates.
-    pub status_stream: Pin<
-        Box<
-            dyn Stream<
-                    Item = Result<TransactionStatus<subxt::config::substrate::H256>, subxt::Error>,
-                > + Send,
-        >,
+    pub status_stream: subxt::tx::TransactionProgress<
+        subxt::PolkadotConfig,
+        subxt::client::OnlineClientAtBlockImpl<subxt::PolkadotConfig>,
     >,
 }
 
@@ -475,12 +502,10 @@ impl TxSubmissionProgress {
     /// Wait for the transaction to be included in a block.
     /// Returns the block hash when included.
     pub async fn wait_for_in_block(mut self) -> Result<TxInBlockResult, ChainError> {
-        use futures::StreamExt;
-
         while let Some(status) = self.status_stream.next().await {
             match status? {
-                TransactionStatus::InBestBlock { hash } => {
-                    let block_hash: [u8; 32] = hash.hash().0;
+                TransactionStatus::InBestBlock(tx_in_block) => {
+                    let block_hash: [u8; 32] = tx_in_block.block_hash().0;
                     tracing::info!("Transaction in best block: 0x{}", hex::encode(block_hash));
                     return Ok(TxInBlockResult {
                         tx_hash: self.tx_hash,
@@ -488,8 +513,8 @@ impl TxSubmissionProgress {
                         finalized: false,
                     });
                 }
-                TransactionStatus::InFinalizedBlock { hash } => {
-                    let block_hash: [u8; 32] = hash.hash().0;
+                TransactionStatus::InFinalizedBlock(tx_in_block) => {
+                    let block_hash: [u8; 32] = tx_in_block.block_hash().0;
                     tracing::info!(
                         "Transaction finalized in block: 0x{}",
                         hex::encode(block_hash)
@@ -541,12 +566,10 @@ impl TxSubmissionProgress {
     /// Wait for the transaction to be finalized.
     /// Returns the block hash when finalized.
     pub async fn wait_for_finalized(mut self) -> Result<TxInBlockResult, ChainError> {
-        use futures::StreamExt;
-
         while let Some(status) = self.status_stream.next().await {
             match status? {
-                TransactionStatus::InFinalizedBlock { hash } => {
-                    let block_hash: [u8; 32] = hash.hash().0;
+                TransactionStatus::InFinalizedBlock(tx_in_block) => {
+                    let block_hash: [u8; 32] = tx_in_block.block_hash().0;
                     tracing::info!(
                         "Transaction finalized in block: 0x{}",
                         hex::encode(block_hash)
@@ -580,7 +603,7 @@ impl TxSubmissionProgress {
                 }
                 TransactionStatus::Validated
                 | TransactionStatus::Broadcasted
-                | TransactionStatus::InBestBlock { .. }
+                | TransactionStatus::InBestBlock(_)
                 | TransactionStatus::NoLongerInBestBlock => {
                     // Continue waiting for finalization
                 }
@@ -613,6 +636,42 @@ pub async fn connect_people_chain_rpc(
     network: Network,
     custom_endpoint: Option<&str>,
 ) -> Result<OnlineClient<PolkadotConfig>, ChainError> {
+    connect_people_chain_rpc_client(network, custom_endpoint)
+        .await
+        .map(|client| client.online_client().clone())
+}
+
+async fn connect_asset_hub_endpoint_rpc(
+    endpoint: &str,
+) -> Result<
+    (
+        OnlineClient<PolkadotConfig>,
+        Arc<CombinedBackend<PolkadotConfig>>,
+    ),
+    ChainError,
+> {
+    let rpc_client = subxt::rpcs::RpcClient::from_url(endpoint)
+        .await
+        .map_err(|e| {
+            ChainError::Connection(format!("Failed to create Asset Hub RPC client: {e}"))
+        })?;
+    let backend = CombinedBackend::<PolkadotConfig>::builder()
+        .build_with_background_driver(rpc_client)
+        .await
+        .map_err(|e| ChainError::Connection(format!("Failed to create Asset Hub backend: {e}")))?;
+    let backend = Arc::new(backend);
+    let client = OnlineClient::<PolkadotConfig>::from_backend(backend.clone())
+        .await
+        .map_err(|e| ChainError::Connection(format!("Failed to create Asset Hub client: {e}")))?;
+    Ok((client, backend))
+}
+
+/// Connect to a network's People chain using WebSocket RPC.
+/// Returns a People chain client that can batch identity storage queries.
+pub async fn connect_people_chain_rpc_client(
+    network: Network,
+    custom_endpoint: Option<&str>,
+) -> Result<PeopleChainClient, ChainError> {
     use crate::config::get_people_chain_endpoints;
 
     let default_endpoints = get_people_chain_endpoints(network);
@@ -632,7 +691,7 @@ pub async fn connect_people_chain_rpc(
     for endpoint in endpoints {
         tracing::info!("Trying {} People chain RPC via {}", network, endpoint);
 
-        match OnlineClient::<PolkadotConfig>::from_url(endpoint).await {
+        match connect_people_endpoint_rpc(endpoint).await {
             Ok(client) => {
                 tracing::info!("Connected to {} People chain via RPC {}", network, endpoint);
                 return Ok(client);
@@ -654,4 +713,19 @@ pub async fn connect_people_chain_rpc(
             endpoint_errors.join("; ")
         )))
     }
+}
+
+async fn connect_people_endpoint_rpc(endpoint: &str) -> Result<PeopleChainClient, ChainError> {
+    let rpc_client = subxt::rpcs::RpcClient::from_url(endpoint)
+        .await
+        .map_err(|e| ChainError::Connection(format!("Failed to create People RPC client: {e}")))?;
+    let backend = CombinedBackend::<PolkadotConfig>::builder()
+        .build_with_background_driver(rpc_client)
+        .await
+        .map_err(|e| ChainError::Connection(format!("Failed to create People backend: {}", e)))?;
+    let backend = Arc::new(backend);
+    let client = OnlineClient::<PolkadotConfig>::from_backend(backend.clone())
+        .await
+        .map_err(|e| ChainError::Connection(format!("Failed to create People client: {e}")))?;
+    Ok(PeopleChainClient::with_backend(client, backend))
 }

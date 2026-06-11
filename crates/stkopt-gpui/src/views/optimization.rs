@@ -20,6 +20,8 @@ impl OptimizationSection {
         let selected_count = app.selected_validators.len();
         let validator_count = app.validators.len();
         let current_strategy = app.optimization_strategy;
+        let data_ready = app.data_download_complete();
+        let commands_available = app.commands_available();
 
         div()
             .flex()
@@ -162,7 +164,7 @@ impl OptimizationSection {
                             .variant(ButtonVariant::Primary)
                             .theme(crate::theme::button_theme_for_ui_theme(&theme))
                             .size(ButtonSize::Md)
-                            .disabled(validator_count == 0)
+                            .disabled(validator_count == 0 || !data_ready)
                             .on_click(move |_window, cx| {
                                 entity.update(cx, |this, cx| {
                                     let criteria = OptimizationCriteria {
@@ -197,7 +199,7 @@ impl OptimizationSection {
                             .variant(ButtonVariant::Primary)
                             .theme(crate::theme::button_theme_for_ui_theme(&theme))
                             .size(ButtonSize::Md)
-                            .disabled(selected_count == 0)
+                            .disabled(selected_count == 0 || !commands_available)
                             .on_click({
                                 let entity3 = app.entity.clone();
                                 move |_window, cx| {

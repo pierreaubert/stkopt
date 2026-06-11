@@ -9,13 +9,13 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
 directories = { workspace = true, optional = true }
-chrono = { version = "0.4", default-features = false, features = ["clock"], optional = true }
-rand = "0.8"
+chrono = { workspace = true, optional = true }
+rand.workspace = true
 
 [features]
 default = []
 persistence = ["dep:rusqlite", "dep:directories", "dep:chrono", "dep:serde_json"]
 
 [dev-dependencies]
-approx = "0.5"
-proptest = "1.4"
+approx.workspace = true
+proptest.workspace = true
