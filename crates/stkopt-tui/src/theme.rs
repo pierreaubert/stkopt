@@ -49,7 +49,6 @@ pub struct Palette {
 
     // Accent colors
     pub primary: Color,
-    #[allow(dead_code)]
     pub secondary: Color,
     pub accent: Color,
 

@@ -15,14 +15,20 @@ mod ui;
 
 use action::{Action, PendingTransaction, TxSubmissionStatus};
 use app::App;
-use chain_task::{ChainRequest, StakingOp, chain_task, get_db_path, run_update_mode};
+use chain_task::{
+    ChainRequest, StakingOp, cached_validators_have_chain_data, chain_task, run_update_mode,
+};
 use clap::Parser;
 use color_eyre::Result;
 use event::{Event, EventHandler};
 use log_buffer::{LogBuffer, LogBufferLayer};
 use ratatui::crossterm::event::KeyCode;
-use std::cmp::Ordering;
-use stkopt_core::{Network, OptimizationResult, SelectionStrategy, ValidatorCandidate};
+use std::path::PathBuf;
+use stkopt_core::config::get_db_path;
+use stkopt_core::{
+    CachePolicy, HistoryService, Network, OptimizationDataSource, OptimizationResult,
+    SelectionStrategy, StartupDataService,
+};
 use tokio::sync::mpsc;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -73,74 +79,55 @@ struct Args {
 // Re-export connection types from stkopt_chain
 use stkopt_chain::{ConnectionConfig, ConnectionMode, RpcEndpoints};
 
-fn validator_candidates(app: &App) -> Vec<ValidatorCandidate> {
-    app.validators
-        .iter()
-        .map(|v| ValidatorCandidate {
-            address: v.address.clone(),
-            commission: v.commission,
-            blocked: v.blocked,
-            apy: v.apy.unwrap_or(0.0),
-            total_stake: v.total_stake,
-            nominator_count: v.nominator_count,
-        })
-        .collect()
-}
-
-fn fallback_select_without_apy(
-    candidates: &[ValidatorCandidate],
-    criteria: &stkopt_core::OptimizationCriteria,
-) -> OptimizationResult {
-    let mut eligible: Vec<_> = candidates
-        .iter()
-        .filter(|v| v.commission <= criteria.max_commission && !v.blocked)
-        .cloned()
-        .collect();
-
-    eligible.sort_by(|a, b| {
-        a.commission
-            .partial_cmp(&b.commission)
-            .unwrap_or(Ordering::Equal)
-            .then_with(|| b.total_stake.cmp(&a.total_stake))
-            .then_with(|| b.nominator_count.cmp(&a.nominator_count))
-    });
-
-    OptimizationResult {
-        selected: eligible.into_iter().take(criteria.target_count).collect(),
-        estimated_apy_min: 0.0,
-        estimated_apy_max: 0.0,
-        estimated_apy_avg: 0.0,
+fn suppress_light_client_chatter(
+    mut filter: tracing_subscriber::EnvFilter,
+) -> tracing_subscriber::EnvFilter {
+    for directive in [
+        "json-rpc=warn",
+        "network=info",
+        "runtime=info",
+        "sync-service=info",
+        "bitswap-service=info",
+        "tx-service=info",
+        "subxt-light-client-background-task=error",
+        "stkopt_chain::lightclient=info",
+        "stkopt_chain::queries::identity=info",
+    ] {
+        filter = filter.add_directive(directive.parse().expect("log directive is valid"));
     }
+    filter
 }
 
 fn optimize_nomination(
     app: &App,
     strategy: SelectionStrategy,
 ) -> (OptimizationResult, Option<String>) {
-    let candidates = validator_candidates(app);
     let criteria = stkopt_core::OptimizationCriteria {
         strategy,
         ..stkopt_core::OptimizationCriteria::default()
     };
-    let result = stkopt_core::select_validators(&candidates, &criteria);
-
-    if !result.selected.is_empty() || candidates.iter().any(|v| v.apy > 0.0) {
-        return (result, None);
-    }
-
-    let fallback = fallback_select_without_apy(&candidates, &criteria);
-    let status = if fallback.selected.is_empty() {
-        Some(
+    let optimized = stkopt_core::optimize_display_validators(&app.validators, &criteria);
+    let status = match optimized.data_source {
+        OptimizationDataSource::ChainApy => None,
+        OptimizationDataSource::NoApyFallback if optimized.result.selected.is_empty() => Some(
             "No eligible validators found. Try loading validator data or relaxing filters."
                 .to_string(),
-        )
-    } else {
-        Some(format!(
-            "APY is unavailable from chain data; optimized {} active validators by commission and stake.",
-            fallback.selected.len()
-        ))
+        ),
+        OptimizationDataSource::NoApyFallback if optimized.result.total_stake == 0 => {
+            Some(format!(
+                "APY and stake data unavailable; optimized {} validators by commission.",
+                optimized.result.selected.len()
+            ))
+        }
+        OptimizationDataSource::NoApyFallback => Some(format!(
+            "APY coverage {:.0}% ({}/{} eligible); optimized {} active validators by commission and stake.",
+            optimized.apy_coverage * 100.0,
+            optimized.validators_with_apy,
+            optimized.eligible_validators,
+            optimized.result.selected.len()
+        )),
     };
-    (fallback, status)
+    (optimized.result, status)
 }
 
 /// Network argument that can be parsed from string.
@@ -179,15 +166,8 @@ async fn main() -> Result<()> {
     let env_filter = tracing_subscriber::EnvFilter::from_default_env()
         .add_directive("stkopt=info".parse()?)
         .add_directive("stkopt_chain=info".parse()?)
-        .add_directive("stkopt_core=info".parse()?)
-        .add_directive("json-rpc=warn".parse()?)
-        .add_directive("network=info".parse()?)
-        .add_directive("runtime=info".parse()?)
-        .add_directive("sync-service=info".parse()?)
-        .add_directive("bitswap-service=info".parse()?)
-        .add_directive("tx-service=info".parse()?)
-        .add_directive("stkopt_chain::lightclient=info".parse()?)
-        .add_directive("stkopt_chain::queries::identity=info".parse()?);
+        .add_directive("stkopt_core=info".parse()?);
+    let env_filter = suppress_light_client_chatter(env_filter);
 
     if args.update {
         // In update mode, log to stderr so user can see progress
@@ -246,15 +226,41 @@ async fn main() -> Result<()> {
     let mut app = App::new(network, log_buffer, theme);
 
     // Load cached data from database before chain connects
-    let db_path = get_db_path();
+    let db_path = get_db_path().unwrap_or_else(|_| PathBuf::from("stkopt_history.db"));
+    if let Some(parent) = db_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = chain_task::migrate_legacy_history_db(&db_path);
     if let Ok(db) = db::HistoryDb::open(&db_path) {
-        // Load cached validators
-        if let Ok(cached_validators) = db.get_cached_validators(network)
-            && !cached_validators.is_empty()
-        {
-            tracing::info!("Loaded {} cached validators", cached_validators.len());
-            app.validators = cached_validators;
-            app.loading.using_cache = true;
+        match StartupDataService::load(&db, network, 0, CachePolicy::default()) {
+            Ok(startup) => {
+                if startup.validators.is_displayable() && !startup.validators.data.is_empty() {
+                    if cached_validators_have_chain_data(&startup.validators.data) {
+                        tracing::info!(
+                            "Loaded {:?} cached validators ({})",
+                            startup.validators.freshness,
+                            startup.validators.data.len()
+                        );
+                        app.validators = startup.validators.data;
+                        app.loading.using_cache = true;
+                    } else {
+                        tracing::info!(
+                            "Ignoring cached validators without stake/APY data; live refresh required"
+                        );
+                    }
+                }
+
+                if startup.pools.is_displayable() && !startup.pools.data.is_empty() {
+                    tracing::info!(
+                        "Loaded {:?} cached pools ({})",
+                        startup.pools.freshness,
+                        startup.pools.data.len()
+                    );
+                    app.pools = startup.pools.data;
+                    app.loading.using_cache = true;
+                }
+            }
+            Err(e) => tracing::debug!("Failed to load startup cache: {}", e),
         }
     }
 
@@ -267,16 +273,17 @@ async fn main() -> Result<()> {
 
         // Load cached staking history for this account
         if let Ok(db) = db::HistoryDb::open(&db_path)
-            && let Ok(cached_history) = db.get_history(network, last_addr, Some(30))
+            && let Ok(cached_history) = HistoryService::load_latest(
+                &db,
+                network,
+                last_addr,
+                Some(30),
+                CachePolicy::default(),
+            )
             && !cached_history.is_empty()
         {
-            // Filter out cached entries with unrealistic APY (likely bad data)
-            let filtered: Vec<_> = cached_history
-                .into_iter()
-                .filter(|h| h.apy <= 0.50)
-                .collect();
-            tracing::info!("Loaded {} cached history points", filtered.len());
-            app.history.points = filtered;
+            tracing::info!("Loaded {} cached history points", cached_history.len());
+            app.history.points = cached_history;
             app.history.loaded_for = Some(last_addr.to_string());
         }
 
@@ -637,7 +644,6 @@ async fn main() -> Result<()> {
 
                                     // Store the pending transaction
                                     app.qr.pending_signed = Some(PendingTransaction {
-                                        description: signed.description.clone(),
                                         signed_extrinsic: signed.encoded,
                                         tx_hash: signed.hash,
                                         status: TxSubmissionStatus::ReadyToSubmit,
@@ -766,7 +772,11 @@ async fn main() -> Result<()> {
                         }
 
                         // Purge history from database
-                        let db_path = get_db_path();
+                        let db_path = get_db_path().unwrap_or_else(|_| PathBuf::from("stkopt_history.db"));
+                        if let Some(parent) = db_path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        let _ = chain_task::migrate_legacy_history_db(&db_path);
                         if let Ok(db) = db::HistoryDb::open(&db_path) {
                             match db.delete_address_history(address) {
                                 Ok(deleted) => {
@@ -782,6 +792,19 @@ async fn main() -> Result<()> {
                                     );
                                 }
                             }
+                        }
+
+                        // If the removed account is currently the watched account,
+                        // clear the active UI state so we don't keep showing stale data.
+                        if app
+                            .watched_account
+                            .as_ref()
+                            .is_some_and(|a| a.to_string() == *address)
+                        {
+                            app.watched_account = None;
+                            app.account_status = None;
+                            app.history.points.clear();
+                            app.history.loaded_for = None;
                         }
                     }
                     _ => {}
@@ -806,7 +829,6 @@ mod tests {
     use super::*;
     use action::DisplayValidator;
     use std::str::FromStr;
-    use stkopt_core::{OptimizationCriteria, ValidatorCandidate};
     use theme::Theme;
 
     fn make_validator(
@@ -827,254 +849,6 @@ mod tests {
             points: 0,
             apy,
         }
-    }
-
-    fn make_validator_with_nominators(
-        address: &str,
-        commission: f64,
-        blocked: bool,
-        total_stake: u128,
-        nominator_count: u32,
-        apy: Option<f64>,
-    ) -> DisplayValidator {
-        DisplayValidator {
-            address: address.to_string(),
-            name: None,
-            commission,
-            blocked,
-            total_stake,
-            own_stake: total_stake / 10,
-            nominator_count,
-            points: 0,
-            apy,
-        }
-    }
-
-    // ── validator_candidates ──────────────────────────────────────────────
-
-    #[test]
-    fn test_validator_candidates_empty_app() {
-        let app = App::new(Network::Polkadot, LogBuffer::new(), Theme::Dark);
-        let candidates = validator_candidates(&app);
-        assert!(candidates.is_empty());
-    }
-
-    #[test]
-    fn test_validator_candidates_maps_fields_correctly() {
-        let mut app = App::new(Network::Polkadot, LogBuffer::new(), Theme::Dark);
-        app.validators = vec![make_validator_with_nominators(
-            "v1",
-            0.10,
-            false,
-            1_000_000,
-            42,
-            Some(0.15),
-        )];
-        let candidates = validator_candidates(&app);
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].address, "v1");
-        assert_eq!(candidates[0].commission, 0.10);
-        assert!(!candidates[0].blocked);
-        assert_eq!(candidates[0].total_stake, 1_000_000);
-        assert_eq!(candidates[0].nominator_count, 42);
-        assert_eq!(candidates[0].apy, 0.15);
-    }
-
-    #[test]
-    fn test_validator_candidates_apy_defaults_to_zero() {
-        let mut app = App::new(Network::Polkadot, LogBuffer::new(), Theme::Dark);
-        app.validators = vec![make_validator("v1", 0.05, false, 100, None)];
-        let candidates = validator_candidates(&app);
-        assert_eq!(candidates[0].apy, 0.0);
-    }
-
-    #[test]
-    fn test_validator_candidates_multiple_validators() {
-        let mut app = App::new(Network::Polkadot, LogBuffer::new(), Theme::Dark);
-        app.validators = vec![
-            make_validator("a", 0.05, false, 100, Some(0.10)),
-            make_validator("b", 0.10, true, 200, None),
-        ];
-        let candidates = validator_candidates(&app);
-        assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0].address, "a");
-        assert_eq!(candidates[1].address, "b");
-        assert!(candidates[1].blocked);
-    }
-
-    // ── fallback_select_without_apy ───────────────────────────────────────
-
-    #[test]
-    fn test_fallback_select_without_apy_empty_candidates() {
-        let criteria = OptimizationCriteria::default();
-        let result = fallback_select_without_apy(&[], &criteria);
-        assert!(result.selected.is_empty());
-        assert_eq!(result.estimated_apy_min, 0.0);
-        assert_eq!(result.estimated_apy_max, 0.0);
-        assert_eq!(result.estimated_apy_avg, 0.0);
-    }
-
-    #[test]
-    fn test_fallback_select_without_apy_all_blocked() {
-        let candidates = vec![ValidatorCandidate {
-            address: "v1".to_string(),
-            commission: 0.05,
-            blocked: true,
-            apy: 0.0,
-            total_stake: 1_000,
-            nominator_count: 10,
-        }];
-        let criteria = OptimizationCriteria::default();
-        let result = fallback_select_without_apy(&candidates, &criteria);
-        assert!(result.selected.is_empty());
-    }
-
-    #[test]
-    fn test_fallback_select_without_apy_all_high_commission() {
-        let candidates = vec![ValidatorCandidate {
-            address: "v1".to_string(),
-            commission: 0.50,
-            blocked: false,
-            apy: 0.0,
-            total_stake: 1_000,
-            nominator_count: 10,
-        }];
-        let criteria = OptimizationCriteria::default();
-        let result = fallback_select_without_apy(&candidates, &criteria);
-        assert!(result.selected.is_empty());
-    }
-
-    #[test]
-    fn test_fallback_select_without_apy_sorts_by_commission() {
-        let candidates = vec![
-            ValidatorCandidate {
-                address: "high-comm".to_string(),
-                commission: 0.10,
-                blocked: false,
-                apy: 0.0,
-                total_stake: 1_000,
-                nominator_count: 10,
-            },
-            ValidatorCandidate {
-                address: "low-comm".to_string(),
-                commission: 0.01,
-                blocked: false,
-                apy: 0.0,
-                total_stake: 1_000,
-                nominator_count: 10,
-            },
-        ];
-        let criteria = OptimizationCriteria::default();
-        let result = fallback_select_without_apy(&candidates, &criteria);
-        assert_eq!(result.selected.len(), 2);
-        assert_eq!(result.selected[0].address, "low-comm");
-        assert_eq!(result.selected[1].address, "high-comm");
-    }
-
-    #[test]
-    fn test_fallback_select_without_apy_tiebreak_by_total_stake() {
-        let candidates = vec![
-            ValidatorCandidate {
-                address: "low-stake".to_string(),
-                commission: 0.05,
-                blocked: false,
-                apy: 0.0,
-                total_stake: 500,
-                nominator_count: 10,
-            },
-            ValidatorCandidate {
-                address: "high-stake".to_string(),
-                commission: 0.05,
-                blocked: false,
-                apy: 0.0,
-                total_stake: 5_000,
-                nominator_count: 10,
-            },
-        ];
-        let criteria = OptimizationCriteria::default();
-        let result = fallback_select_without_apy(&candidates, &criteria);
-        assert_eq!(result.selected.len(), 2);
-        assert_eq!(result.selected[0].address, "high-stake");
-        assert_eq!(result.selected[1].address, "low-stake");
-    }
-
-    #[test]
-    fn test_fallback_select_without_apy_tiebreak_by_nominator_count() {
-        let candidates = vec![
-            ValidatorCandidate {
-                address: "few-noms".to_string(),
-                commission: 0.05,
-                blocked: false,
-                apy: 0.0,
-                total_stake: 1_000,
-                nominator_count: 5,
-            },
-            ValidatorCandidate {
-                address: "many-noms".to_string(),
-                commission: 0.05,
-                blocked: false,
-                apy: 0.0,
-                total_stake: 1_000,
-                nominator_count: 50,
-            },
-        ];
-        let criteria = OptimizationCriteria::default();
-        let result = fallback_select_without_apy(&candidates, &criteria);
-        assert_eq!(result.selected.len(), 2);
-        assert_eq!(result.selected[0].address, "many-noms");
-        assert_eq!(result.selected[1].address, "few-noms");
-    }
-
-    #[test]
-    fn test_fallback_select_without_apy_respects_target_count() {
-        let candidates: Vec<ValidatorCandidate> = (0..20)
-            .map(|i| ValidatorCandidate {
-                address: format!("v{}", i),
-                commission: 0.01,
-                blocked: false,
-                apy: 0.0,
-                total_stake: 1_000,
-                nominator_count: 10,
-            })
-            .collect();
-        let criteria = OptimizationCriteria::default();
-        let result = fallback_select_without_apy(&candidates, &criteria);
-        // default target_count is 16
-        assert_eq!(result.selected.len(), 16);
-    }
-
-    #[test]
-    fn test_fallback_select_without_apy_mixed_eligible() {
-        let candidates = vec![
-            ValidatorCandidate {
-                address: "blocked".to_string(),
-                commission: 0.01,
-                blocked: true,
-                apy: 0.0,
-                total_stake: 10_000,
-                nominator_count: 100,
-            },
-            ValidatorCandidate {
-                address: "high-comm".to_string(),
-                commission: 0.50,
-                blocked: false,
-                apy: 0.0,
-                total_stake: 10_000,
-                nominator_count: 100,
-            },
-            ValidatorCandidate {
-                address: "eligible".to_string(),
-                commission: 0.05,
-                blocked: false,
-                apy: 0.0,
-                total_stake: 1_000,
-                nominator_count: 10,
-            },
-        ];
-        let criteria = OptimizationCriteria::default();
-        let result = fallback_select_without_apy(&candidates, &criteria);
-        assert_eq!(result.selected.len(), 1);
-        assert_eq!(result.selected[0].address, "eligible");
     }
 
     // ── NetworkArg::from_str ──────────────────────────────────────────────
@@ -1141,6 +915,11 @@ mod tests {
         assert_eq!(NetworkArg::from_str("PaSeO").unwrap().0, Network::Paseo);
     }
 
+    #[test]
+    fn light_client_chatter_filter_directives_are_valid() {
+        let _ = suppress_light_client_chatter(tracing_subscriber::EnvFilter::new("stkopt=debug"));
+    }
+
     // ── optimize_nomination ───────────────────────────────────────────────
 
     #[test]
@@ -1160,7 +939,7 @@ mod tests {
         assert!(
             status
                 .as_deref()
-                .is_some_and(|message| message.contains("APY is unavailable"))
+                .is_some_and(|message| message.contains("APY coverage"))
         );
     }
 
@@ -1207,9 +986,35 @@ mod tests {
 
         let (result, status) = optimize_nomination(&app, SelectionStrategy::TopApy);
 
-        // When at least one validator has APY, core optimizer is used and fallback is skipped
-        assert!(!result.selected.is_empty());
-        assert!(status.is_none());
+        assert_eq!(result.selected.len(), 2);
+        assert_eq!(result.selected[0].address, "no-apy");
+        assert!(
+            status
+                .as_deref()
+                .is_some_and(|message| message.contains("APY coverage"))
+        );
+    }
+
+    #[test]
+    fn test_optimize_nomination_falls_back_when_stake_is_unavailable() {
+        let mut app = App::new(Network::Polkadot, LogBuffer::new(), Theme::Dark);
+        app.validators = vec![
+            make_validator("high-comm", 0.10, false, 0, None),
+            make_validator("blocked-low-comm", 0.0, true, 0, None),
+            make_validator("low-comm", 0.01, false, 0, None),
+        ];
+
+        let (result, status) = optimize_nomination(&app, SelectionStrategy::TopApy);
+
+        assert_eq!(result.selected.len(), 2);
+        assert_eq!(result.selected[0].address, "low-comm");
+        assert_eq!(result.selected[1].address, "high-comm");
+        assert_eq!(result.total_stake, 0);
+        assert!(
+            status
+                .as_deref()
+                .is_some_and(|message| message.contains("stake data unavailable"))
+        );
     }
 
     #[test]

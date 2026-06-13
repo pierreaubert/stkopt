@@ -13,6 +13,7 @@ pub mod history;
 pub mod log;
 pub mod optimization;
 pub mod persistence;
+pub mod pools;
 pub mod qr_reader;
 pub mod shortcuts;
 pub mod tcc;
@@ -76,10 +77,21 @@ fn suppress_light_client_chatter(mut filter: EnvFilter) -> EnvFilter {
         "sync-service=info",
         "bitswap-service=info",
         "tx-service=info",
+        "subxt-light-client-background-task=error",
         "stkopt_chain::lightclient=info",
         "stkopt_chain::queries::identity=info",
     ] {
         filter = filter.add_directive(directive.parse().expect("log directive is valid"));
     }
     filter
+}
+
+#[cfg(test)]
+mod log_filter_tests {
+    use super::*;
+
+    #[test]
+    fn light_client_chatter_filter_directives_are_valid() {
+        let _ = suppress_light_client_chatter(EnvFilter::new("debug"));
+    }
 }

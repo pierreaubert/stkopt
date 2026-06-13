@@ -85,6 +85,18 @@ pub enum ValidatorSortColumn {
     Blocked,
 }
 
+/// Column to sort nomination pools by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PoolSortColumn {
+    #[default]
+    Id,
+    Name,
+    State,
+    Members,
+    TotalBonded,
+    Apy,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,5 +182,18 @@ mod tests {
             Action::SwitchSection(section) => assert_eq!(section, Section::Dashboard),
             _ => panic!("Expected SwitchSection"),
         }
+    }
+
+    #[test]
+    fn test_pool_sort_column_default() {
+        let sort: PoolSortColumn = Default::default();
+        assert!(matches!(sort, PoolSortColumn::Id));
+    }
+
+    #[test]
+    fn test_pool_sort_column_variants() {
+        assert_ne!(PoolSortColumn::Id, PoolSortColumn::Name);
+        assert_ne!(PoolSortColumn::State, PoolSortColumn::Members);
+        assert_ne!(PoolSortColumn::TotalBonded, PoolSortColumn::Apy);
     }
 }

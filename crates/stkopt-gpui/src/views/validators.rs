@@ -7,18 +7,18 @@ use gpui_ui_kit::*;
 
 use crate::actions::ValidatorSortColumn;
 use crate::app::StkoptApp;
-use crate::validators::filter_validators;
+use stkopt_core::display::format_token_balance;
 
 pub struct ValidatorsSection;
 
 impl ValidatorsSection {
-    pub fn render(app: &StkoptApp, cx: &Context<StkoptApp>) -> impl IntoElement {
+    pub fn render(app: &mut StkoptApp, cx: &Context<StkoptApp>) -> impl IntoElement {
         let theme = cx.theme();
         let entity = app.entity.clone();
         let is_loading = app.validators_loading;
 
-        // Filter validators based on search query and blocked filter
-        let filtered = filter_validators(&app.validators, &app.validator_search, app.show_blocked);
+        // Filter validators based on search query and blocked filter (cached)
+        let filtered = app.filtered_validators_cached();
         let filtered_count = filtered.len();
         let total = app.validators.len();
         let selected = app.selected_validators.len();
@@ -51,6 +51,7 @@ impl ValidatorsSection {
                                             let value = value.to_string();
                                             entity.update(cx, |this, cx| {
                                                 this.validator_search = value;
+                                                this.validator_filter_cache.invalidate();
                                                 cx.notify();
                                             });
                                         }
@@ -72,6 +73,7 @@ impl ValidatorsSection {
                                     move |_window, cx| {
                                         entity.update(cx, |this, cx| {
                                             this.show_blocked = !this.show_blocked;
+                                            this.validator_filter_cache.invalidate();
                                             cx.notify();
                                         });
                                     }
@@ -91,17 +93,43 @@ impl ValidatorsSection {
                                         entity.update(cx, |this, cx| {
                                             if let Some(ref handle) = this.chain_handle {
                                                 this.validators_loading = true;
+                                                this.validators_progress = 0.1;
                                                 cx.notify();
                                                 let handle = handle.clone();
-                                                crate::gpui_tokio::Tokio::spawn(cx, async move {
-                                                    if let Err(e) = handle.fetch_validators().await
-                                                    {
-                                                        tracing::error!(
-                                                            "Failed to refresh validators: {}",
-                                                            e
+                                                let entity = this.entity.clone();
+                                                let mut async_cx = cx.to_async();
+                                                cx.spawn(
+                                                    move |_this: gpui::WeakEntity<StkoptApp>,
+                                                          _cx: &mut gpui::AsyncApp| async move {
+                                                        let result = handle.fetch_validators().await;
+                                                        let _ = entity.update(
+                                                            &mut async_cx,
+                                                            |this,
+                                                             cx: &mut Context<StkoptApp>| {
+                                                                match result {
+                                                                    Ok(validators) => {
+                                                                        this.apply_chain_update(
+                                                                            crate::chain::ChainUpdate::ValidatorsLoaded(validators),
+                                                                            cx,
+                                                                        );
+                                                                    }
+                                                                    Err(e) => {
+                                                                        tracing::error!(
+                                                                            "Failed to refresh validators: {}",
+                                                                            e
+                                                                        );
+                                                                        this.validators_loading = false;
+                                                                        this.connection_error = Some(format!(
+                                                                            "Failed to refresh validators: {}",
+                                                                            e
+                                                                        ));
+                                                                        cx.notify();
+                                                                    }
+                                                                }
+                                                            },
                                                         );
-                                                    }
-                                                })
+                                                    },
+                                                )
                                                 .detach();
                                             }
                                         });
@@ -162,7 +190,7 @@ impl ValidatorsSection {
     fn render_validator_list(
         app: &StkoptApp,
         cx: &Context<StkoptApp>,
-        filtered: &[(usize, &crate::app::ValidatorInfo)],
+        filtered: &[(usize, crate::app::ValidatorInfo)],
     ) -> AnyElement {
         let theme = cx.theme();
         let entity = app.entity.clone();
@@ -338,15 +366,15 @@ impl ValidatorsSection {
             } else {
                 validator.address.clone()
             };
-            let stake_str = format_stake(
+            let stake_str = format_token_balance(
                 validator.total_stake,
-                app.token_symbol(),
-                app.token_decimals(),
+                app.network.token_decimals(),
+                Some(app.network.token_symbol()),
             );
-            let own_stake_str = format_stake(
+            let own_stake_str = format_token_balance(
                 validator.own_stake,
-                app.token_symbol(),
-                app.token_decimals(),
+                app.network.token_decimals(),
+                Some(app.network.token_symbol()),
             );
             let commission_str = format!("{:.1}%", validator.commission * 100.0);
             let apy_str = validator
@@ -522,6 +550,7 @@ fn sortable_header(
                     this.validator_sort,
                     this.validator_sort_asc,
                 );
+                this.validator_filter_cache.invalidate();
                 cx.notify();
             });
         })
@@ -571,6 +600,7 @@ fn sortable_header_fixed(
                     this.validator_sort,
                     this.validator_sort_asc,
                 );
+                this.validator_filter_cache.invalidate();
                 cx.notify();
             });
         })
@@ -584,16 +614,4 @@ fn sortable_header_fixed(
                     theme.text_primary
                 }),
         )
-}
-
-fn format_stake(stake: u128, symbol: &str, decimals: u8) -> String {
-    let divisor = 10u128.pow(decimals as u32);
-    let whole = stake / divisor;
-    if whole >= 1_000_000 {
-        format!("{:.2}M {}", whole as f64 / 1_000_000.0, symbol)
-    } else if whole >= 1_000 {
-        format!("{:.2}K {}", whole as f64 / 1_000.0, symbol)
-    } else {
-        format!("{:.2} {}", stake as f64 / divisor as f64, symbol)
-    }
 }

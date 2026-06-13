@@ -5,6 +5,7 @@ use crate::error::ChainError;
 use std::sync::Arc;
 use subxt::backend::CombinedBackend;
 use subxt::dynamic::{At, Value};
+use subxt::ext::scale_value::ValueDef;
 use subxt::utils::AccountId32;
 use subxt::{OnlineClient, PolkadotConfig};
 
@@ -525,15 +526,20 @@ fn extract_account_bytes(value: Option<&Value>) -> Option<[u8; 32]> {
 }
 
 /// Check if judgements contain a positive judgement (Reasonable, KnownGood).
+///
+/// Handles both unit variants (`Reasonable`, `KnownGood`) and struct variants
+/// with the same names.
 fn has_positive_judgement(judgements: &Value) -> bool {
     // Judgements is a BoundedVec of (RegistrarIndex, Judgement)
     let mut i = 0;
     while let Some(judgement_tuple) = judgements.at(i) {
         // Second element is the Judgement enum
         if let Some(judgement) = judgement_tuple.at(1) {
-            // Positive judgements
-            if judgement.at("Reasonable").is_some() || judgement.at("KnownGood").is_some() {
-                return true;
+            if let ValueDef::Variant(variant) = &judgement.value {
+                let name = variant.name.as_str();
+                if name == "Reasonable" || name == "KnownGood" {
+                    return true;
+                }
             }
         }
         i += 1;
@@ -659,9 +665,8 @@ mod tests {
             Value::unnamed_variant("Reasonable", Vec::<Value>::new()),
         ]);
         let judgements = Value::unnamed_composite(vec![judgement_tuple]);
-        // Note: current implementation returns false for unit variants
-        // because at("Reasonable") on a unit variant returns None.
-        assert!(!has_positive_judgement(&judgements));
+        // Unit variants Reasonable and KnownGood are positive judgements.
+        assert!(has_positive_judgement(&judgements));
     }
 
     #[test]
@@ -671,7 +676,7 @@ mod tests {
             Value::unnamed_variant("KnownGood", Vec::<Value>::new()),
         ]);
         let judgements = Value::unnamed_composite(vec![judgement_tuple]);
-        assert!(!has_positive_judgement(&judgements));
+        assert!(has_positive_judgement(&judgements));
     }
 
     #[test]
@@ -696,7 +701,7 @@ mod tests {
                 Value::unnamed_variant("Reasonable", Vec::<Value>::new()),
             ]),
         ]);
-        assert!(!has_positive_judgement(&judgements));
+        assert!(has_positive_judgement(&judgements));
     }
 
     // ----- extract_data_field -----
@@ -845,7 +850,40 @@ mod tests {
 
         let identity = parse_direct_identity(&test_address(), &decoded);
         assert_eq!(identity.display_name, Some("Dave".to_string()));
-        // Note: has_positive_judgement returns false for unit variants.
-        assert!(!identity.verified);
+        // Unit-variant Reasonable is a positive judgement.
+        assert!(identity.verified);
+    }
+
+    #[test]
+    fn test_has_positive_judgement_unit_variants() {
+        let judgements = Value::unnamed_composite(vec![Value::unnamed_composite(vec![
+            Value::u128(0),
+            Value::unnamed_variant("Reasonable", Vec::new()),
+        ])]);
+        assert!(has_positive_judgement(&judgements));
+
+        let judgements = Value::unnamed_composite(vec![Value::unnamed_composite(vec![
+            Value::u128(0),
+            Value::unnamed_variant("KnownGood", Vec::new()),
+        ])]);
+        assert!(has_positive_judgement(&judgements));
+    }
+
+    #[test]
+    fn test_has_positive_judgement_negative_and_unknown() {
+        let judgements = Value::unnamed_composite(vec![Value::unnamed_composite(vec![
+            Value::u128(0),
+            Value::unnamed_variant("Erroneous", Vec::new()),
+        ])]);
+        assert!(!has_positive_judgement(&judgements));
+
+        let judgements = Value::unnamed_composite(vec![Value::unnamed_composite(vec![
+            Value::u128(0),
+            Value::unnamed_variant("Unknown", Vec::new()),
+        ])]);
+        assert!(!has_positive_judgement(&judgements));
+
+        let judgements = Value::unnamed_composite(Vec::new());
+        assert!(!has_positive_judgement(&judgements));
     }
 }

@@ -33,4 +33,10 @@ pub use config::{
     NetworkConfig, SavedAccount, ThemeConfig, ValidatorCache,
 };
 #[cfg(feature = "persistence")]
-pub use db::{CachedAccountStatus, CachedChainMetadata, StakingDb};
+pub use db::{
+    AccountStatusService, CacheFreshness, CacheKind, CachePolicy, CacheSnapshot, Cached,
+    CachedAccountStatus, CachedChainMetadata, DEFAULT_ACCOUNT_CACHE_MAX_AGE_SECS,
+    DEFAULT_HISTORY_MAX_APY, DEFAULT_IDENTITY_MAX_AGE_SECS, DEFAULT_STARTUP_CACHE_MAX_AGE_SECS,
+    DEFAULT_STARTUP_CACHE_MAX_ERA_LAG, HistoryService, StakingDb, StartupDataCache,
+    StartupDataService,
+};

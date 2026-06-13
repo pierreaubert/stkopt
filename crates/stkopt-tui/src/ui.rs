@@ -365,7 +365,6 @@ fn format_balance(balance: u128, decimals: u8) -> String {
 
 /// Render the validators view with table.
 fn render_validators(frame: &mut Frame, app: &mut App, area: Rect) {
-    let p = &app.palette;
     let decimals = app.network.token_decimals();
 
     // Split area if searching
@@ -378,6 +377,7 @@ fn render_validators(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Render search bar if in search mode
     if let Some(search_area) = search_area {
+        let p = &app.palette;
         let search_text = format!("/{}", app.search_query);
         let search = Paragraph::new(search_text)
             .style(Style::default().fg(p.highlight))
@@ -391,6 +391,7 @@ fn render_validators(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     if app.validators.is_empty() {
+        let p = &app.palette;
         let loading_text = if app.loading.validators {
             format!("Loading validators... {:.0}%", app.loading.progress * 100.0)
         } else if app.connection_status == ConnectionStatus::Connected {
@@ -418,8 +419,10 @@ fn render_validators(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     // Get filtered and sorted validators
-    let filtered = app.filtered_validators();
+    let filtered = app.filtered_validators_cached();
     let filtered_count = filtered.len();
+
+    let p = &app.palette;
 
     // Determine if we have space for full addresses (wide screen)
     let is_wide = table_area.width >= 120;
@@ -562,7 +565,6 @@ fn render_validators(frame: &mut Frame, app: &mut App, area: Rect) {
 
 /// Render the nomination pools view with status and table.
 fn render_pools(frame: &mut Frame, app: &mut App, area: Rect) {
-    let pal = &app.palette;
     let decimals = app.network.token_decimals();
     let _symbol = app.network.token_symbol();
 
@@ -598,6 +600,7 @@ fn render_pools(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // --- Render Search Bar ---
     if app.input_mode == InputMode::Searching {
+        let pal = &app.palette;
         let search_text = format!("/{}", app.search_query);
         let search = Paragraph::new(search_text)
             .style(Style::default().fg(pal.highlight))
@@ -612,6 +615,7 @@ fn render_pools(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // --- Render Pools Table ---
     if app.pools.is_empty() {
+        let pal = &app.palette;
         let loading_text = if app.connection_status == ConnectionStatus::Connected {
             "Fetching nomination pools...".to_string()
         } else {
@@ -637,8 +641,10 @@ fn render_pools(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     // Get filtered and sorted pools
-    let filtered = app.filtered_pools();
+    let filtered = app.filtered_pools_cached();
     let filtered_count = filtered.len();
+
+    let pal = &app.palette;
 
     // Build table rows from filtered pools
     let rows: Vec<Row> = filtered
@@ -960,7 +966,7 @@ fn render_nominate(frame: &mut Frame, app: &mut App, area: Rect) {
             let name_display = truncate_str(v.name.as_deref().unwrap_or("-"), 16);
             let commission_str = format!("{:.1}%", v.commission * 100.0);
             let stake_str = format_balance(v.total_stake, decimals);
-            let apy_str = format!("{:.2}%", v.apy.unwrap_or(0.0) * 100.0);
+            let apy_str = stkopt_core::format_apy_ratio(v.apy);
             let blocked_str = if v.blocked { "Yes" } else { "No" };
 
             Row::new(vec![
@@ -2149,7 +2155,7 @@ fn grayscale_to_braille(pixels: &[u8], width: usize, height: usize, threshold: u
             }
 
             // braille is always valid Unicode (0x2800 base + 8-bit flags)
-            line.push(char::from_u32(braille).unwrap());
+            line.push(char::from_u32(braille).unwrap_or('?'));
         }
 
         lines.push(line);
@@ -2354,10 +2360,6 @@ fn render_submit_tab(frame: &mut Frame, app: &App, area: Rect) {
 
         // Show status with appropriate styling
         let (status_text, status_style) = match &tx.status {
-            TxSubmissionStatus::WaitingForSignature => (
-                "⏳ Waiting for signature...".to_string(),
-                Style::default().fg(pal.warning),
-            ),
             TxSubmissionStatus::ReadyToSubmit => (
                 "✓ Ready to submit".to_string(),
                 Style::default().fg(pal.success).bold(),
@@ -2368,10 +2370,6 @@ fn render_submit_tab(frame: &mut Frame, app: &App, area: Rect) {
                     ".".repeat((app.tick_count() % 4) as usize)
                 ),
                 Style::default().fg(pal.warning),
-            ),
-            TxSubmissionStatus::InBlock { block_hash } => (
-                format!("📦 In block 0x{}...", hex::encode(&block_hash[..4])),
-                Style::default().fg(pal.success),
             ),
             TxSubmissionStatus::Finalized { block_hash } => (
                 format!("✓ Finalized in 0x{}...", hex::encode(&block_hash[..4])),

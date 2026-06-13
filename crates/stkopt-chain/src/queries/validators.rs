@@ -6,13 +6,24 @@ use crate::error::ChainError;
 use std::collections::HashMap;
 use stkopt_core::{Balance, EraIndex, ValidatorPreferences};
 use subxt::dynamic::{At, Value};
+use subxt::ext::scale_value::{Composite, ValueDef};
 use subxt::utils::AccountId32;
+
+const MIN_APY_EXPOSURE_COVERAGE_NUMERATOR: usize = 1;
+const MIN_APY_EXPOSURE_COVERAGE_DENOMINATOR: usize = 2;
 
 /// Raw validator data from chain.
 #[derive(Debug, Clone)]
 pub struct ValidatorInfo {
     pub address: AccountId32,
     pub preferences: ValidatorPreferences,
+}
+
+/// Validator fetch result with completeness metadata.
+#[derive(Debug, Clone)]
+pub struct ValidatorFetch {
+    pub validators: Vec<ValidatorInfo>,
+    pub complete: bool,
 }
 
 /// Era reward points for a validator.
@@ -31,11 +42,150 @@ pub struct ValidatorExposure {
     pub nominator_count: u32,
 }
 
+/// Chain data needed to calculate per-validator APY for one complete era.
+#[derive(Debug, Clone)]
+pub struct ValidatorApyData {
+    pub era: EraIndex,
+    pub era_reward: Balance,
+    pub total_points: u32,
+    pub points: Vec<ValidatorPoints>,
+    pub exposures: Vec<ValidatorExposure>,
+}
+
 fn default_validator_preferences() -> ValidatorPreferences {
     ValidatorPreferences {
         commission: 0.0,
         blocked: false,
     }
+}
+
+fn extract_validator_points_account_id(value: &Value) -> Option<AccountId32> {
+    if let Some(address) = extract_account_id(value) {
+        return Some(address);
+    }
+
+    let mut bytes = Vec::with_capacity(34);
+    collect_u8_primitives(value, &mut bytes);
+    let account_bytes: [u8; 32] = bytes
+        .get(bytes.len().saturating_sub(32)..)?
+        .try_into()
+        .ok()?;
+    Some(AccountId32::from(account_bytes))
+}
+
+fn collect_u8_primitives(value: &Value, bytes: &mut Vec<u8>) {
+    match &value.value {
+        ValueDef::Primitive(_) => {
+            if let Some(byte) = value.as_u128()
+                && byte <= u8::MAX as u128
+            {
+                bytes.push(byte as u8);
+            }
+        }
+        ValueDef::Composite(Composite::Unnamed(values)) => {
+            for child in values {
+                collect_u8_primitives(child, bytes);
+            }
+        }
+        ValueDef::Composite(Composite::Named(values)) => {
+            for (_, child) in values {
+                collect_u8_primitives(child, bytes);
+            }
+        }
+        ValueDef::Variant(variant) => match &variant.values {
+            Composite::Unnamed(values) => {
+                for child in values {
+                    collect_u8_primitives(child, bytes);
+                }
+            }
+            Composite::Named(values) => {
+                for (_, child) in values {
+                    collect_u8_primitives(child, bytes);
+                }
+            }
+        },
+        ValueDef::BitSequence(_) => {}
+    }
+}
+
+fn parse_validator_points_entry(entry: &Value) -> Option<ValidatorPoints> {
+    let address = entry
+        .at(0)
+        .or_else(|| entry.at("0"))
+        .and_then(extract_validator_points_account_id)?;
+    let points = entry
+        .at(1)
+        .or_else(|| entry.at("1"))
+        .and_then(|v: &Value| v.as_u128())
+        .map(|n| n as u32)?;
+
+    Some(ValidatorPoints { address, points })
+}
+
+fn parse_wrapped_validator_points_entry(entry: &Value) -> Option<ValidatorPoints> {
+    if let Some(points) = parse_validator_points_entry(entry) {
+        return Some(points);
+    }
+
+    match &entry.value {
+        ValueDef::Composite(Composite::Unnamed(values)) if values.len() == 1 => {
+            parse_wrapped_validator_points_entry(&values[0])
+        }
+        ValueDef::Composite(Composite::Named(values)) if values.len() == 1 => {
+            parse_wrapped_validator_points_entry(&values[0].1)
+        }
+        _ => None,
+    }
+}
+
+fn parse_validator_points_entries(value: &Value) -> Vec<ValidatorPoints> {
+    let mut points = Vec::new();
+    collect_validator_points_entries(value, &mut points);
+    points
+}
+
+fn collect_validator_points_entries(value: &Value, points: &mut Vec<ValidatorPoints>) {
+    if let Some(entry) = parse_wrapped_validator_points_entry(value) {
+        points.push(entry);
+        return;
+    }
+
+    match &value.value {
+        ValueDef::Composite(Composite::Unnamed(values)) => {
+            for value in values {
+                collect_validator_points_entries(value, points);
+            }
+        }
+        ValueDef::Composite(Composite::Named(values)) => {
+            for (_, value) in values {
+                collect_validator_points_entries(value, points);
+            }
+        }
+        ValueDef::Variant(variant) => match &variant.values {
+            Composite::Unnamed(values) => {
+                for value in values {
+                    collect_validator_points_entries(value, points);
+                }
+            }
+            Composite::Named(values) => {
+                for (_, value) in values {
+                    collect_validator_points_entries(value, points);
+                }
+            }
+        },
+        ValueDef::Primitive(_) | ValueDef::BitSequence(_) => {}
+    }
+}
+
+fn has_sufficient_apy_exposure_coverage(points_len: usize, exposures_len: usize) -> bool {
+    if points_len == 0 || exposures_len == 0 {
+        return false;
+    }
+
+    let required = (points_len * MIN_APY_EXPOSURE_COVERAGE_NUMERATOR)
+        .div_ceil(MIN_APY_EXPOSURE_COVERAGE_DENOMINATOR)
+        .max(1);
+    exposures_len >= required
 }
 
 fn parse_validator_preferences(decoded: &Value) -> ValidatorPreferences {
@@ -58,12 +208,10 @@ fn parse_validator_preferences(decoded: &Value) -> ValidatorPreferences {
 }
 
 impl ChainClient {
-    /// Get all registered validators with their preferences.
-    /// Note: This uses storage iteration which may be limited with light clients.
-    /// Returns partial results if iteration is interrupted (e.g., connection drop).
-    /// Deduplicates by address (light clients may return duplicates during iteration).
-    /// For light client mode, prefer `get_validator_preferences_batch` with known addresses.
-    pub async fn get_validators(&self) -> Result<Vec<ValidatorInfo>, ChainError> {
+    async fn get_validators_iterated(
+        &self,
+        allow_partial: bool,
+    ) -> Result<ValidatorFetch, ChainError> {
         let storage_query = subxt::dynamic::storage::<Vec<Value>, Value>("Staking", "Validators");
 
         // Use HashMap to deduplicate by address (light clients may return duplicates)
@@ -79,6 +227,7 @@ impl ChainClient {
             }
         };
 
+        let mut complete = true;
         loop {
             match iter.next().await {
                 Some(Ok(kv)) => {
@@ -117,24 +266,41 @@ impl ChainClient {
                     );
                 }
                 Some(Err(e)) => {
-                    // Connection error during iteration - return what we have so far
+                    complete = false;
                     tracing::warn!(
                         "Validator iteration interrupted after {} entries: {}",
                         validators_map.len(),
                         e
                     );
+                    if !allow_partial {
+                        return Err(ChainError::InvalidData(format!(
+                            "Validator iteration interrupted after {} entries: {}",
+                            validators_map.len(),
+                            e
+                        )));
+                    }
                     break;
                 }
                 None => {
-                    // Iteration complete
                     break;
                 }
             }
         }
 
-        let validators: Vec<ValidatorInfo> = validators_map.into_values().collect();
+        Ok(ValidatorFetch {
+            validators: validators_map.into_values().collect(),
+            complete,
+        })
+    }
 
-        Ok(validators)
+    /// Get all registered validators with their preferences.
+    /// Note: This uses storage iteration which may be limited with light clients.
+    /// Returns an error if iteration is interrupted instead of returning partial
+    /// data that could poison the cache.
+    /// Deduplicates by address (light clients may return duplicates during iteration).
+    /// For light client mode, prefer `get_validator_preferences_batch` with known addresses.
+    pub async fn get_validators(&self) -> Result<Vec<ValidatorInfo>, ChainError> {
+        Ok(self.get_validators_iterated(false).await?.validators)
     }
 
     /// Get validator preferences for a single validator.
@@ -281,16 +447,30 @@ impl ChainClient {
     ///
     /// For staking decisions, partial data from active validators is often sufficient.
     pub async fn get_validators_light_client(&self) -> Result<Vec<ValidatorInfo>, ChainError> {
+        Ok(self
+            .get_validators_light_client_with_completeness()
+            .await?
+            .validators)
+    }
+
+    /// Get validators using the light-client approach and report whether the
+    /// result came from a complete storage iteration.
+    pub async fn get_validators_light_client_with_completeness(
+        &self,
+    ) -> Result<ValidatorFetch, ChainError> {
         // Use HashMap with address bytes as key since AccountId32 doesn't impl Hash
         let mut all_addresses: HashMap<[u8; 32], AccountId32> = HashMap::new();
+        let mut complete = false;
 
         // Try multiple iterations - light client may return different partial results each time
         // Collect the union of all results for better coverage
         let max_attempts = 3;
         for attempt in 1..=max_attempts {
             let map_size_before = all_addresses.len();
-            match self.get_validators().await {
-                Ok(vals) => {
+            match self.get_validators_iterated(true).await {
+                Ok(fetch) => {
+                    let vals = fetch.validators;
+                    complete |= fetch.complete;
                     let new_count = vals
                         .iter()
                         .filter(|v| !all_addresses.contains_key(&v.address.0))
@@ -352,7 +532,10 @@ impl ChainClient {
 
         // Batch fetch preferences for all discovered validators
         let addresses: Vec<AccountId32> = all_addresses.into_values().collect();
-        self.get_validator_preferences_batch(&addresses).await
+        Ok(ValidatorFetch {
+            validators: self.get_validator_preferences_batch(&addresses).await?,
+            complete,
+        })
     }
 
     /// Get reward points for all validators in a specific era.
@@ -383,28 +566,110 @@ impl ChainClient {
 
         tracing::debug!("EraRewardPoints total: {}", total);
 
-        let mut validators = Vec::new();
-
-        // individual is a BTreeMap<AccountId32, u32>, which decodes as a
-        // Composite sequence of (key, value) tuple entries.
-        if let Some(individual) = decoded.at("individual") {
-            let mut i = 0;
-            while let Some(entry) = individual.at(i) {
-                i += 1;
-                // Each entry is a tuple (AccountId32, u32)
-                let account_id = entry.at(0).and_then(extract_account_id);
-                let points = entry
-                    .at(1)
-                    .and_then(|v: &Value| v.as_u128())
-                    .map(|n| n as u32);
-
-                if let (Some(address), Some(points)) = (account_id, points) {
-                    validators.push(ValidatorPoints { address, points });
-                }
-            }
-        }
+        let validators = decoded
+            .at("individual")
+            .map(parse_validator_points_entries)
+            .unwrap_or_default();
 
         Ok((total, validators))
+    }
+
+    /// Find the most recent completed era with enough chain data to calculate
+    /// per-validator APY.
+    pub async fn get_recent_validator_apy_data(
+        &self,
+        latest_completed_era: EraIndex,
+        max_lookback: u32,
+    ) -> Result<Option<ValidatorApyData>, ChainError> {
+        let max_lookback = max_lookback.max(1);
+        let earliest_era = latest_completed_era.saturating_sub(max_lookback.saturating_sub(1));
+
+        for era in (earliest_era..=latest_completed_era).rev() {
+            let era_reward = match self.get_era_validator_reward(era).await {
+                Ok(Some(era_reward)) if era_reward > 0 => era_reward,
+                Ok(Some(_)) => {
+                    tracing::debug!("Era {} validator reward is zero; trying older era", era);
+                    continue;
+                }
+                Ok(None) => {
+                    tracing::debug!("Era {} has no validator reward; trying older era", era);
+                    continue;
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        "Failed to fetch era {} validator reward: {}; trying older era",
+                        era,
+                        error
+                    );
+                    continue;
+                }
+            };
+
+            let (total_points, points) = match self.get_era_reward_points(era).await {
+                Ok(points) => points,
+                Err(error) => {
+                    tracing::debug!(
+                        "Failed to fetch era {} reward points: {}; trying older era",
+                        era,
+                        error
+                    );
+                    continue;
+                }
+            };
+            if total_points == 0 || points.is_empty() {
+                tracing::debug!(
+                    "Era {} has no reward points (total={}, validators={}); trying older era",
+                    era,
+                    total_points,
+                    points.len()
+                );
+                continue;
+            }
+
+            let exposures = match self.get_era_stakers_overview(era).await {
+                Ok(exposures) => exposures,
+                Err(error) => {
+                    tracing::debug!(
+                        "Failed to fetch era {} staker exposures: {}; trying older era",
+                        era,
+                        error
+                    );
+                    continue;
+                }
+            };
+            if !has_sufficient_apy_exposure_coverage(points.len(), exposures.len()) {
+                tracing::debug!(
+                    "Era {} has insufficient staker exposure coverage (points={}, exposures={}); trying older era",
+                    era,
+                    points.len(),
+                    exposures.len()
+                );
+                continue;
+            }
+
+            tracing::info!(
+                "Using era {} for validator APY (reward={}, total_points={}, points={}, exposures={})",
+                era,
+                era_reward,
+                total_points,
+                points.len(),
+                exposures.len()
+            );
+            return Ok(Some(ValidatorApyData {
+                era,
+                era_reward,
+                total_points,
+                points,
+                exposures,
+            }));
+        }
+
+        tracing::warn!(
+            "No validator APY data found in eras {}..={}",
+            earliest_era,
+            latest_completed_era
+        );
+        Ok(None)
     }
 
     /// Get the total validator reward for an era.
@@ -671,5 +936,100 @@ mod tests {
         let prefs = parse_validator_preferences(&decoded);
         assert_eq!(prefs.commission, 1.0 / 1_000_000_000.0);
         assert!(!prefs.blocked);
+    }
+
+    #[test]
+    fn test_parse_validator_points_entries_unnamed_map_entries() {
+        let account = [7u8; 32];
+        let individual = subxt::dynamic::Value::unnamed_composite(vec![
+            subxt::dynamic::Value::unnamed_composite(vec![
+                subxt::dynamic::Value::from_bytes(account),
+                subxt::dynamic::Value::u128(42),
+            ]),
+        ]);
+
+        let points = parse_validator_points_entries(&individual);
+
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].address, AccountId32::from(account));
+        assert_eq!(points[0].points, 42);
+    }
+
+    #[test]
+    fn test_parse_validator_points_entries_named_map_entries() {
+        let account = [9u8; 32];
+        let individual =
+            subxt::dynamic::Value::unnamed_composite(vec![subxt::dynamic::Value::named_composite(
+                [
+                    ("0", subxt::dynamic::Value::from_bytes(account)),
+                    ("1", subxt::dynamic::Value::u128(123)),
+                ],
+            )]);
+
+        let points = parse_validator_points_entries(&individual);
+
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].address, AccountId32::from(account));
+        assert_eq!(points[0].points, 123);
+    }
+
+    #[test]
+    fn test_parse_validator_points_entries_wrapped_map_entries() {
+        fn wrap(value: subxt::dynamic::Value, depth: usize) -> subxt::dynamic::Value {
+            (0..depth).fold(value, |value, _| {
+                subxt::dynamic::Value::unnamed_composite(vec![value])
+            })
+        }
+
+        let account = [11u8; 32];
+        let second_account = [12u8; 32];
+        let prefixed_account = subxt::dynamic::Value::unnamed_composite(vec![
+            subxt::dynamic::Value::u128(0),
+            subxt::dynamic::Value::u128(0),
+            subxt::dynamic::Value::from_bytes(account),
+        ]);
+        let second_prefixed_account = subxt::dynamic::Value::unnamed_composite(vec![
+            subxt::dynamic::Value::u128(0),
+            subxt::dynamic::Value::u128(0),
+            subxt::dynamic::Value::from_bytes(second_account),
+        ]);
+        let entry = wrap(
+            subxt::dynamic::Value::unnamed_composite(vec![
+                wrap(prefixed_account, 4),
+                subxt::dynamic::Value::u128(84_940),
+            ]),
+            3,
+        );
+        let second_entry = wrap(
+            subxt::dynamic::Value::unnamed_composite(vec![
+                wrap(second_prefixed_account, 1),
+                subxt::dynamic::Value::u128(83_340),
+            ]),
+            1,
+        );
+        let individual = subxt::dynamic::Value::unnamed_composite(vec![
+            subxt::dynamic::Value::unnamed_composite(vec![entry, second_entry]),
+        ]);
+
+        let points = parse_validator_points_entries(&individual);
+
+        assert_eq!(points.len(), 2);
+        assert_eq!(points[0].address, AccountId32::from(account));
+        assert_eq!(points[0].points, 84_940);
+        assert_eq!(points[1].address, AccountId32::from(second_account));
+        assert_eq!(points[1].points, 83_340);
+    }
+
+    #[test]
+    fn test_has_sufficient_apy_exposure_coverage_rejects_sparse_data() {
+        assert!(!has_sufficient_apy_exposure_coverage(100, 0));
+        assert!(!has_sufficient_apy_exposure_coverage(100, 49));
+    }
+
+    #[test]
+    fn test_has_sufficient_apy_exposure_coverage_accepts_half_or_better() {
+        assert!(has_sufficient_apy_exposure_coverage(100, 50));
+        assert!(has_sufficient_apy_exposure_coverage(100, 100));
+        assert!(has_sufficient_apy_exposure_coverage(1, 1));
     }
 }

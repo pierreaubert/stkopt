@@ -2,9 +2,9 @@
 
 use stkopt_chain::{
     AccountBalance, ChainInfo, NominatorInfo, PoolMembership, RewardDestination, StakingLedger,
-    UnsignedPayload, ValidatorExposure, ValidatorInfo,
+    UnsignedPayload,
 };
-use stkopt_core::{ConnectionStatus, EraIndex, EraInfo, Network, OptimizationResult};
+use stkopt_core::{ConnectionStatus, EraInfo, Network, OptimizationResult};
 use subxt::utils::AccountId32;
 
 // Re-export display types from stkopt-core
@@ -22,13 +22,6 @@ pub enum StakingInputMode {
     PoolJoin,
     PoolUnbond,
     PoolBondExtra,
-}
-
-/// Pool operation type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PoolOperation {
-    #[default]
-    None,
 }
 
 /// Account status information for display.
@@ -63,16 +56,11 @@ pub struct TransactionInfo {
 
 /// Status of transaction submission.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum TxSubmissionStatus {
-    /// Waiting to scan signature QR code.
-    WaitingForSignature,
     /// Signature scanned, ready to submit.
     ReadyToSubmit,
     /// Submitting to network.
     Submitting,
-    /// Included in a block (not yet finalized).
-    InBlock { block_hash: [u8; 32] },
     /// Finalized in a block.
     Finalized { block_hash: [u8; 32] },
     /// Submission failed.
@@ -101,10 +89,7 @@ pub struct PendingUnsignedTx {
 
 /// Signed transaction ready for submission.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct PendingTransaction {
-    /// The unsigned payload (for reference).
-    pub description: String,
     /// The signed extrinsic bytes.
     pub signed_extrinsic: Vec<u8>,
     /// The transaction hash.
@@ -115,7 +100,6 @@ pub struct PendingTransaction {
 
 /// Actions that can update application state.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum Action {
     /// Update connection status.
     UpdateConnectionStatus(ConnectionStatus),
@@ -125,15 +109,7 @@ pub enum Action {
     SetActiveEra(EraInfo),
     /// Set era duration in milliseconds.
     SetEraDuration(u64),
-    /// Set registered validators.
-    #[allow(dead_code)]
-    SetValidators(Vec<ValidatorInfo>),
-    /// Set validator exposures for an era.
-    #[allow(dead_code)]
-    SetEraExposures(EraIndex, Vec<ValidatorExposure>),
-    /// Set total era reward.
-    #[allow(dead_code)]
-    SetEraReward(EraIndex, u128),
+
     /// Set display validators (aggregated data).
     SetDisplayValidators(Vec<DisplayValidator>),
     /// Set display pools (aggregated data).
@@ -188,14 +164,8 @@ pub enum Action {
     GeneratePoolWithdrawQR,
 
     // === UI State Updates ===
-    /// Set the input mode for staking operations.
-    SetStakingInputMode(StakingInputMode),
-    /// Update the staking amount input.
-    UpdateStakingAmount(String),
     /// Set the selected reward destination.
     SetRewardsDestination(RewardDestination),
-    /// Set the current pool operation.
-    SetPoolOperation(PoolOperation),
     /// Select a pool for joining.
     SelectPoolForJoin(usize),
 
@@ -235,14 +205,9 @@ pub enum Action {
     /// Mark history loading as complete.
     HistoryLoadingComplete,
     /// Switch network.
-    #[allow(dead_code)]
     SwitchNetwork(Network),
     /// Select an entry from the address book (by index).
     SelectAddressBookEntry(usize),
     /// Remove an account from the address book and purge its history.
     RemoveAccount(String),
-    /// Validate an account address and show error if invalid.
-    ValidateAccount(String),
-    /// Clear the validation error message.
-    ClearValidationError,
 }

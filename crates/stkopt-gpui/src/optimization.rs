@@ -1,8 +1,13 @@
-//! Optimization utilities for validator selection.
+//! Optimization view adapter for validator selection.
 
 use crate::app::ValidatorInfo;
+use std::collections::HashMap;
+use stkopt_core::{
+    MAX_NOMINATIONS, OptimizationCriteria as CoreOptimizationCriteria, OptimizationDataSource,
+    SelectionStrategy as CoreSelectionStrategy, optimize_display_validators,
+};
 
-/// Optimization criteria for validator selection.
+/// Optimization criteria collected from the GPUI controls.
 #[derive(Debug, Clone)]
 pub struct OptimizationCriteria {
     /// Maximum commission rate (0.0 - 1.0).
@@ -20,13 +25,13 @@ impl Default for OptimizationCriteria {
         Self {
             max_commission: 0.15,
             exclude_blocked: true,
-            target_count: 16,
+            target_count: MAX_NOMINATIONS,
             strategy: SelectionStrategy::TopApy,
         }
     }
 }
 
-/// Strategy for selecting validators.
+/// Strategy for selecting validators in the GPUI controls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SelectionStrategy {
     /// Select top validators by APY.
@@ -36,8 +41,6 @@ pub enum SelectionStrategy {
     RandomFromTop,
     /// Diversify by stake (mix of high and low stake validators).
     DiversifyByStake,
-    /// Minimize commission.
-    MinCommission,
 }
 
 impl SelectionStrategy {
@@ -47,7 +50,6 @@ impl SelectionStrategy {
             SelectionStrategy::TopApy,
             SelectionStrategy::RandomFromTop,
             SelectionStrategy::DiversifyByStake,
-            SelectionStrategy::MinCommission,
         ]
     }
 
@@ -57,7 +59,6 @@ impl SelectionStrategy {
             SelectionStrategy::TopApy => "Top APY",
             SelectionStrategy::RandomFromTop => "Random from Top",
             SelectionStrategy::DiversifyByStake => "Diversify by Stake",
-            SelectionStrategy::MinCommission => "Min Commission",
         }
     }
 
@@ -67,12 +68,19 @@ impl SelectionStrategy {
             SelectionStrategy::TopApy => "Select validators with highest estimated APY",
             SelectionStrategy::RandomFromTop => "Randomly select from top 10% performers",
             SelectionStrategy::DiversifyByStake => "Mix of high and low stake validators",
-            SelectionStrategy::MinCommission => "Prioritize validators with lowest commission",
+        }
+    }
+
+    fn core_strategy(self) -> CoreSelectionStrategy {
+        match self {
+            SelectionStrategy::TopApy => CoreSelectionStrategy::TopApy,
+            SelectionStrategy::RandomFromTop => CoreSelectionStrategy::RandomFromTop,
+            SelectionStrategy::DiversifyByStake => CoreSelectionStrategy::DiversifyByStake,
         }
     }
 }
 
-/// Result of optimization.
+/// Result of optimization, using GPUI validator indices for selection state.
 #[derive(Debug, Clone, Default)]
 pub struct OptimizationResult {
     /// Selected validator indices.
@@ -87,141 +95,51 @@ pub struct OptimizationResult {
     pub total_stake: u128,
     /// Average commission of selected validators.
     pub avg_commission: f64,
+    /// Data source used by the shared optimizer.
+    pub data_source: OptimizationDataSource,
+    /// Validators with usable APY among eligible validators.
+    pub validators_with_apy: usize,
+    /// Eligible validator count before APY coverage gating.
+    pub eligible_validators: usize,
+    /// APY coverage ratio among eligible validators.
+    pub apy_coverage: f64,
 }
 
-/// Run optimization on a list of validators.
+/// Run optimization on a list of validators using the core optimizer.
 pub fn optimize_selection(
     validators: &[ValidatorInfo],
     criteria: &OptimizationCriteria,
 ) -> OptimizationResult {
-    // Filter validators based on criteria
-    let mut candidates: Vec<(usize, &ValidatorInfo)> = validators
+    let core_criteria = CoreOptimizationCriteria {
+        max_commission: criteria.max_commission,
+        exclude_blocked: criteria.exclude_blocked,
+        target_count: criteria.target_count,
+        strategy: criteria.strategy.core_strategy(),
+    };
+
+    let optimized = optimize_display_validators(validators, &core_criteria);
+    let result = optimized.result;
+    let index_by_address: HashMap<&str, usize> = validators
         .iter()
         .enumerate()
-        .filter(|(_, v)| {
-            v.commission <= criteria.max_commission
-                && (!criteria.exclude_blocked || !v.blocked)
-                && v.apy.unwrap_or(0.0) > 0.0
-        })
+        .map(|(index, validator)| (validator.address.as_str(), index))
         .collect();
 
-    if candidates.is_empty() {
-        return OptimizationResult::default();
-    }
-
-    // Sort based on strategy
-    match criteria.strategy {
-        SelectionStrategy::TopApy => {
-            candidates.sort_by(|a, b| {
-                let apy_a = a.1.apy.unwrap_or(0.0);
-                let apy_b = b.1.apy.unwrap_or(0.0);
-                apy_b
-                    .partial_cmp(&apy_a)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-        }
-        SelectionStrategy::MinCommission => {
-            candidates.sort_by(|a, b| {
-                a.1.commission
-                    .partial_cmp(&b.1.commission)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-        }
-        SelectionStrategy::RandomFromTop => {
-            // Sort by APY first, then shuffle top portion
-            candidates.sort_by(|a, b| {
-                let apy_a = a.1.apy.unwrap_or(0.0);
-                let apy_b = b.1.apy.unwrap_or(0.0);
-                apy_b
-                    .partial_cmp(&apy_a)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            // Take top 10% or at least 3x target
-            let top_count = (candidates.len() / 10)
-                .max(criteria.target_count * 3)
-                .min(candidates.len());
-            let top_portion = &mut candidates[..top_count];
-
-            // Simple shuffle using time-based seed
-            use std::time::{SystemTime, UNIX_EPOCH};
-            let seed = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_nanos() as usize)
-                .unwrap_or(0);
-
-            for i in (1..top_portion.len()).rev() {
-                let j = (seed.wrapping_mul(i + 1).wrapping_add(i)) % (i + 1);
-                top_portion.swap(i, j);
-            }
-        }
-        SelectionStrategy::DiversifyByStake => {
-            // Sort by APY, take half from top, half from low stake
-            candidates.sort_by(|a, b| {
-                let apy_a = a.1.apy.unwrap_or(0.0);
-                let apy_b = b.1.apy.unwrap_or(0.0);
-                apy_b
-                    .partial_cmp(&apy_a)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-        }
-    }
-
-    // Select top N based on target count
-    let selected: Vec<(usize, &ValidatorInfo)> =
-        if criteria.strategy == SelectionStrategy::DiversifyByStake {
-            // Special handling: take half from top APY, half from low stake
-            let half = criteria.target_count / 2;
-            let remaining = criteria.target_count - half;
-
-            let top_apy: Vec<_> = candidates.iter().take(half).cloned().collect();
-            let selected_indices: std::collections::HashSet<_> =
-                top_apy.iter().map(|(i, _)| *i).collect();
-
-            // Sort remaining by stake ascending
-            let mut by_stake: Vec<_> = candidates
-                .iter()
-                .filter(|(i, _)| !selected_indices.contains(i))
-                .cloned()
-                .collect();
-            by_stake.sort_by_key(|(_, validator)| validator.total_stake);
-
-            let mut result = top_apy;
-            result.extend(by_stake.into_iter().take(remaining));
-            result
-        } else {
-            candidates.into_iter().take(criteria.target_count).collect()
-        };
-
-    if selected.is_empty() {
-        return OptimizationResult::default();
-    }
-
-    // Calculate statistics
-    let selected_indices: Vec<usize> = selected.iter().map(|(i, _)| *i).collect();
-
-    let (min_apy, max_apy, sum_apy, total_stake, sum_commission) = selected.iter().fold(
-        (f64::MAX, f64::MIN, 0.0, 0u128, 0.0),
-        |(min, max, sum, stake, comm), (_, v)| {
-            let apy = v.apy.unwrap_or(0.0);
-            (
-                min.min(apy),
-                max.max(apy),
-                sum + apy,
-                stake + v.total_stake,
-                comm + v.commission,
-            )
-        },
-    );
-
-    let count = selected.len() as f64;
-
     OptimizationResult {
-        selected_indices,
-        estimated_apy_min: if min_apy == f64::MAX { 0.0 } else { min_apy },
-        estimated_apy_max: if max_apy == f64::MIN { 0.0 } else { max_apy },
-        estimated_apy_avg: sum_apy / count,
-        total_stake,
-        avg_commission: sum_commission / count,
+        selected_indices: result
+            .selected
+            .iter()
+            .filter_map(|validator| index_by_address.get(validator.address.as_str()).copied())
+            .collect(),
+        estimated_apy_min: result.estimated_apy_min,
+        estimated_apy_max: result.estimated_apy_max,
+        estimated_apy_avg: result.estimated_apy_avg,
+        total_stake: result.total_stake,
+        avg_commission: result.avg_commission,
+        data_source: optimized.data_source,
+        validators_with_apy: optimized.validators_with_apy,
+        eligible_validators: optimized.eligible_validators,
+        apy_coverage: optimized.apy_coverage,
     }
 }
 
@@ -230,7 +148,7 @@ pub fn format_apy_ratio(apy: f64) -> String {
     format!("{:.1}%", apy * 100.0)
 }
 
-/// Validate optimization criteria.
+/// Validate optimization criteria from the UI controls.
 pub fn validate_criteria(criteria: &OptimizationCriteria) -> Result<(), String> {
     if criteria.max_commission < 0.0 || criteria.max_commission > 1.0 {
         return Err("Max commission must be between 0% and 100%".to_string());
@@ -238,8 +156,11 @@ pub fn validate_criteria(criteria: &OptimizationCriteria) -> Result<(), String> 
     if criteria.target_count == 0 {
         return Err("Target count must be at least 1".to_string());
     }
-    if criteria.target_count > 24 {
-        return Err("Target count cannot exceed 24 (Polkadot limit)".to_string());
+    if criteria.target_count > MAX_NOMINATIONS {
+        return Err(format!(
+            "Target count cannot exceed {} (Polkadot limit)",
+            MAX_NOMINATIONS
+        ));
     }
     Ok(())
 }
@@ -320,40 +241,20 @@ mod tests {
 
         let result = optimize_selection(&validators, &criteria);
         assert_eq!(result.selected_indices.len(), 2);
-        // Should select High APY (15%) and Medium APY (12%)
-        assert!(result.selected_indices.contains(&0));
-        assert!(result.selected_indices.contains(&1));
-    }
-
-    #[test]
-    fn test_optimize_min_commission() {
-        let validators = sample_validators();
-        let criteria = OptimizationCriteria {
-            max_commission: 0.15,
-            exclude_blocked: true,
-            target_count: 2,
-            strategy: SelectionStrategy::MinCommission,
-        };
-
-        let result = optimize_selection(&validators, &criteria);
-        assert_eq!(result.selected_indices.len(), 2);
-        // Should select Low APY (2%) and High APY (5%) by commission
-        assert!(result.selected_indices.contains(&2)); // 2% commission
-        assert!(result.selected_indices.contains(&0)); // 5% commission
+        assert_eq!(result.selected_indices, vec![0, 1]);
     }
 
     #[test]
     fn test_optimize_excludes_blocked() {
         let validators = sample_validators();
         let criteria = OptimizationCriteria {
-            max_commission: 1.0, // Allow all commissions
+            max_commission: 1.0,
             exclude_blocked: true,
             target_count: 10,
             strategy: SelectionStrategy::TopApy,
         };
 
         let result = optimize_selection(&validators, &criteria);
-        // Should not include the blocked validator (index 3)
         assert!(!result.selected_indices.contains(&3));
     }
 
@@ -368,7 +269,6 @@ mod tests {
         };
 
         let result = optimize_selection(&validators, &criteria);
-        // Should not include high commission validator (index 4, 25%)
         assert!(!result.selected_indices.contains(&4));
     }
 
@@ -383,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn test_optimize_calculates_stats() {
+    fn test_optimize_copies_core_stats() {
         let validators = sample_validators();
         let criteria = OptimizationCriteria {
             max_commission: 0.15,
@@ -397,8 +297,27 @@ mod tests {
         assert!(result.estimated_apy_min > 0.0);
         assert!(result.estimated_apy_max >= result.estimated_apy_min);
         assert!(result.estimated_apy_avg > 0.0);
-        assert!(result.total_stake > 0);
+        assert_eq!(result.total_stake, 3500);
         assert!(result.avg_commission > 0.0);
+    }
+
+    #[test]
+    fn test_optimize_falls_back_without_apy() {
+        let mut validators = sample_validators();
+        for validator in &mut validators {
+            validator.apy = None;
+        }
+
+        let criteria = OptimizationCriteria {
+            max_commission: 0.15,
+            exclude_blocked: true,
+            target_count: 2,
+            strategy: SelectionStrategy::TopApy,
+        };
+
+        let result = optimize_selection(&validators, &criteria);
+        assert_eq!(result.selected_indices, vec![2, 0]);
+        assert_eq!(result.estimated_apy_avg, 0.0);
     }
 
     #[test]
@@ -434,7 +353,7 @@ mod tests {
     #[test]
     fn test_validate_criteria_exceeds_max() {
         let criteria = OptimizationCriteria {
-            target_count: 25,
+            target_count: MAX_NOMINATIONS + 1,
             ..Default::default()
         };
         assert!(validate_criteria(&criteria).is_err());
@@ -443,13 +362,16 @@ mod tests {
     #[test]
     fn test_strategy_labels() {
         assert_eq!(SelectionStrategy::TopApy.label(), "Top APY");
-        assert_eq!(SelectionStrategy::MinCommission.label(), "Min Commission");
+        assert_eq!(
+            SelectionStrategy::DiversifyByStake.label(),
+            "Diversify by Stake"
+        );
     }
 
     #[test]
     fn test_strategy_all() {
         let strategies = SelectionStrategy::all();
-        assert_eq!(strategies.len(), 4);
+        assert_eq!(strategies.len(), 3);
     }
 
     #[test]
@@ -476,7 +398,6 @@ mod proptest_tests {
     fn arb_strategy() -> impl Strategy<Value = SelectionStrategy> {
         prop_oneof![
             Just(SelectionStrategy::TopApy),
-            Just(SelectionStrategy::MinCommission),
             Just(SelectionStrategy::DiversifyByStake),
             Just(SelectionStrategy::RandomFromTop),
         ]
@@ -486,7 +407,7 @@ mod proptest_tests {
         #[test]
         fn test_optimize_never_exceeds_target(
             count in 0usize..100,
-            target in 1usize..24,
+            target in 1usize..=MAX_NOMINATIONS,
             strategy in arb_strategy()
         ) {
             let validators = generate_mock_validators(count);
@@ -501,7 +422,7 @@ mod proptest_tests {
         }
 
         #[test]
-        fn test_optimize_indices_valid(count in 1usize..50, target in 1usize..16) {
+        fn test_optimize_indices_valid(count in 1usize..50, target in 1usize..=MAX_NOMINATIONS) {
             let validators = generate_mock_validators(count);
             let criteria = OptimizationCriteria {
                 target_count: target,

@@ -9,6 +9,7 @@ use crate::app::StkoptApp;
 use crate::optimization::{
     OptimizationCriteria, SelectionStrategy, format_apy_ratio, optimize_selection,
 };
+use stkopt_core::OptimizationDataSource;
 
 pub struct OptimizationSection;
 
@@ -20,8 +21,11 @@ impl OptimizationSection {
         let selected_count = app.selected_validators.len();
         let validator_count = app.validators.len();
         let current_strategy = app.optimization_strategy;
-        let data_ready = app.data_download_complete();
+        let optimization_available = app.optimization_available();
         let commands_available = app.commands_available();
+        let has_optimization_output = selected_count > 0
+            || app.optimization_result.is_some()
+            || app.optimization_status.is_some();
 
         div()
             .flex()
@@ -164,7 +168,7 @@ impl OptimizationSection {
                             .variant(ButtonVariant::Primary)
                             .theme(crate::theme::button_theme_for_ui_theme(&theme))
                             .size(ButtonSize::Md)
-                            .disabled(validator_count == 0 || !data_ready)
+                            .disabled(!optimization_available)
                             .on_click(move |_window, cx| {
                                 entity.update(cx, |this, cx| {
                                     let criteria = OptimizationCriteria {
@@ -177,6 +181,20 @@ impl OptimizationSection {
                                     this.selected_validators =
                                         result.selected_indices.into_iter().collect();
                                     this.optimization_result = Some(result.estimated_apy_avg);
+                                    this.optimization_status = match result.data_source {
+                                        OptimizationDataSource::ChainApy => None,
+                                        OptimizationDataSource::NoApyFallback
+                                            if result.eligible_validators == 0 =>
+                                        {
+                                            Some("No eligible validators found".to_string())
+                                        }
+                                        OptimizationDataSource::NoApyFallback => Some(format!(
+                                            "APY coverage {:.0}% ({}/{}); selected by commission and stake",
+                                            result.apy_coverage * 100.0,
+                                            result.validators_with_apy,
+                                            result.eligible_validators
+                                        )),
+                                    };
                                     cx.notify();
                                 });
                             }),
@@ -185,11 +203,12 @@ impl OptimizationSection {
                         Button::new("btn-clear", "Clear Selection")
                             .variant(ButtonVariant::Secondary)
                             .size(ButtonSize::Md)
-                            .disabled(selected_count == 0)
+                            .disabled(!has_optimization_output)
                             .on_click(move |_window, cx| {
                                 entity2.update(cx, |this, cx| {
                                     this.selected_validators.clear();
                                     this.optimization_result = None;
+                                    this.optimization_status = None;
                                     cx.notify();
                                 });
                             }),
@@ -226,17 +245,32 @@ impl OptimizationSection {
 
     fn render_results(app: &StkoptApp, theme: &gpui_ui_kit::theme::Theme) -> AnyElement {
         if app.selected_validators.is_empty() {
-            return div()
+            let mut content = div()
                 .p_6()
                 .flex()
                 .items_center()
                 .justify_center()
+                .flex_col()
+                .gap_1()
                 .child(
-                    Text::new("Run optimization to select validators")
+                    Text::new(if app.optimization_result.is_some() {
+                        "No validators selected"
+                    } else {
+                        "Run optimization to select validators"
+                    })
+                    .size(TextSize::Xs)
+                    .color(theme.text_secondary),
+                );
+
+            if let Some(status) = &app.optimization_status {
+                content = content.child(
+                    Text::new(status.clone())
                         .size(TextSize::Xs)
                         .color(theme.text_secondary),
-                )
-                .into_any_element();
+                );
+            }
+
+            return content.into_any_element();
         }
 
         let mut list = div().flex().flex_col();
@@ -332,29 +366,41 @@ impl OptimizationSection {
 
         // Summary
         if let Some(avg_apy) = app.optimization_result {
-            list = list.child(
-                div()
-                    .px_3()
-                    .py_2()
-                    .bg(theme.surface_hover)
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        Text::new(format!(
-                            "{} validators selected",
-                            app.selected_validators.len()
-                        ))
-                        .size(TextSize::Xs)
-                        .weight(TextWeight::Semibold),
-                    )
-                    .child(
-                        Text::new(format!("Estimated avg APY: {}", format_apy_ratio(avg_apy)))
+            let mut summary = div()
+                .px_3()
+                .py_2()
+                .bg(theme.surface_hover)
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            Text::new(format!(
+                                "{} validators selected",
+                                app.selected_validators.len()
+                            ))
                             .size(TextSize::Xs)
-                            .weight(TextWeight::Semibold)
-                            .color(theme.success),
-                    ),
-            );
+                            .weight(TextWeight::Semibold),
+                        )
+                        .child(
+                            Text::new(format!("Estimated avg APY: {}", format_apy_ratio(avg_apy)))
+                                .size(TextSize::Xs)
+                                .weight(TextWeight::Semibold)
+                                .color(theme.success),
+                        ),
+                );
+            if let Some(status) = &app.optimization_status {
+                summary = summary.child(
+                    Text::new(status.clone())
+                        .size(TextSize::Xs)
+                        .color(theme.text_secondary),
+                );
+            }
+            list = list.child(summary);
         }
 
         Card::new().content(list).into_any_element()

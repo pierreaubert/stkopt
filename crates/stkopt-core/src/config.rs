@@ -398,8 +398,17 @@ pub fn load_config() -> Result<AppConfig, ConfigError> {
     }
 
     let content = fs::read_to_string(&path)?;
-    let config = serde_json::from_str(&content)?;
-    Ok(config)
+    match serde_json::from_str(&content) {
+        Ok(config) => Ok(config),
+        Err(e) => {
+            tracing::warn!(
+                "Config file is corrupted, backing up and using default: {}",
+                e
+            );
+            backup_corrupted_config(&path)?;
+            Ok(AppConfig::default())
+        }
+    }
 }
 
 /// Save configuration to disk.
@@ -963,14 +972,28 @@ mod tests {
     }
 
     #[test]
-    fn test_load_config_invalid_json() {
+    fn test_load_config_invalid_json_backups_and_returns_default() {
         with_temp_home(|| {
             let path = get_config_path().unwrap();
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, "not valid json").unwrap();
 
-            let result = load_config();
-            assert!(matches!(result, Err(ConfigError::Json(_))));
+            let loaded = load_config().unwrap();
+            let default = AppConfig::default();
+            assert_eq!(loaded.network, default.network);
+            assert_eq!(loaded.theme, default.theme);
+            assert_eq!(loaded.auto_connect, default.auto_connect);
+
+            let backups: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .starts_with("config.backup.")
+                })
+                .collect();
+            assert_eq!(backups.len(), 1);
         });
     }
 

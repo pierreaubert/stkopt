@@ -30,6 +30,7 @@ A terminal user interface (TUI) application for optimizing Polkadot staking. Bro
 - Improved light-client startup so the UI waits for validator, pool, and identity data before enabling transaction actions.
 - Fixed Polkadot Vault QR signing for runtimes using `AuthorizeCall`, `EthSetOrigin`, and `StorageWeightReclaim` transaction extensions.
 - Fixed the TUI nomination optimizer so it shows status feedback and can select validators even when APY data is unavailable.
+- Shared validator, pool, and staking-history enrichment between the TUI and desktop app through the chain/core crates.
 - Hardened dynamic account decoding to reject malformed account IDs instead of silently truncating them.
 
 ## Installation
@@ -236,8 +237,8 @@ Data is stored in the application data directory and loaded automatically when r
 ```
 stkopt/
 ├── crates/
-│   ├── stkopt-chain/   # Chain client (subxt)
-│   ├── stkopt-core/    # Domain logic (APY calculations, optimizer)
+│   ├── stkopt-chain/   # Chain client and chain-derived display enrichment
+│   ├── stkopt-core/    # Domain logic (APY calculations, optimizer, persistence)
 │   ├── stkopt-gpui/    # Desktop GUI application
 │   └── stkopt-tui/     # TUI application
 ├── scripts/

@@ -11,6 +11,7 @@ rusqlite = { workspace = true, optional = true }
 directories = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
 rand.workspace = true
+tracing.workspace = true
 
 [features]
 default = []

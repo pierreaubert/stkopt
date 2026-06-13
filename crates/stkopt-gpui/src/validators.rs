@@ -1,7 +1,10 @@
 //! Validator utilities for sorting, filtering, and mock data generation.
 
+use std::sync::Arc;
+
 use crate::actions::ValidatorSortColumn;
 use crate::app::ValidatorInfo;
+use stkopt_core::display::format_token_balance;
 
 /// Sort validators by the specified column.
 pub fn sort_validators(
@@ -62,6 +65,65 @@ pub fn filter_validators<'a>(
         .collect()
 }
 
+/// Cache for filtered validators.
+///
+/// Recomputes only when the search query, blocked filter, sort column/direction,
+/// or the underlying validator list changes.
+#[derive(Debug, Default)]
+pub struct ValidatorFilterCache {
+    query: String,
+    show_blocked: bool,
+    sort_column: ValidatorSortColumn,
+    sort_asc: bool,
+    cached: Arc<Vec<(usize, ValidatorInfo)>>,
+    dirty: bool,
+}
+
+impl ValidatorFilterCache {
+    /// Create a new cache with no computed result.
+    pub fn new() -> Self {
+        Self {
+            dirty: true,
+            ..Default::default()
+        }
+    }
+
+    /// Mark the cache as dirty so the next `get` recomputes.
+    pub fn invalidate(&mut self) {
+        self.dirty = true;
+    }
+
+    /// Return the cached filtered validator list, recomputing if necessary.
+    pub fn get(
+        &mut self,
+        validators: &[ValidatorInfo],
+        query: &str,
+        show_blocked: bool,
+        sort_column: ValidatorSortColumn,
+        sort_asc: bool,
+    ) -> Arc<Vec<(usize, ValidatorInfo)>> {
+        if self.dirty
+            || self.query != query
+            || self.show_blocked != show_blocked
+            || self.sort_column != sort_column
+            || self.sort_asc != sort_asc
+        {
+            self.query = query.to_string();
+            self.show_blocked = show_blocked;
+            self.sort_column = sort_column;
+            self.sort_asc = sort_asc;
+            self.cached = Arc::new(
+                filter_validators(validators, query, show_blocked)
+                    .into_iter()
+                    .map(|(idx, v)| (idx, v.clone()))
+                    .collect(),
+            );
+            self.dirty = false;
+        }
+        self.cached.clone()
+    }
+}
+
 /// Generate mock validator data for testing/demo purposes.
 pub fn generate_mock_validators(count: usize) -> Vec<ValidatorInfo> {
     let names = [
@@ -106,16 +168,9 @@ pub fn generate_mock_validators(count: usize) -> Vec<ValidatorInfo> {
         .collect()
 }
 
-/// Format stake amount for display (in DOT with 2 decimal places).
-pub fn format_stake(planck: u128) -> String {
-    let dot = planck as f64 / 10_000_000_000.0;
-    if dot >= 1_000_000.0 {
-        format!("{:.2}M", dot / 1_000_000.0)
-    } else if dot >= 1_000.0 {
-        format!("{:.2}K", dot / 1_000.0)
-    } else {
-        format!("{:.2}", dot)
-    }
+/// Format stake amount for display using the network's token decimals and symbol.
+pub fn format_stake(planck: u128, decimals: u8, symbol: Option<&str>) -> String {
+    format_token_balance(planck, decimals, symbol)
 }
 
 /// Format commission percentage for display.
@@ -257,6 +312,63 @@ mod tests {
     }
 
     #[test]
+    fn test_filter_cache_reuses_result() {
+        let validators = sample_validators();
+        let mut cache = ValidatorFilterCache::new();
+        let first = cache.get(&validators, "", true, ValidatorSortColumn::Name, true);
+        let second = cache.get(&validators, "", true, ValidatorSortColumn::Name, true);
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn test_filter_cache_updates_on_search_change() {
+        let validators = sample_validators();
+        let mut cache = ValidatorFilterCache::new();
+        let first = cache.get(&validators, "", true, ValidatorSortColumn::Name, true);
+        assert_eq!(first.len(), 3);
+        let second = cache.get(&validators, "alice", true, ValidatorSortColumn::Name, true);
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].1.name.as_deref(), Some("Alice"));
+    }
+
+    #[test]
+    fn test_filter_cache_updates_on_blocked_change() {
+        let mut validators = sample_validators();
+        validators[1].blocked = true;
+        let mut cache = ValidatorFilterCache::new();
+        let first = cache.get(&validators, "", true, ValidatorSortColumn::Name, true);
+        assert_eq!(first.len(), 3);
+        let second = cache.get(&validators, "", false, ValidatorSortColumn::Name, true);
+        assert_eq!(second.len(), 2);
+    }
+
+    #[test]
+    fn test_filter_cache_updates_on_sort_change() {
+        let mut validators = sample_validators();
+        let mut cache = ValidatorFilterCache::new();
+        sort_validators(&mut validators, ValidatorSortColumn::Name, true);
+        let first = cache.get(&validators, "", true, ValidatorSortColumn::Name, true);
+        assert_eq!(first[0].1.name.as_deref(), Some("Alice"));
+        sort_validators(&mut validators, ValidatorSortColumn::Name, false);
+        cache.invalidate();
+        let second = cache.get(&validators, "", true, ValidatorSortColumn::Name, false);
+        assert_eq!(second[0].1.name.as_deref(), Some("Charlie"));
+    }
+
+    #[test]
+    fn test_filter_cache_updates_when_source_changes() {
+        let validators = sample_validators();
+        let mut cache = ValidatorFilterCache::new();
+        let first = cache.get(&validators, "", true, ValidatorSortColumn::Name, true);
+        assert_eq!(first.len(), 3);
+
+        cache.invalidate();
+        let fewer = validators[..2].to_vec();
+        let second = cache.get(&fewer, "", true, ValidatorSortColumn::Name, true);
+        assert_eq!(second.len(), 2);
+    }
+
+    #[test]
     fn test_generate_mock_validators() {
         let validators = generate_mock_validators(10);
         assert_eq!(validators.len(), 10);
@@ -265,10 +377,33 @@ mod tests {
     }
 
     #[test]
-    fn test_format_stake() {
-        assert_eq!(format_stake(10_000_000_000), "1.00");
-        assert_eq!(format_stake(10_000_000_000_000), "1.00K");
-        assert_eq!(format_stake(10_000_000_000_000_000), "1.00M");
+    fn test_format_stake_polkadot() {
+        assert_eq!(format_stake(15_000_000_000, 10, Some("DOT")), "1.5 DOT");
+        assert_eq!(format_stake(1_000_000_000_000, 10, Some("DOT")), "100 DOT");
+    }
+
+    #[test]
+    fn test_format_stake_kusama() {
+        assert_eq!(format_stake(15_000_000_000_000, 12, Some("KSM")), "15 KSM");
+        assert_eq!(format_stake(1_500_000_000_000, 12, Some("KSM")), "1.5 KSM");
+    }
+
+    #[test]
+    fn test_format_stake_westend() {
+        assert_eq!(format_stake(15_000_000_000_000, 12, Some("WND")), "15 WND");
+    }
+
+    #[test]
+    fn test_format_stake_large_values() {
+        assert_eq!(
+            format_stake(u128::MAX, 10, Some("DOT")),
+            "34028236692093846346337460743.1768211455 DOT"
+        );
+    }
+
+    #[test]
+    fn test_format_stake_no_symbol() {
+        assert_eq!(format_stake(15_000_000_000, 10, None), "1.5");
     }
 
     #[test]
@@ -320,8 +455,8 @@ mod proptest_tests {
         }
 
         #[test]
-        fn test_format_stake_never_panics(planck in any::<u128>()) {
-            let _ = format_stake(planck);
+        fn test_format_stake_never_panics(planck in any::<u128>(), decimals in 0u8..=18) {
+            let _ = format_stake(planck, decimals, Some("TEST"));
         }
 
         #[test]

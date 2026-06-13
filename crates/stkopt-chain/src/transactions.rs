@@ -17,6 +17,10 @@ pub struct UnsignedPayload {
     /// Human-readable description of the call.
     pub description: String,
     /// Metadata hash for verification.
+    ///
+    /// NOTE: Metadata-hash verification is currently unsupported and this field
+    /// is always zeroed. The `CheckMetadataHash` extension is encoded as
+    /// disabled when present in the runtime.
     pub metadata_hash: [u8; 32],
     /// Genesis hash for the chain.
     pub genesis_hash: [u8; 32],
@@ -285,12 +289,13 @@ impl ChainClient {
         num_slashing_spans: u32,
         use_mortal_era: bool,
     ) -> Result<UnsignedPayload, ChainError> {
+        // `num_slashing_spans` is a runtime u32. scale-value only exposes u128
+        // primitives, but subxt encodes values according to the metadata field
+        // type, so casting to u128 here still produces a 4-byte SCALE u32.
         let call = subxt::dynamic::tx(
             "Staking",
             "withdraw_unbonded",
-            vec![Value::primitive(Primitive::U128(
-                num_slashing_spans as u128,
-            ))],
+            vec![Value::u128(num_slashing_spans as u128)],
         );
         self.create_payload_internal(
             signer,
@@ -309,12 +314,14 @@ impl ChainClient {
         amount: u128,
         use_mortal_era: bool,
     ) -> Result<UnsignedPayload, ChainError> {
+        // `pool_id` is a runtime u32; see `create_withdraw_unbonded_payload` for
+        // why casting through u128 is correct.
         let call = subxt::dynamic::tx(
             "NominationPools",
             "join",
             vec![
                 Value::primitive(Primitive::U128(amount)),
-                Value::primitive(Primitive::U128(pool_id as u128)),
+                Value::u128(pool_id as u128),
             ],
         );
         self.create_payload_internal(
@@ -397,12 +404,13 @@ impl ChainClient {
         num_slashing_spans: u32,
         use_mortal_era: bool,
     ) -> Result<UnsignedPayload, ChainError> {
+        // `num_slashing_spans` is a runtime u32; see `create_withdraw_unbonded_payload`.
         let call = subxt::dynamic::tx(
             "NominationPools",
             "withdraw_unbonded",
             vec![
                 Value::named_variant("Id", [("0", Value::from_bytes(member_account.clone()))]),
-                Value::primitive(Primitive::U128(num_slashing_spans as u128)),
+                Value::u128(num_slashing_spans as u128),
             ],
         );
         self.create_payload_internal(
@@ -414,9 +422,12 @@ impl ChainClient {
         .await
     }
 
-    /// Get account nonce from the relay chain (for staking transactions).
+    /// Get account nonce from the staking target chain (Asset Hub).
+    ///
+    /// Staking transactions are submitted to Asset Hub where the Staking pallet
+    /// lives, so the nonce must be fetched from the same chain.
     async fn get_account_nonce(&self, account: &AccountId32) -> Result<u64, ChainError> {
-        Self::fetch_nonce(self.relay_client(), account).await
+        Self::fetch_nonce(self.client(), account).await
     }
 
     /// Fetch nonce from a client.
@@ -446,14 +457,17 @@ impl ChainClient {
 
 /// Encode payload for Polkadot Vault QR code.
 ///
-/// Polkadot Vault expects **raw binary data** in the QR code (UOS format).
+/// Polkadot Vault expects **raw binary data** in the QR code (UOS V2 format).
 /// Format:
 /// - `0x53` - Substrate prefix (ASCII 'S')
 /// - `0x01` - Crypto type: Sr25519
-/// - `0x00`/`0x02` - Command: sign mortal tx / sign immortal tx
+/// - `0x02` / `0x03` - Command: sign mortal tx / sign immortal tx (V2)
 /// - 32 bytes - Public key of signer
 /// - Signing payload (full payload, signer handles hashing if > 256 bytes)
-/// - 32 bytes - Genesis hash (appended at end for chain verification)
+///
+/// The V2 signing payload already includes the genesis hash via the
+/// `CheckGenesis` transaction extension, so the genesis hash is **not**
+/// appended again.
 ///
 /// Note: When payload > 256 bytes, the Substrate runtime automatically hashes
 /// it before signing. We always include the full payload in the QR.
@@ -490,9 +504,6 @@ pub fn encode_for_qr(
 
     // Full signing payload (signer will hash if > 256 bytes)
     qr_payload.extend_from_slice(&signing_payload);
-
-    // Append genesis hash at the end (for chain verification)
-    qr_payload.extend_from_slice(&payload.genesis_hash);
 
     tracing::info!(
         "QR payload: {} bytes total (signing payload: {} bytes, {})",
@@ -541,7 +552,8 @@ fn encode_extension_extra(
         }
         "CheckMetadataHash" => {
             if payload.include_metadata_hash {
-                // mode = 0 means disabled (no metadata hash verification)
+                // Metadata-hash verification is not implemented. Encode the
+                // extension as disabled (mode = 0) so the runtime skips it.
                 out.push(0x00);
             }
         }
@@ -587,8 +599,9 @@ fn encode_extension_additional_signed(
         }
         "CheckMetadataHash" => {
             if payload.include_metadata_hash {
-                // When mode = 0, this is None
-                out.push(0x00); // None encoding
+                // Metadata-hash verification is not implemented. Encode the
+                // extension as disabled (mode = 0 / None) so the runtime skips it.
+                out.push(0x00);
             }
         }
         other => {
@@ -1004,9 +1017,16 @@ mod tests {
         let signer_bytes: &[u8; 32] = signer.as_ref();
         assert_eq!(&qr_data[3..35], signer_bytes);
 
-        // Verify genesis hash is at the end
-        let len = qr_data.len();
-        assert_eq!(&qr_data[len - 32..], &[1u8; 32]); // genesis_hash
+        // The V2 signing payload already contains the genesis hash via
+        // CheckGenesis, so the QR payload must not append it again.
+        let signing_payload = build_signing_payload(&payload).unwrap();
+        assert_eq!(qr_data.len(), 3 + 32 + signing_payload.len());
+        assert_eq!(&qr_data[35..], &signing_payload[..]);
+
+        // Verify the genesis hash appears inside the signing payload via
+        // CheckGenesis, not at the end of the QR payload.
+        assert!(qr_data.windows(32).any(|window| window == &[1u8; 32]));
+        assert_ne!(&qr_data[qr_data.len() - 32..], &[1u8; 32]);
     }
 
     #[test]
@@ -1033,6 +1053,32 @@ mod tests {
 
         // Should be larger due to metadata hash extension
         assert!(!qr_data.is_empty());
+    }
+
+    #[test]
+    fn test_metadata_hash_is_zeroed_and_disabled() {
+        // Metadata-hash verification is unsupported; the payload must always
+        // carry a zeroed hash and the extension must be encoded as disabled.
+        let mut without_md = make_test_payload();
+        without_md.include_metadata_hash = false;
+
+        let mut with_md = make_test_payload();
+        with_md.include_metadata_hash = true;
+        with_md.extension_ids.push("CheckMetadataHash".to_string());
+
+        assert_eq!(with_md.metadata_hash, [0u8; 32]);
+
+        let without_payload = build_signing_payload(&without_md).unwrap();
+        let with_payload = build_signing_payload(&with_md).unwrap();
+
+        // Adding CheckMetadataHash in disabled mode contributes two bytes:
+        // one for the extension extra (mode = 0) and one for additional_signed
+        // (None). No 32-byte metadata hash is included.
+        assert_eq!(
+            with_payload.len(),
+            without_payload.len() + 2,
+            "CheckMetadataHash must add exactly two disabled-mode bytes"
+        );
     }
 
     #[test]

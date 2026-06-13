@@ -85,7 +85,6 @@ impl QrReader {
     }
 
     /// Check if the reader is still active.
-    #[allow(dead_code)]
     pub fn is_active(&self) -> bool {
         self.active
     }
@@ -358,7 +357,6 @@ fn extract_qr_bounds<G>(
 }
 
 /// Decode a QR code from raw image bytes (for testing or file-based input).
-#[allow(dead_code)]
 pub fn decode_qr_from_image(image_data: &[u8]) -> Result<Vec<u8>, String> {
     let img =
         image::load_from_memory(image_data).map_err(|e| format!("Failed to load image: {}", e))?;

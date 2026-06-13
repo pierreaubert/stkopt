@@ -1,4 +1,4 @@
-//! Unified display types for UI frontends.
+//! Unified display types and formatting helpers for UI frontends.
 //!
 //! These types merge the display structures from both TUI and GPUI
 //! to provide a common interface for displaying staking data.
@@ -6,6 +6,128 @@
 use serde::{Deserialize, Serialize};
 
 use crate::types::PoolState;
+
+/// Parse a decimal token amount string into planck units.
+///
+/// Returns `Ok(planck)` on success, or a human-readable error message.
+/// Rejects negative values, empty strings, multiple decimal points, non-numeric
+/// characters, and amounts with more fractional digits than the chain supports.
+pub fn parse_token_amount(input: &str, decimals: u8) -> Result<u128, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("Enter an amount".to_string());
+    }
+    if trimmed.starts_with('-') {
+        return Err("Amount must be greater than 0".to_string());
+    }
+
+    let normalized = trimmed.replace(',', ".");
+    let mut parts = normalized.split('.');
+    let whole = parts.next().unwrap_or_default();
+    let fraction = parts.next();
+    if parts.next().is_some() {
+        return Err("Invalid amount format".to_string());
+    }
+
+    if whole.is_empty() && fraction.unwrap_or_default().is_empty() {
+        return Err("Invalid amount format".to_string());
+    }
+
+    if !whole.chars().all(|c| c.is_ascii_digit())
+        || !fraction
+            .unwrap_or_default()
+            .chars()
+            .all(|c| c.is_ascii_digit())
+    {
+        return Err("Invalid amount format".to_string());
+    }
+
+    let whole_value = if whole.is_empty() {
+        0
+    } else {
+        whole
+            .parse::<u128>()
+            .map_err(|_| "Amount is too large".to_string())?
+    };
+
+    let fraction = fraction.unwrap_or_default();
+    if fraction.len() > decimals as usize {
+        return Err(format!(
+            "Amount supports at most {} decimal places",
+            decimals
+        ));
+    }
+
+    let divisor = 10u128.pow(decimals as u32);
+    let fraction_value = if fraction.is_empty() {
+        0
+    } else {
+        let parsed = fraction
+            .parse::<u128>()
+            .map_err(|_| "Amount is too large".to_string())?;
+        parsed * 10u128.pow(decimals as u32 - fraction.len() as u32)
+    };
+
+    let planck = whole_value
+        .checked_mul(divisor)
+        .and_then(|whole| whole.checked_add(fraction_value))
+        .ok_or_else(|| "Amount is too large".to_string())?;
+
+    if planck == 0 {
+        return Err("Amount must be greater than 0".to_string());
+    }
+
+    Ok(planck)
+}
+
+/// Format a planck amount as a human-readable decimal token string.
+///
+/// If `symbol` is provided, it is appended after the amount. Trailing zeros in
+/// the fractional part are trimmed.
+pub fn format_token_balance(amount: u128, decimals: u8, symbol: Option<&str>) -> String {
+    if decimals == 0 {
+        let mut result = amount.to_string();
+        if let Some(symbol) = symbol {
+            result.push(' ');
+            result.push_str(symbol);
+        }
+        return result;
+    }
+
+    let divisor = 10u128.pow(decimals as u32);
+    let whole = amount / divisor;
+    let frac = amount % divisor;
+
+    if frac == 0 {
+        let mut result = whole.to_string();
+        if let Some(symbol) = symbol {
+            result.push(' ');
+            result.push_str(symbol);
+        }
+        return result;
+    }
+
+    let frac_str = format!("{:0width$}", frac, width = decimals as usize);
+    let frac_trimmed = frac_str.trim_end_matches('0');
+
+    let mut result = format!("{}.{}", whole, frac_trimmed);
+    if let Some(symbol) = symbol {
+        result.push(' ');
+        result.push_str(symbol);
+    }
+    result
+}
+
+/// Format an APY ratio (e.g. `0.15`) as a percentage string.
+///
+/// Returns `"n/a"` when the APY is not available, so callers can distinguish
+/// missing data from a true zero APY.
+pub fn format_apy_ratio(apy: Option<f64>) -> String {
+    match apy {
+        Some(value) => format!("{:.1}%", value * 100.0),
+        None => "n/a".to_string(),
+    }
+}
 
 /// Unified validator display information.
 ///
@@ -604,6 +726,105 @@ mod tests {
         let json = serde_json::to_string(&p).unwrap();
         let p2: StakingHistoryPoint = serde_json::from_str(&json).unwrap();
         assert_eq!(p, p2);
+    }
+
+    #[test]
+    fn test_parse_token_amount_basic() {
+        assert_eq!(parse_token_amount("1.5", 10).unwrap(), 15_000_000_000u128);
+    }
+
+    #[test]
+    fn test_parse_token_amount_no_decimal() {
+        assert_eq!(
+            parse_token_amount("42", 12).unwrap(),
+            42_000_000_000_000u128
+        );
+    }
+
+    #[test]
+    fn test_parse_token_amount_leading_decimal() {
+        assert_eq!(parse_token_amount(".5", 10).unwrap(), 5_000_000_000u128);
+    }
+
+    #[test]
+    fn test_parse_token_amount_rejects_negative() {
+        assert!(parse_token_amount("-1", 10).is_err());
+    }
+
+    #[test]
+    fn test_parse_token_amount_rejects_multiple_decimals() {
+        assert!(parse_token_amount("1.2.3", 10).is_err());
+    }
+
+    #[test]
+    fn test_parse_token_amount_rejects_too_many_decimals() {
+        assert!(parse_token_amount("1.12345678901", 10).is_err());
+    }
+
+    #[test]
+    fn test_parse_token_amount_accepts_comma_decimal() {
+        assert_eq!(parse_token_amount("1,5", 10).unwrap(), 15_000_000_000u128);
+    }
+
+    #[test]
+    fn test_parse_token_amount_rejects_zero() {
+        assert_eq!(
+            parse_token_amount("0", 10).unwrap_err(),
+            "Amount must be greater than 0"
+        );
+        assert_eq!(
+            parse_token_amount("0.0", 10).unwrap_err(),
+            "Amount must be greater than 0"
+        );
+        assert_eq!(
+            parse_token_amount("0.000", 10).unwrap_err(),
+            "Amount must be greater than 0"
+        );
+    }
+
+    #[test]
+    fn test_parse_token_amount_accepts_non_zero() {
+        assert_eq!(parse_token_amount("0.1", 10).unwrap(), 1_000_000_000u128);
+        assert_eq!(parse_token_amount("1", 10).unwrap(), 10_000_000_000u128);
+        assert_eq!(parse_token_amount("1.234", 10).unwrap(), 12_340_000_000u128);
+    }
+
+    #[test]
+    fn test_format_token_balance_with_symbol() {
+        assert_eq!(
+            format_token_balance(15_000_000_000u128, 10, Some("DOT")),
+            "1.5 DOT"
+        );
+    }
+
+    #[test]
+    fn test_format_token_balance_no_symbol() {
+        assert_eq!(format_token_balance(15_000_000_000u128, 10, None), "1.5");
+    }
+
+    #[test]
+    fn test_format_token_balance_trims_zeros() {
+        assert_eq!(format_token_balance(1_500_000_000u128, 10, None), "0.15");
+    }
+
+    #[test]
+    fn test_format_token_balance_zero() {
+        assert_eq!(format_token_balance(0, 10, Some("DOT")), "0 DOT");
+    }
+
+    #[test]
+    fn test_format_apy_ratio_some() {
+        assert_eq!(format_apy_ratio(Some(0.1512)), "15.1%");
+    }
+
+    #[test]
+    fn test_format_apy_ratio_none() {
+        assert_eq!(format_apy_ratio(None), "n/a");
+    }
+
+    #[test]
+    fn test_format_apy_ratio_zero() {
+        assert_eq!(format_apy_ratio(Some(0.0)), "0.0%");
     }
 
     #[test]

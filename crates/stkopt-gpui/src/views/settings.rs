@@ -5,7 +5,7 @@ use gpui::*;
 use gpui_ui_kit::theme::ThemeExt;
 use gpui_ui_kit::*;
 
-use crate::app::{ConnectionMode, StkoptApp};
+use crate::app::{ConnectionMode, ConnectionModeExt, StkoptApp};
 use crate::persistence::{ConnectionModeConfig, NetworkConfig};
 use crate::shortcuts::{Shortcut, shortcuts_by_category};
 

@@ -2,6 +2,8 @@
 //!
 //! This module exposes the app components for testing purposes.
 
+#![recursion_limit = "512"]
+
 pub mod account;
 pub mod actions;
 pub mod app;
@@ -13,6 +15,7 @@ pub mod history;
 pub mod log;
 pub mod optimization;
 pub mod persistence;
+pub mod pools;
 pub mod qr_reader;
 pub mod shortcuts;
 pub mod tcc;
@@ -73,16 +76,11 @@ mod tests {
     }
 
     #[test]
-    fn test_network_symbol() {
-        assert_eq!(Network::Polkadot.symbol(), "DOT");
-        assert_eq!(Network::Kusama.symbol(), "KSM");
-        assert_eq!(Network::Westend.symbol(), "WND");
-        assert_eq!(Network::Paseo.symbol(), "PAS");
-    }
-
-    #[test]
-    fn test_network_default() {
-        assert_eq!(Network::default(), Network::Polkadot);
+    fn test_network_token_symbol() {
+        assert_eq!(Network::Polkadot.token_symbol(), "DOT");
+        assert_eq!(Network::Kusama.token_symbol(), "KSM");
+        assert_eq!(Network::Westend.token_symbol(), "WND");
+        assert_eq!(Network::Paseo.token_symbol(), "PAS");
     }
 
     #[test]
@@ -121,7 +119,7 @@ mod tests {
 
     #[test]
     fn test_connection_mode_default() {
-        assert_eq!(ConnectionMode::default(), ConnectionMode::Rpc);
+        assert_eq!(ConnectionMode::default(), ConnectionMode::LightClient);
     }
 
     #[test]

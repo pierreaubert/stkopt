@@ -20,7 +20,6 @@ pub struct EventHandler {
     /// Event receiver.
     rx: mpsc::UnboundedReceiver<Event>,
     /// Event sender (kept to prevent channel closing).
-    #[allow(dead_code)]
     tx: mpsc::UnboundedSender<Event>,
 }
 

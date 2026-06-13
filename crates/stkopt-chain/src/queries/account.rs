@@ -3,6 +3,7 @@
 use super::decode_helpers::extract_account_id;
 use crate::ChainClient;
 use crate::error::ChainError;
+use serde::{Deserialize, Serialize};
 use stkopt_core::{Balance, EraIndex};
 use subxt::dynamic::{At, Value};
 use subxt::utils::AccountId32;
@@ -25,7 +26,7 @@ pub struct StakingLedger {
 }
 
 /// An unlocking chunk.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UnlockChunk {
     pub value: Balance,
     pub era: EraIndex,

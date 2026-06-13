@@ -13,6 +13,10 @@ use crate::views::{
     PoolsSection, SettingsSection, ValidatorsSection,
 };
 
+// Use the shared domain types from `stkopt-core` and `stkopt-chain` instead of local duplicates.
+pub use stkopt_chain::ConnectionMode;
+pub use stkopt_core::Network;
+
 const LOG_PANE_DEFAULT_HEIGHT: f32 = 180.0;
 const LOG_PANE_MIN_HEIGHT: f32 = 120.0;
 const LOG_PANE_MIN_APP_HEIGHT: f32 = 220.0;
@@ -29,72 +33,16 @@ pub(crate) fn progress_steps_complete(
     status == ConnectionStatus::Connected && steps.iter().all(|(_, done)| *done)
 }
 
+pub(crate) fn rendered_step_progress(done: bool, progress: f32) -> f32 {
+    if done { 1.0 } else { progress.clamp(0.0, 1.0) }
+}
+
+pub(crate) fn optimization_available(validators_loading: bool, validator_count: usize) -> bool {
+    !validators_loading && validator_count > 0
+}
+
 pub(crate) fn parse_token_amount(input: &str, decimals: u8) -> Result<u128, String> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return Err("Enter an amount".to_string());
-    }
-    if trimmed.starts_with('-') {
-        return Err("Amount must be greater than 0".to_string());
-    }
-
-    let normalized = trimmed.replace(',', ".");
-    let mut parts = normalized.split('.');
-    let whole = parts.next().unwrap_or_default();
-    let fraction = parts.next();
-    if parts.next().is_some() {
-        return Err("Invalid amount format".to_string());
-    }
-
-    if whole.is_empty() && fraction.unwrap_or_default().is_empty() {
-        return Err("Invalid amount format".to_string());
-    }
-
-    if !whole.chars().all(|c| c.is_ascii_digit())
-        || !fraction
-            .unwrap_or_default()
-            .chars()
-            .all(|c| c.is_ascii_digit())
-    {
-        return Err("Invalid amount format".to_string());
-    }
-
-    let whole_value = if whole.is_empty() {
-        0
-    } else {
-        whole
-            .parse::<u128>()
-            .map_err(|_| "Amount is too large".to_string())?
-    };
-
-    let fraction = fraction.unwrap_or_default();
-    if fraction.len() > decimals as usize {
-        return Err(format!(
-            "Amount supports at most {} decimal places",
-            decimals
-        ));
-    }
-
-    let divisor = 10u128.pow(decimals as u32);
-    let fraction_value = if fraction.is_empty() {
-        0
-    } else {
-        let parsed = fraction
-            .parse::<u128>()
-            .map_err(|_| "Amount is too large".to_string())?;
-        parsed * 10u128.pow(decimals as u32 - fraction.len() as u32)
-    };
-
-    let amount = whole_value
-        .checked_mul(divisor)
-        .and_then(|whole| whole.checked_add(fraction_value))
-        .ok_or_else(|| "Amount is too large".to_string())?;
-
-    if amount == 0 {
-        return Err("Amount must be greater than 0".to_string());
-    }
-
-    Ok(amount)
+    stkopt_core::parse_token_amount(input, decimals)
 }
 
 /// Navigation sections in the app
@@ -181,6 +129,8 @@ pub struct StkoptApp {
     pub validator_search: String,
     /// Whether validators are currently loading
     pub validators_loading: bool,
+    /// Cached filtered/sorted validator list.
+    pub validator_filter_cache: crate::validators::ValidatorFilterCache,
     /// Staking history data points
     pub staking_history: Vec<HistoryPoint>,
     /// Whether history is currently loading
@@ -189,8 +139,24 @@ pub struct StkoptApp {
     pub pools: Vec<PoolInfo>,
     /// Whether pools are currently loading
     pub pools_loading: bool,
+    /// Pool search query
+    pub pool_search: String,
+    /// Pool sort column
+    pub pool_sort: crate::actions::PoolSortColumn,
+    /// Pool sort ascending
+    pub pool_sort_asc: bool,
+    /// Cached filtered/sorted pool list.
+    pub pool_filter_cache: crate::pools::PoolFilterCache,
     /// Whether connection/sync operations are in progress
     pub operations_loading: bool,
+    /// Connection operation loading progress.
+    pub operations_progress: f32,
+    /// Validator loading progress.
+    pub validators_progress: f32,
+    /// Pool loading progress.
+    pub pools_progress: f32,
+    /// Account/history loading progress.
+    pub history_progress: f32,
     /// Whether settings panel is visible
     pub show_settings: bool,
     /// Settings: theme preference
@@ -207,6 +173,8 @@ pub struct StkoptApp {
     pub show_help: bool,
     /// Optimization result (estimated avg APY)
     pub optimization_result: Option<f64>,
+    /// User-visible optimization data-source status.
+    pub optimization_status: Option<String>,
     /// Selected optimization strategy
     pub optimization_strategy: crate::optimization::SelectionStrategy,
     /// Optimization max commission (0.0 - 1.0)
@@ -423,43 +391,47 @@ pub enum ConnectionStatus {
     Connected,
 }
 
-/// Connection mode - how to connect to the network
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ConnectionMode {
-    /// Connect via RPC endpoint
-    #[default]
-    Rpc,
-    /// Connect via embedded light client (smoldot)
-    LightClient,
+/// Extension trait for the shared [`stkopt_chain::ConnectionMode`] type.
+pub trait ConnectionModeExt {
+    /// Build the GPUI connection mode from its persisted configuration.
+    fn from_config(config: crate::persistence::ConnectionModeConfig) -> Self;
+    /// Convert the GPUI connection mode to its persisted configuration.
+    fn to_config(self) -> crate::persistence::ConnectionModeConfig;
+    /// Whether this mode uses the embedded light client.
+    fn uses_light_client(self) -> bool;
+    /// Short display label.
+    fn label(&self) -> &'static str;
+    /// Longer description for tooltips / settings.
+    fn description(&self) -> &'static str;
 }
 
-impl ConnectionMode {
-    pub fn from_config(config: crate::persistence::ConnectionModeConfig) -> Self {
+impl ConnectionModeExt for ConnectionMode {
+    fn from_config(config: crate::persistence::ConnectionModeConfig) -> Self {
         match config {
             crate::persistence::ConnectionModeConfig::Rpc => ConnectionMode::Rpc,
             crate::persistence::ConnectionModeConfig::LightClient => ConnectionMode::LightClient,
         }
     }
 
-    pub fn to_config(self) -> crate::persistence::ConnectionModeConfig {
+    fn to_config(self) -> crate::persistence::ConnectionModeConfig {
         match self {
             ConnectionMode::Rpc => crate::persistence::ConnectionModeConfig::Rpc,
             ConnectionMode::LightClient => crate::persistence::ConnectionModeConfig::LightClient,
         }
     }
 
-    pub fn uses_light_client(self) -> bool {
+    fn uses_light_client(self) -> bool {
         self == ConnectionMode::LightClient
     }
 
-    pub fn label(&self) -> &'static str {
+    fn label(&self) -> &'static str {
         match self {
             ConnectionMode::Rpc => "RPC",
             ConnectionMode::LightClient => "Light Client",
         }
     }
 
-    pub fn description(&self) -> &'static str {
+    fn description(&self) -> &'static str {
         match self {
             ConnectionMode::Rpc => "Connect via RPC endpoint (faster, requires trust)",
             ConnectionMode::LightClient => "Embedded light client (trustless, slower startup)",
@@ -467,52 +439,19 @@ impl ConnectionMode {
     }
 }
 
-/// Supported networks
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(dead_code)]
-pub enum Network {
-    #[default]
-    Polkadot,
-    Kusama,
-    Westend,
-    Paseo,
+/// Extension trait for the shared [`stkopt_core::Network`] type.
+pub trait NetworkExt {
+    /// Human-readable network name.
+    fn label(&self) -> &'static str;
 }
 
-impl Network {
-    pub fn label(&self) -> &'static str {
+impl NetworkExt for Network {
+    fn label(&self) -> &'static str {
         match self {
             Network::Polkadot => "Polkadot",
             Network::Kusama => "Kusama",
             Network::Westend => "Westend",
             Network::Paseo => "Paseo",
-        }
-    }
-
-    pub fn symbol(&self) -> &'static str {
-        match self {
-            Network::Polkadot => "DOT",
-            Network::Kusama => "KSM",
-            Network::Westend => "WND",
-            Network::Paseo => "PAS",
-        }
-    }
-
-    pub fn token_decimals(&self) -> u8 {
-        match self {
-            Network::Polkadot => 10,
-            Network::Kusama => 12,
-            Network::Westend => 12,
-            Network::Paseo => 10,
-        }
-    }
-
-    /// Convert to stkopt_core::Network
-    pub fn to_core(&self) -> stkopt_core::Network {
-        match self {
-            Network::Polkadot => stkopt_core::Network::Polkadot,
-            Network::Kusama => stkopt_core::Network::Kusama,
-            Network::Westend => stkopt_core::Network::Westend,
-            Network::Paseo => stkopt_core::Network::Paseo,
         }
     }
 }
@@ -577,13 +516,7 @@ impl StkoptApp {
         let config = crate::persistence::load_config().unwrap_or_default();
 
         // Convert network config to app network
-        let network = match config.network {
-            crate::persistence::NetworkConfig::Polkadot => Network::Polkadot,
-            crate::persistence::NetworkConfig::Kusama => Network::Kusama,
-            crate::persistence::NetworkConfig::Westend => Network::Westend,
-            crate::persistence::NetworkConfig::Paseo => Network::Paseo,
-            crate::persistence::NetworkConfig::Custom => Network::Polkadot,
-        };
+        let network = config.network.to_network().unwrap_or(Network::Polkadot);
 
         let connection_mode = ConnectionMode::from_config(config.connection_mode);
 
@@ -624,8 +557,8 @@ impl StkoptApp {
             let net = network; // Copy
             let use_light = connection_mode.uses_light_client();
             cx.spawn(move |_, _cx: &mut gpui::AsyncApp| async move {
-                if let Err(e) = handle.connect(net.to_core(), use_light).await {
-                    eprintln!("Failed to auto-connect: {}", e);
+                if let Err(e) = handle.connect(net, use_light).await {
+                    tracing::error!("Failed to auto-connect: {}", e);
                 }
             })
             .detach();
@@ -650,11 +583,20 @@ impl StkoptApp {
             validator_sort_asc: false,
             validator_search: String::new(),
             validators_loading: false,
+            validator_filter_cache: crate::validators::ValidatorFilterCache::new(),
             staking_history: Vec::new(),
             history_loading: false,
             pools: Vec::new(),
             pools_loading: false,
+            pool_search: String::new(),
+            pool_sort: crate::actions::PoolSortColumn::default(),
+            pool_sort_asc: false,
+            pool_filter_cache: crate::pools::PoolFilterCache::new(),
             operations_loading: false,
+            operations_progress: 0.0,
+            validators_progress: 0.0,
+            pools_progress: 0.0,
+            history_progress: 0.0,
             show_settings: false,
             settings_theme: config.theme,
             settings_network: config.network,
@@ -663,6 +605,7 @@ impl StkoptApp {
             settings_show_testnets: config.show_testnets,
             show_help: false,
             optimization_result: None,
+            optimization_status: None,
             optimization_strategy: crate::optimization::SelectionStrategy::default(),
             optimization_max_commission: 0.15,
             optimization_target_count: 16,
@@ -707,7 +650,7 @@ impl StkoptApp {
 
         // Load address book from disk
         if let Ok(book) = crate::persistence::load_address_book() {
-            let net_config = crate::persistence::NetworkConfig::from(instance.network.to_core());
+            let net_config = crate::persistence::NetworkConfig::from(instance.network);
             for entry in book.for_network(net_config) {
                 instance.address_book.push(SavedAccount {
                     address: entry.address.clone(),
@@ -724,25 +667,47 @@ impl StkoptApp {
     /// Load cached data from the database.
     pub fn load_cache(&self, cx: &mut Context<Self>) {
         let db = self.db.clone();
-        let network = self.network.to_core();
+        let network = self.network;
         let pending_updates = self.pending_updates.clone();
 
         let mut async_cx = cx.to_async();
         cx.spawn(
             move |this: WeakEntity<Self>, _cx: &mut gpui::AsyncApp| async move {
-                let validators_res = db.get_cached_validators(network).await;
-                let pools_res = db.get_cached_pools(network).await;
-
                 let mut updates = Vec::new();
-                if let Ok(validators) = validators_res
-                    && !validators.is_empty()
-                {
-                    updates.push(crate::chain::ChainUpdate::ValidatorsLoaded(validators));
-                }
-                if let Ok(pools) = pools_res
-                    && !pools.is_empty()
-                {
-                    updates.push(crate::chain::ChainUpdate::PoolsLoaded(pools));
+
+                // Use the most recent cached era for freshness checks; default to 0 only when
+                // no metadata has ever been persisted.
+                let current_era = db
+                    .get_chain_metadata(network)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|meta| meta.current_era)
+                    .unwrap_or(0);
+
+                match db.get_startup_cache(network, current_era).await {
+                    Ok(startup) => {
+                        if startup.validators.is_displayable()
+                            && !startup.validators.data.is_empty()
+                        {
+                            updates.push(crate::chain::ChainUpdate::LoadingProgress {
+                                step: crate::chain::LoadingStep::Validators,
+                                progress: 1.0,
+                            });
+                            updates.push(crate::chain::ChainUpdate::ValidatorsLoaded(
+                                startup.validators.data,
+                            ));
+                        }
+                        if startup.pools.is_displayable() && !startup.pools.data.is_empty() {
+                            updates.push(crate::chain::ChainUpdate::LoadingProgress {
+                                step: crate::chain::LoadingStep::Pools,
+                                progress: 1.0,
+                            });
+                            updates
+                                .push(crate::chain::ChainUpdate::PoolsLoaded(startup.pools.data));
+                        }
+                    }
+                    Err(e) => tracing::debug!("Failed to load startup cache: {}", e),
                 }
 
                 if !updates.is_empty() {
@@ -797,6 +762,10 @@ impl StkoptApp {
                         self.pools_loading = false;
                         self.account_loading = false;
                         self.history_loading = false;
+                        self.operations_progress = 0.0;
+                        self.validators_progress = 0.0;
+                        self.pools_progress = 0.0;
+                        self.history_progress = 0.0;
                         ConnectionStatus::Disconnected
                     }
                     stkopt_core::ConnectionStatus::Connecting => {
@@ -805,12 +774,22 @@ impl StkoptApp {
                         self.pools_loading = true;
                         self.account_loading = false;
                         self.history_loading = false;
+                        self.operations_progress = 0.05;
+                        self.validators_progress = 0.0;
+                        self.pools_progress = 0.0;
+                        self.history_progress = if self.watched_account.is_none() {
+                            1.0
+                        } else {
+                            0.0
+                        };
                         ConnectionStatus::Connecting
                     }
                     stkopt_core::ConnectionStatus::Connected => {
                         self.operations_loading = false;
+                        self.operations_progress = 1.0;
                         if self.watched_account.is_none() {
                             self.history_loading = false;
+                            self.history_progress = 1.0;
                         }
                         ConnectionStatus::Connected
                     }
@@ -818,6 +797,7 @@ impl StkoptApp {
                         self.operations_loading = true;
                         self.validators_loading = true;
                         self.pools_loading = true;
+                        self.operations_progress = self.operations_progress.max(0.1);
                         ConnectionStatus::Connecting
                     }
                     stkopt_core::ConnectionStatus::Error(e) => {
@@ -838,22 +818,46 @@ impl StkoptApp {
                     self.fetch_watched_account(cx);
                 }
             }
+            ChainUpdate::LoadingProgress { step, progress } => {
+                let progress = progress.clamp(0.0, 1.0);
+                match step {
+                    crate::chain::LoadingStep::Operations => {
+                        self.operations_progress = progress;
+                    }
+                    crate::chain::LoadingStep::Validators => {
+                        self.validators_progress = progress;
+                    }
+                    crate::chain::LoadingStep::Pools => {
+                        self.pools_progress = progress;
+                    }
+                    crate::chain::LoadingStep::History => {
+                        self.history_progress = progress;
+                    }
+                }
+            }
             ChainUpdate::ValidatorsLoaded(validators) => {
                 self.validators = validators;
                 self.validators_loading = false;
+                self.validators_progress = 1.0;
+                self.validator_filter_cache.invalidate();
                 tracing::info!("Loaded {} validators from chain", self.validators.len());
             }
             ChainUpdate::PoolsLoaded(pools) => {
                 self.pools = pools;
                 self.pools_loading = false;
+                self.pools_progress = 1.0;
+                self.pool_filter_cache.invalidate();
                 tracing::info!("Loaded {} pools from chain", self.pools.len());
             }
             ChainUpdate::AccountLoaded(account_data) => {
                 self.account_loading = false;
+                self.history_progress = self.history_progress.max(0.5);
                 // Update staking info from account data
                 self.staking_info = Some(StakingInfo {
                     total_balance: account_data.free_balance + account_data.reserved_balance,
-                    transferable: account_data.free_balance,
+                    transferable: account_data
+                        .free_balance
+                        .saturating_sub(account_data.frozen_balance),
                     bonded: account_data.staked_balance.unwrap_or(0),
                     unbonding: account_data.unbonding_balance,
                     rewards_pending: account_data.pool_pending_rewards,
@@ -874,6 +878,7 @@ impl StkoptApp {
             ChainUpdate::HistoryLoaded(history) => {
                 self.staking_history = history;
                 self.history_loading = false;
+                self.history_progress = 1.0;
             }
             ChainUpdate::QrPayloadGenerated(payload) => {
                 // Store the generated QR payload for display in QR modal
@@ -931,7 +936,7 @@ impl StkoptApp {
         };
 
         if let Err(e) = crate::persistence::save_config(&config) {
-            eprintln!("Failed to save config: {}", e);
+            tracing::error!("Failed to save config: {}", e);
         }
     }
 
@@ -954,7 +959,7 @@ impl StkoptApp {
         if should_reconnect {
             if let Some(ref handle) = self.chain_handle {
                 let handle = handle.clone();
-                let network = self.network.to_core();
+                let network = self.network;
                 let use_light_client = mode.uses_light_client();
 
                 self.connection_status = ConnectionStatus::Connecting;
@@ -964,9 +969,18 @@ impl StkoptApp {
                 self.account_loading = false;
                 self.history_loading = false;
                 self.validators.clear();
+                self.validator_filter_cache.invalidate();
+                self.selected_validators.clear();
                 self.pools.clear();
+                self.pool_filter_cache.invalidate();
                 self.staking_info = None;
                 self.staking_history.clear();
+                self.optimization_result = None;
+                self.optimization_status = None;
+                self.connection_error = None;
+                self.close_qr_modal(cx);
+                self.show_staking_modal = false;
+                self.show_pool_modal = false;
 
                 cx.spawn(
                     move |_: gpui::WeakEntity<StkoptApp>, _: &mut gpui::AsyncApp| async move {
@@ -985,6 +999,59 @@ impl StkoptApp {
                 self.connection_error = Some("Connection worker is not available".to_string());
             }
         }
+
+        cx.notify();
+    }
+
+    /// Switch to a different network and clear all network-derived state.
+    ///
+    /// Disconnects from the current network if connected, persists the new
+    /// network in settings, and resets cached validators, pools, account data,
+    /// history, selections, and pending transactions so stale data from the
+    /// previous network is not displayed.
+    pub fn switch_network(&mut self, network: Network, cx: &mut Context<Self>) {
+        let new_config = crate::persistence::NetworkConfig::from(network);
+        if self.network == network && self.settings_network == new_config {
+            return;
+        }
+
+        self.network = network;
+        self.settings_network = new_config;
+        self.save_config();
+
+        // Disconnect from current network (keep chain_handle for future commands)
+        if self.connection_status == ConnectionStatus::Connected {
+            if let Some(ref handle) = self.chain_handle {
+                let handle = handle.clone();
+                cx.spawn(
+                    move |_: gpui::WeakEntity<StkoptApp>, _: &mut gpui::AsyncApp| async move {
+                        let _ = handle.disconnect().await;
+                    },
+                )
+                .detach();
+            }
+            self.connection_status = ConnectionStatus::Disconnected;
+        }
+
+        // Clear cached data for old network
+        self.validators.clear();
+        self.validator_filter_cache.invalidate();
+        self.selected_validators.clear();
+        self.pools.clear();
+        self.pool_filter_cache.invalidate();
+        self.staking_info = None;
+        self.staking_history.clear();
+        self.optimization_result = None;
+        self.optimization_status = None;
+        self.connection_error = None;
+        self.close_qr_modal(cx);
+        self.show_staking_modal = false;
+        self.show_pool_modal = false;
+        self.operations_loading = false;
+        self.validators_loading = false;
+        self.pools_loading = false;
+        self.account_loading = false;
+        self.history_loading = false;
 
         cx.notify();
     }
@@ -1051,15 +1118,27 @@ impl StkoptApp {
     }
 
     /// Remove an account from the address book.
+    ///
+    /// If the removed account is the currently watched account, also clear the
+    /// watched account and its derived state so the UI does not display stale
+    /// data for an account that is no longer in the address book.
     pub fn remove_from_address_book(&mut self, address: &str) {
         self.address_book
             .retain(|a| a.address != address || a.network != self.network);
         self.persist_address_book();
+
+        if self.watched_account.as_ref().is_some_and(|a| a == address) {
+            self.watched_account = None;
+            self.staking_info = None;
+            self.staking_history.clear();
+            self.account_loading = false;
+            self.history_loading = false;
+        }
     }
 
     /// Persist the address book to disk.
     fn persist_address_book(&self) {
-        let net_config = crate::persistence::NetworkConfig::from(self.network.to_core());
+        let net_config = crate::persistence::NetworkConfig::from(self.network);
         let mut book = crate::persistence::load_address_book().unwrap_or_default();
 
         // Remove existing entries for this network and re-add from current state
@@ -1095,7 +1174,7 @@ impl StkoptApp {
 
     /// Get the token symbol for the current network.
     pub fn token_symbol(&self) -> &'static str {
-        self.network.symbol()
+        self.network.token_symbol()
     }
 
     /// Whether all initial chain data needed by the UI has finished loading.
@@ -1103,9 +1182,35 @@ impl StkoptApp {
         progress_steps_complete(self.connection_status, &self.connection_progress_steps())
     }
 
+    /// Whether validator data is available for local optimization.
+    pub fn optimization_available(&self) -> bool {
+        optimization_available(self.validators_loading, self.validators.len())
+    }
+
     /// Whether transaction-oriented commands can run.
     pub fn commands_available(&self) -> bool {
         self.data_download_complete() && self.watched_account.is_some()
+    }
+
+    /// Get cached filtered validators, recomputing only when inputs changed.
+    pub fn filtered_validators_cached(&mut self) -> Arc<Vec<(usize, crate::app::ValidatorInfo)>> {
+        self.validator_filter_cache.get(
+            &self.validators,
+            &self.validator_search,
+            self.show_blocked,
+            self.validator_sort,
+            self.validator_sort_asc,
+        )
+    }
+
+    /// Get cached filtered pools, recomputing only when inputs changed.
+    pub fn filtered_pools_cached(&mut self) -> Arc<Vec<(usize, crate::app::PoolInfo)>> {
+        self.pool_filter_cache.get(
+            &self.pools,
+            &self.pool_search,
+            self.pool_sort,
+            self.pool_sort_asc,
+        )
     }
 
     fn connection_progress_steps(&self) -> [(&'static str, bool); 4] {
@@ -1118,6 +1223,32 @@ impl StkoptApp {
         ]
     }
 
+    fn connection_progress_bars(&self) -> [(&'static str, bool, f32); 4] {
+        let steps = self.connection_progress_steps();
+        [
+            (
+                steps[0].0,
+                steps[0].1,
+                rendered_step_progress(steps[0].1, self.operations_progress),
+            ),
+            (
+                steps[1].0,
+                steps[1].1,
+                rendered_step_progress(steps[1].1, self.validators_progress),
+            ),
+            (
+                steps[2].0,
+                steps[2].1,
+                rendered_step_progress(steps[2].1, self.pools_progress),
+            ),
+            (
+                steps[3].0,
+                steps[3].1,
+                rendered_step_progress(steps[3].1, self.history_progress),
+            ),
+        ]
+    }
+
     fn account_history_ready(&self) -> bool {
         if self.watched_account.is_none() {
             return !self.history_loading;
@@ -1127,14 +1258,16 @@ impl StkoptApp {
     }
 
     /// Select a watched account and reset stale account-specific data.
-    pub fn set_watched_account(&mut self, address: String) {
+    pub fn set_watched_account(&mut self, address: String, cx: &mut Context<Self>) {
         self.watched_account = Some(address.clone());
         self.account_input = address;
         self.account_error = None;
+        self.connection_error = None;
         self.staking_info = None;
         self.staking_history.clear();
         self.account_loading = false;
         self.history_loading = false;
+        self.close_qr_modal(cx);
     }
 
     /// Fetch account data for the currently watched account.
@@ -1611,26 +1744,29 @@ impl StkoptApp {
         };
 
         self.history_loading = true;
+        self.history_progress = 0.1;
         cx.notify();
 
         let address = address.clone();
         let chain_handle = chain_handle.clone();
-        let num_eras = 30u32; // Load last 30 eras
+        let lookback_days = 30u32; // Load last 30 days
         let mut async_cx = cx.to_async();
 
         cx.spawn(
             move |this: gpui::WeakEntity<Self>, _cx: &mut gpui::AsyncApp| async move {
-                let result = chain_handle.fetch_history(address, num_eras).await;
+                let result = chain_handle.fetch_history(address, lookback_days).await;
                 if let Err(e) = this.update(&mut async_cx, |this, cx: &mut Context<Self>| {
                     this.history_loading = false;
                     match result {
                         Ok(history) => {
                             tracing::info!("History loaded: {} points", history.len());
                             this.staking_history = history;
+                            this.history_progress = 1.0;
                         }
                         Err(e) => {
                             tracing::error!("Failed to load history: {}", e);
                             this.connection_error = Some(format!("Failed to load history: {}", e));
+                            this.history_progress = 0.0;
                         }
                     }
                     cx.notify();
@@ -2114,7 +2250,7 @@ impl StkoptApp {
             }
         };
 
-        let bars = self.connection_progress_steps();
+        let bars = self.connection_progress_bars();
 
         div()
             .flex()
@@ -2128,17 +2264,17 @@ impl StkoptApp {
                     .child(div().w(px(6.0)).h(px(6.0)).rounded_full().bg(status_color))
                     .child(Text::new(status_text).size(TextSize::Xs)),
             )
-            .children(bars.into_iter().map(|(label, done)| {
+            .children(bars.into_iter().map(|(label, done, progress)| {
+                let progress = progress.clamp(0.0, 1.0);
                 let fill_color = if done { theme.success } else { theme.border };
-                let fill = div().h_full().rounded_full().bg(fill_color);
-                let fill = if done { fill.w_full() } else { fill.w(px(0.0)) };
+                let filled_segments = (progress * 20.0).round() as usize;
 
                 div()
                     .flex()
                     .flex_col()
                     .gap_1()
                     .child(
-                        Text::new(label)
+                        Text::new(format!("{} {:.0}%", label, progress * 100.0))
                             .size(TextSize::Xs)
                             .color(theme.text_secondary),
                     )
@@ -2148,7 +2284,15 @@ impl StkoptApp {
                             .h(px(4.0))
                             .rounded_full()
                             .bg(theme.border)
-                            .child(fill),
+                            .flex()
+                            .overflow_hidden()
+                            .children((0..20).map(|index| {
+                                div().flex_1().h_full().bg(if index < filled_segments {
+                                    fill_color
+                                } else {
+                                    theme.border
+                                })
+                            })),
                     )
             }))
     }
@@ -2427,35 +2571,15 @@ fn network_pill(
             Text::new(label)
                 .size(TextSize::Xs)
                 .color(text_color)
-                .weight(if is_active { TextWeight::Semibold } else { TextWeight::Normal }),
+                .weight(if is_active {
+                    TextWeight::Semibold
+                } else {
+                    TextWeight::Normal
+                }),
         )
         .on_click(move |_event, _window, cx| {
             entity.update(cx, |this, cx| {
-                if this.network != network {
-                    this.network = network;
-                    this.save_config();
-                    // Disconnect from current network (keep chain_handle for future commands)
-                    if this.connection_status == ConnectionStatus::Connected {
-                        if let Some(ref handle) = this.chain_handle {
-                            let handle = handle.clone();
-                            cx.spawn(move |_: gpui::WeakEntity<StkoptApp>, _: &mut gpui::AsyncApp| async move {
-                                let _ = handle.disconnect().await;
-                            }).detach();
-                        }
-                        this.connection_status = ConnectionStatus::Disconnected;
-                    }
-                    // Clear cached data for old network
-                    this.validators.clear();
-                    this.pools.clear();
-                    this.staking_info = None;
-                    this.staking_history.clear();
-                    this.operations_loading = false;
-                    this.validators_loading = false;
-                    this.pools_loading = false;
-                    this.account_loading = false;
-                    this.history_loading = false;
-                    cx.notify();
-                }
+                this.switch_network(network, cx);
             });
         })
 }
@@ -2509,9 +2633,10 @@ fn mode_pill(
 #[cfg(test)]
 mod tests {
     use super::{
-        ConnectionMode, ConnectionStatus, Network, PoolOperation, PoolState, QrModalTab, Section,
-        StakingOperation, clamp_log_pane_height, generate_mock_pools, parse_token_amount,
-        progress_steps_complete,
+        ConnectionMode, ConnectionModeExt, ConnectionStatus, Network, NetworkExt, PoolOperation,
+        PoolState, QrModalTab, Section, StakingOperation, clamp_log_pane_height,
+        generate_mock_pools, optimization_available, parse_token_amount, progress_steps_complete,
+        rendered_step_progress,
     };
 
     // clamp_log_pane_height tests
@@ -2571,6 +2696,22 @@ mod tests {
             ConnectionStatus::Connecting,
             &steps
         ));
+    }
+
+    #[test]
+    fn test_rendered_step_progress_allows_partial_progress() {
+        assert_eq!(rendered_step_progress(false, 0.35), 0.35);
+        assert_eq!(rendered_step_progress(true, 0.35), 1.0);
+        assert_eq!(rendered_step_progress(false, -1.0), 0.0);
+        assert_eq!(rendered_step_progress(false, 2.0), 1.0);
+    }
+
+    #[test]
+    fn test_optimization_available_requires_loaded_validators_only() {
+        assert!(optimization_available(false, 1));
+        assert!(optimization_available(false, 100));
+        assert!(!optimization_available(false, 0));
+        assert!(!optimization_available(true, 100));
     }
 
     // parse_token_amount tests
@@ -2653,6 +2794,28 @@ mod tests {
     fn test_parse_token_amount_different_decimals() {
         assert_eq!(parse_token_amount("1.5", 12).unwrap(), 1_500_000_000_000);
         assert_eq!(parse_token_amount("1", 12).unwrap(), 1_000_000_000_000);
+    }
+
+    // transferable math tests
+    #[test]
+    fn test_transferable_ignores_frozen_balance() {
+        let account_data = crate::chain::AccountData {
+            free_balance: 1000,
+            reserved_balance: 100,
+            frozen_balance: 600,
+            staked_balance: None,
+            unbonding_balance: 0,
+            is_nominating: false,
+            nominations: vec![],
+            pool_id: None,
+            pool_pending_rewards: 0,
+            pool_unbonding_eras: vec![],
+            pool_last_recorded_reward_counter: 0,
+        };
+        let transferable = account_data
+            .free_balance
+            .saturating_sub(account_data.frozen_balance);
+        assert_eq!(transferable, 400);
     }
 
     // generate_mock_pools tests
@@ -2847,11 +3010,11 @@ mod tests {
     }
 
     #[test]
-    fn test_network_symbol() {
-        assert_eq!(Network::Polkadot.symbol(), "DOT");
-        assert_eq!(Network::Kusama.symbol(), "KSM");
-        assert_eq!(Network::Westend.symbol(), "WND");
-        assert_eq!(Network::Paseo.symbol(), "PAS");
+    fn test_network_token_symbol() {
+        assert_eq!(Network::Polkadot.token_symbol(), "DOT");
+        assert_eq!(Network::Kusama.token_symbol(), "KSM");
+        assert_eq!(Network::Westend.token_symbol(), "WND");
+        assert_eq!(Network::Paseo.token_symbol(), "PAS");
     }
 
     #[test]
@@ -2860,13 +3023,5 @@ mod tests {
         assert_eq!(Network::Kusama.token_decimals(), 12);
         assert_eq!(Network::Westend.token_decimals(), 12);
         assert_eq!(Network::Paseo.token_decimals(), 10);
-    }
-
-    #[test]
-    fn test_network_to_core() {
-        assert_eq!(Network::Polkadot.to_core(), stkopt_core::Network::Polkadot);
-        assert_eq!(Network::Kusama.to_core(), stkopt_core::Network::Kusama);
-        assert_eq!(Network::Westend.to_core(), stkopt_core::Network::Westend);
-        assert_eq!(Network::Paseo.to_core(), stkopt_core::Network::Paseo);
     }
 }

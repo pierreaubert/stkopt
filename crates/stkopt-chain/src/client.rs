@@ -7,13 +7,14 @@
 //! - **LightClient** (default): Trustless P2P connection using smoldot.
 //!   Does not require trusting any RPC provider. Cannot query historical state.
 //!
-//! - **Rpc**: Traditional WebSocket RPC connection. Required for historical
-//!   data queries (past eras). Used as fallback when light client fails.
+//! - **Rpc**: Traditional WebSocket RPC connection. Used only when explicitly
+//!   requested (e.g. `--rpc`). Required for historical data queries.
 //!
 //! # Architecture (Polkadot 2.0, Nov 2025+)
 //!
-//! - Asset Hub: All staking data (validators, pools, nominations)
-//! - Relay Chain: Transaction submission, block/session data
+//! - Asset Hub: All staking data (validators, pools, nominations) and staking
+//!   transaction submission.
+//! - Relay Chain: Block/session data only; not used for staking transactions.
 //! - People Chain: Identity data
 
 use crate::PeopleChainClient;
@@ -110,8 +111,9 @@ pub struct ChainClient {
 impl ChainClient {
     /// Connect to a network using the specified configuration.
     ///
-    /// Uses light client by default (trustless P2P), falling back to RPC
-    /// if light client connection fails.
+    /// Uses light client by default (trustless P2P). RPC is only used when
+    /// explicitly requested via `ConnectionMode::Rpc`; there is no automatic
+    /// fallback.
     pub async fn connect(
         network: Network,
         config: &ConnectionConfig,
@@ -120,19 +122,10 @@ impl ChainClient {
         match config.mode {
             ConnectionMode::LightClient => {
                 tracing::info!("Connection mode: Light Client (trustless P2P)");
-                // Try light client first
-                match Self::connect_light_client(network, status_tx.clone()).await {
-                    Ok(client) => Ok(client),
-                    Err(e) => {
-                        tracing::warn!("Light client connection failed: {}", e);
-                        tracing::info!("Falling back to RPC mode...");
-                        // Fall back to RPC
-                        Self::connect_rpc(network, &config.rpc_endpoints, status_tx).await
-                    }
-                }
+                Self::connect_light_client(network, status_tx.clone()).await
             }
             ConnectionMode::Rpc => {
-                tracing::info!("Connection mode: RPC (forced via --rpc flag)");
+                tracing::info!("Connection mode: RPC (explicit mode)");
                 Self::connect_rpc(network, &config.rpc_endpoints, status_tx).await
             }
         }
@@ -183,8 +176,8 @@ impl ChainClient {
     /// Connect to a network's Asset Hub using WebSocket RPC.
     /// Uses custom endpoints from RpcEndpoints if provided, otherwise uses defaults.
     ///
-    /// Since Polkadot 2.0 (Nov 2025), staking data lives on Asset Hub, but
-    /// staking transactions still go to the relay chain.
+    /// Since Polkadot 2.0 (Nov 2025), staking data and staking transactions
+    /// both live on Asset Hub.
     pub async fn connect_rpc(
         network: Network,
         rpc_endpoints: &RpcEndpoints,
@@ -325,7 +318,7 @@ impl ChainClient {
         .await
     }
 
-    /// Get the relay chain client (for transactions).
+    /// Get the relay chain client (for block/session data only).
     /// Falls back to Asset Hub client if relay chain is not connected.
     pub fn relay_client(&self) -> &OnlineClient<PolkadotConfig> {
         self.relay_client.as_ref().unwrap_or(&self.client)

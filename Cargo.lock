@@ -7769,11 +7769,13 @@ version = "0.1.7"
 dependencies = [
  "async-trait",
  "bs58",
+ "chrono",
  "ed25519-zebra",
  "futures",
  "hex",
  "parity-scale-codec",
  "reqwest",
+ "serde",
  "sp-crypto-hashing",
  "stkopt-core",
  "subxt",
@@ -7797,6 +7799,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -7837,7 +7840,6 @@ name = "stkopt-tui"
 version = "0.1.7"
 dependencies = [
  "base64",
- "chrono",
  "clap",
  "color-eyre",
  "crossterm",

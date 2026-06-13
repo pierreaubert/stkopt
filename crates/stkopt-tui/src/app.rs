@@ -2,14 +2,14 @@
 
 use crate::action::{
     AccountStatus, Action, DisplayPool, DisplayValidator, PendingTransaction, PendingUnsignedTx,
-    PoolOperation, QrScanStatus, StakingHistoryPoint, StakingInputMode, TransactionInfo,
-    TxSubmissionStatus,
+    QrScanStatus, StakingHistoryPoint, StakingInputMode, TransactionInfo, TxSubmissionStatus,
 };
 use crate::log_buffer::LogBuffer;
 use crate::theme::{Palette, Theme};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::TableState;
 use std::collections::HashSet;
+use std::sync::Arc;
 use stkopt_chain::{ChainInfo, RewardDestination};
 use stkopt_core::{ConnectionStatus, Network, OptimizationResult};
 use subxt::utils::AccountId32;
@@ -323,7 +323,6 @@ pub struct LoadingState {
 pub struct App {
     // === Core State ===
     /// Current theme.
-    #[allow(dead_code)]
     pub theme: Theme,
     /// Color palette for rendering.
     pub palette: Palette,
@@ -380,6 +379,16 @@ pub struct App {
     /// Optimization strategy selection index.
     pub strategy_index: usize,
 
+    // === Cached Filtered Lists ===
+    /// Cached filtered and sorted validators.
+    cached_filtered_validators: Arc<Vec<DisplayValidator>>,
+    /// Whether the validator filter cache needs recomputation.
+    validators_cache_dirty: bool,
+    /// Cached filtered and sorted pools.
+    cached_filtered_pools: Arc<Vec<DisplayPool>>,
+    /// Whether the pool filter cache needs recomputation.
+    pools_cache_dirty: bool,
+
     // === Pools State ===
     /// Display nomination pools (aggregated data).
     pub pools: Vec<DisplayPool>,
@@ -425,8 +434,6 @@ pub struct App {
     pub rewards_destination: RewardDestination,
 
     // === Pool Operations State ===
-    /// Current pool operation.
-    pub pool_operation: PoolOperation,
     /// Input buffer for pool amount.
     pub pool_input_amount: String,
     /// Selected pool for join operation.
@@ -505,6 +512,12 @@ impl App {
             nomination_status: None,
             strategy_index: 0,
 
+            // Cached filtered lists
+            cached_filtered_validators: Arc::new(Vec::new()),
+            validators_cache_dirty: true,
+            cached_filtered_pools: Arc::new(Vec::new()),
+            pools_cache_dirty: true,
+
             // Pools state
             pools: Vec::new(),
             pools_table_state: TableState::default(),
@@ -534,7 +547,6 @@ impl App {
             staking_input_mode: StakingInputMode::default(),
             staking_input_amount: String::new(),
             rewards_destination: RewardDestination::Staked,
-            pool_operation: PoolOperation::default(),
             pool_input_amount: String::new(),
             selected_pool_for_join: None,
         }
@@ -859,6 +871,7 @@ impl App {
             // Toggle blocked validators with b
             KeyCode::Char('b') if self.current_view == View::Validators => {
                 self.show_blocked = !self.show_blocked;
+                self.validators_cache_dirty = true;
             }
             // Sort menu with s
             KeyCode::Char('s') if matches!(self.current_view, View::Validators | View::Pools) => {
@@ -867,9 +880,11 @@ impl App {
             // Reverse sort with S
             KeyCode::Char('S') if self.current_view == View::Validators => {
                 self.validator_sort_asc = !self.validator_sort_asc;
+                self.validators_cache_dirty = true;
             }
             KeyCode::Char('S') if self.current_view == View::Pools => {
                 self.pool_sort_asc = !self.pool_sort_asc;
+                self.pools_cache_dirty = true;
             }
             // Strategy menu in nominate view
             KeyCode::Char('t') if self.current_view == View::Nominate => {
@@ -934,9 +949,13 @@ impl App {
             }
             KeyCode::Backspace => {
                 self.search_query.pop();
+                self.validators_cache_dirty = true;
+                self.pools_cache_dirty = true;
             }
             KeyCode::Char(c) => {
                 self.search_query.push(c);
+                self.validators_cache_dirty = true;
+                self.pools_cache_dirty = true;
             }
             _ => {}
         }
@@ -953,12 +972,14 @@ impl App {
                 View::Validators => {
                     if let Some(field) = ValidatorSortField::from_key(c) {
                         self.validator_sort = field;
+                        self.validators_cache_dirty = true;
                         self.input_mode = InputMode::Normal;
                     }
                 }
                 View::Pools => {
                     if let Some(field) = PoolSortField::from_key(c) {
                         self.pool_sort = field;
+                        self.pools_cache_dirty = true;
                         self.input_mode = InputMode::Normal;
                     }
                 }
@@ -1132,31 +1153,7 @@ impl App {
 
     /// Parse amount string to u128 (planck) based on network decimals.
     fn parse_amount(&self, input: &str) -> Option<u128> {
-        let decimals = self.network.token_decimals() as u32;
-        let parts: Vec<&str> = input.split('.').collect();
-        if parts.len() > 2 {
-            return None;
-        }
-
-        let whole = parts[0].parse::<u128>().ok()?;
-        let frac_part = if parts.len() == 2 { parts[1] } else { "" };
-
-        let mut frac = 0u128;
-        if !frac_part.is_empty() {
-            // Pad or truncate to decimals
-            let mut s = frac_part.to_string();
-            if s.len() > decimals as usize {
-                s.truncate(decimals as usize);
-            } else {
-                while s.len() < decimals as usize {
-                    s.push('0');
-                }
-            }
-            frac = s.parse::<u128>().ok()?;
-        }
-
-        let whole_units = whole.checked_mul(10u128.pow(decimals))?;
-        whole_units.checked_add(frac)
+        stkopt_core::parse_token_amount(input, self.network.token_decimals()).ok()
     }
 
     /// Handle keyboard input when entering text.
@@ -1218,35 +1215,7 @@ impl App {
             return Err("Address is too short (minimum 3 characters)".to_string());
         }
 
-        // SS58 addresses typically start with a prefix number (network identifier)
-        // Valid prefixes: 0-99 followed by the base58-encoded address
-        if !input.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-            return Err("Address should start with a network prefix (0-9)".to_string());
-        }
-
-        // Try to parse as SS58 address
-        match std::str::FromStr::from_str(input) {
-            Ok(account) => Ok(account),
-            Err(_) => {
-                let base58_hint =
-                    if input.contains(|c: char| !c.is_ascii_alphanumeric() && c != '-') {
-                        "Remove special characters from the address".to_string()
-                    } else if input.len() < 47 {
-                        format!(
-                            "SS58 address too short (got {}, expected ~47 characters)",
-                            input.len()
-                        )
-                    } else if input.len() > 49 {
-                        format!(
-                            "SS58 address too long (got {}, expected ~47 characters)",
-                            input.len()
-                        )
-                    } else {
-                        "Invalid SS58 format - check for typos".to_string()
-                    };
-                Err(format!("Invalid address: {}", base58_hint))
-            }
-        }
+        <AccountId32 as std::str::FromStr>::from_str(input).map_err(|e| e.to_string())
     }
 
     /// Switch to next view.
@@ -1331,19 +1300,11 @@ impl App {
             Action::SetEraDuration(duration) => {
                 self.era_duration_ms = duration;
             }
-            Action::SetValidators(_validators) => {
-                // Raw validators - will be processed with exposures
-                self.loading.validators = true;
-            }
-            Action::SetEraExposures(_era, _exposures) => {
-                // Will be combined with validators to compute APY
-            }
-            Action::SetEraReward(_era, _reward) => {
-                // Will be used for APY calculation
-            }
+
             Action::SetDisplayValidators(validators) => {
                 self.validators = validators;
                 self.loading.validators = false;
+                self.validators_cache_dirty = true;
                 // Select first row if we have validators
                 if !self.validators.is_empty() && self.validators_table_state.selected().is_none() {
                     self.validators_table_state.select(Some(0));
@@ -1351,6 +1312,7 @@ impl App {
             }
             Action::SetDisplayPools(pools) => {
                 self.pools = pools;
+                self.pools_cache_dirty = true;
                 // Select first row if we have pools
                 if !self.pools.is_empty() && self.pools_table_state.selected().is_none() {
                     self.pools_table_state.select(Some(0));
@@ -1548,6 +1510,13 @@ impl App {
                 self.current_era = None;
                 self.era_pct_complete = 0.0;
                 self.validators.clear();
+                self.validators_cache_dirty = true;
+                self.selected_validators.clear();
+                self.optimization_result = None;
+                self.account_status = None;
+                self.history.points.clear();
+                self.pools.clear();
+                self.pools_cache_dirty = true;
             }
             Action::SelectAddressBookEntry(_idx) => {
                 // Handled in main.rs where we have access to the address book entries
@@ -1555,33 +1524,9 @@ impl App {
             Action::RemoveAccount(_addr) => {
                 // Handled in main.rs where we have access to config and database
             }
-            Action::ValidateAccount(_addr) => {
-                // Validation is done during input, this action is no longer used
-            }
-            Action::ClearValidationError => {
-                self.validation_error = None;
-            }
-            // Staking actions
-            Action::SetStakingInputMode(mode) => {
-                self.staking_input_mode = mode;
-            }
-            Action::UpdateStakingAmount(amount) => {
-                if matches!(
-                    self.staking_input_mode,
-                    crate::action::StakingInputMode::PoolJoin
-                        | crate::action::StakingInputMode::PoolUnbond
-                        | crate::action::StakingInputMode::PoolBondExtra
-                ) {
-                    self.pool_input_amount = amount;
-                } else {
-                    self.staking_input_amount = amount;
-                }
-            }
+
             Action::SetRewardsDestination(dest) => {
                 self.rewards_destination = dest;
-            }
-            Action::SetPoolOperation(op) => {
-                self.pool_operation = op;
             }
             Action::SelectPoolForJoin(idx) => {
                 self.selected_pool_for_join = Some(idx);
@@ -1752,6 +1697,26 @@ impl App {
         result
     }
 
+    /// Get cached filtered and sorted validators, recomputing only when inputs changed.
+    pub fn filtered_validators_cached(&mut self) -> Arc<Vec<DisplayValidator>> {
+        if self.validators_cache_dirty {
+            self.cached_filtered_validators =
+                Arc::new(self.filtered_validators().into_iter().cloned().collect());
+            self.validators_cache_dirty = false;
+        }
+        self.cached_filtered_validators.clone()
+    }
+
+    /// Get cached filtered and sorted pools, recomputing only when inputs changed.
+    pub fn filtered_pools_cached(&mut self) -> Arc<Vec<DisplayPool>> {
+        if self.pools_cache_dirty {
+            self.cached_filtered_pools =
+                Arc::new(self.filtered_pools().into_iter().cloned().collect());
+            self.pools_cache_dirty = false;
+        }
+        self.cached_filtered_pools.clone()
+    }
+
     /// Move selection down in the current list.
     pub fn select_next(&mut self) {
         match self.current_view {
@@ -1803,6 +1768,45 @@ mod tests {
 
     fn create_app() -> App {
         App::new(Network::Polkadot, LogBuffer::new(), Theme::Dark)
+    }
+
+    // === validate_account_input ===
+
+    #[test]
+    fn test_validate_account_input_kusama_accepted() {
+        let mut app = create_app();
+        app.account_input = "HNZata7iMYWmk5RvZRTiAsSDhV8366zq2YGb3tLH5Upf74F".to_string();
+        assert!(app.validate_account_input().is_ok());
+    }
+
+    #[test]
+    fn test_validate_account_input_paseo_accepted() {
+        let mut app = create_app();
+        app.account_input = "15oF4uVJwmo4TdGW7VfQxNLavjCXviqxT9S1MgbjMNHr6Sp5".to_string();
+        assert!(app.validate_account_input().is_ok());
+    }
+
+    #[test]
+    fn test_validate_account_input_westend_accepted() {
+        let mut app = create_app();
+        app.account_input = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY".to_string();
+        assert!(app.validate_account_input().is_ok());
+    }
+
+    #[test]
+    fn test_validate_account_input_invalid_chars_rejected() {
+        let mut app = create_app();
+        app.account_input = "!not-a-valid@address#".to_string();
+        assert!(app.validate_account_input().is_err());
+    }
+
+    #[test]
+    fn test_validate_account_input_too_short_rejected() {
+        let mut app = create_app();
+        app.account_input = "ab".to_string();
+        let result = app.validate_account_input();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("too short"));
     }
 
     fn make_validator(
@@ -2153,10 +2157,10 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_amount_truncate_decimals() {
+    fn test_parse_amount_rejects_too_many_decimals() {
         let app = create_app();
-        // 11 decimals provided, but Polkadot has 10 -> truncate to 10
-        assert_eq!(app.parse_amount("1.12345678901"), Some(11_234_567_890u128));
+        // 11 decimals provided, but Polkadot has 10 -> reject
+        assert_eq!(app.parse_amount("1.12345678901"), None);
     }
 
     #[test]
@@ -2169,7 +2173,7 @@ mod tests {
     #[test]
     fn test_parse_amount_zero() {
         let app = create_app();
-        assert_eq!(app.parse_amount("0"), Some(0));
+        assert_eq!(app.parse_amount("0"), None);
     }
 
     #[test]
@@ -2388,6 +2392,74 @@ mod tests {
         let filtered = app.filtered_pools();
         assert_eq!(filtered[0].id, 1);
         assert_eq!(filtered[1].id, 2);
+    }
+
+    // === cached filter lists ===
+
+    #[test]
+    fn test_filtered_validators_cached_reuses_result() {
+        let mut app = create_app();
+        app.validators = vec![make_validator(
+            "addr1",
+            Some("Alice"),
+            0.1,
+            false,
+            Some(0.15),
+        )];
+        app.validators_cache_dirty = true;
+        let first = app.filtered_validators_cached();
+        let second = app.filtered_validators_cached();
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn test_filtered_validators_cached_updates_on_search_change() {
+        let mut app = create_app();
+        app.validators = vec![
+            make_validator("addr1", Some("Alice"), 0.1, false, Some(0.15)),
+            make_validator("addr2", Some("Bob"), 0.1, false, Some(0.20)),
+        ];
+        app.search_query = "Alice".to_string();
+        app.validators_cache_dirty = true;
+        let first = app.filtered_validators_cached();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].address, "addr1");
+
+        app.search_query = "Bob".to_string();
+        app.validators_cache_dirty = true;
+        let second = app.filtered_validators_cached();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].address, "addr2");
+    }
+
+    #[test]
+    fn test_filtered_pools_cached_reuses_result() {
+        let mut app = create_app();
+        app.pools = vec![make_pool(1, "Alpha", PoolState::Open, None)];
+        app.pools_cache_dirty = true;
+        let first = app.filtered_pools_cached();
+        let second = app.filtered_pools_cached();
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn test_filtered_pools_cached_updates_on_search_change() {
+        let mut app = create_app();
+        app.pools = vec![
+            make_pool(1, "Alpha", PoolState::Open, None),
+            make_pool(2, "Beta", PoolState::Open, None),
+        ];
+        app.search_query = "Alpha".to_string();
+        app.pools_cache_dirty = true;
+        let first = app.filtered_pools_cached();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].id, 1);
+
+        app.search_query = "Beta".to_string();
+        app.pools_cache_dirty = true;
+        let second = app.filtered_pools_cached();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].id, 2);
     }
 
     // === scroll methods ===
@@ -2731,6 +2803,8 @@ mod tests {
             estimated_apy_min: 0.15,
             estimated_apy_max: 0.15,
             estimated_apy_avg: 0.15,
+            total_stake: 1_000_000,
+            avg_commission: 0.1,
         };
         app.handle_action(Action::SetOptimizationResult(result));
         assert!(app.selected_validators.contains(&0));
@@ -2739,8 +2813,7 @@ mod tests {
         assert!(
             app.nomination_status
                 .as_ref()
-                .unwrap()
-                .contains("Selected 1 validators")
+                .is_some_and(|s| s.contains("Selected 1 validators"))
         );
     }
 
@@ -2752,6 +2825,8 @@ mod tests {
             estimated_apy_min: 0.0,
             estimated_apy_max: 0.0,
             estimated_apy_avg: 0.0,
+            total_stake: 0,
+            avg_commission: 0.0,
         };
         app.handle_action(Action::SetOptimizationResult(result));
         assert!(app.selected_validators.is_empty());
@@ -2770,6 +2845,8 @@ mod tests {
             estimated_apy_min: 0.0,
             estimated_apy_max: 0.0,
             estimated_apy_avg: 0.0,
+            total_stake: 0,
+            avg_commission: 0.0,
         });
         app.handle_action(Action::ToggleValidatorSelection(0));
         assert!(app.selected_validators.contains(&0));
@@ -2807,6 +2884,8 @@ mod tests {
             estimated_apy_min: 0.0,
             estimated_apy_max: 0.0,
             estimated_apy_avg: 0.0,
+            total_stake: 0,
+            avg_commission: 0.0,
         });
         app.handle_action(Action::ClearNominations);
         assert!(app.selected_validators.is_empty());
@@ -2907,23 +2986,23 @@ mod tests {
     fn test_handle_action_set_tx_status() {
         let mut app = create_app();
         app.qr.pending_signed = Some(PendingTransaction {
-            description: "test".to_string(),
             signed_extrinsic: vec![],
             tx_hash: [0u8; 32],
             status: TxSubmissionStatus::ReadyToSubmit,
         });
         app.handle_action(Action::SetTxStatus(TxSubmissionStatus::Submitting));
-        assert!(matches!(
-            app.qr.pending_signed.as_ref().unwrap().status,
-            TxSubmissionStatus::Submitting
-        ));
+        assert!(
+            app.qr
+                .pending_signed
+                .as_ref()
+                .is_some_and(|tx| matches!(tx.status, TxSubmissionStatus::Submitting))
+        );
     }
 
     #[test]
     fn test_handle_action_clear_pending_tx() {
         let mut app = create_app();
         app.qr.pending_signed = Some(PendingTransaction {
-            description: "test".to_string(),
             signed_extrinsic: vec![],
             tx_hash: [0u8; 32],
             status: TxSubmissionStatus::ReadyToSubmit,
@@ -3029,13 +3108,53 @@ mod tests {
     fn test_handle_action_switch_network() {
         let mut app = create_app();
         app.validators = vec![make_validator("addr1", None, 0.1, false, None)];
+        app.selected_validators.insert(0);
+        app.optimization_result = Some(OptimizationResult {
+            selected: vec![],
+            estimated_apy_min: 0.0,
+            estimated_apy_max: 0.0,
+            estimated_apy_avg: 0.0,
+            total_stake: 0,
+            avg_commission: 0.0,
+        });
+        app.account_status = Some(AccountStatus {
+            address: AccountId32::from([1u8; 32]),
+            balance: stkopt_chain::AccountBalance {
+                free: 0,
+                reserved: 0,
+                frozen: 0,
+            },
+            staking_ledger: None,
+            nominations: None,
+            pool_membership: None,
+        });
+        app.history
+            .points
+            .push(stkopt_core::StakingHistoryPoint::new_without_date(
+                1, 1, 1, 0.1,
+            ));
+        app.pools.push(stkopt_core::DisplayPool::new(
+            1,
+            "Pool".to_string(),
+            stkopt_core::PoolState::Open,
+            0,
+            0,
+            None,
+            None,
+        ));
         app.connection_status = ConnectionStatus::Connected;
         app.current_era = Some(100);
         app.handle_action(Action::SwitchNetwork(Network::Kusama));
         assert_eq!(app.network, Network::Kusama);
         assert_eq!(app.connection_status, ConnectionStatus::Disconnected);
         assert!(app.current_era.is_none());
+        assert_eq!(app.era_pct_complete, 0.0);
         assert!(app.validators.is_empty());
+        assert!(app.selected_validators.is_empty());
+        assert!(app.optimization_result.is_none());
+        assert!(app.account_status.is_none());
+        assert!(app.history.points.is_empty());
+        assert!(app.pools.is_empty());
     }
 
     #[test]
@@ -3912,13 +4031,10 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_account_input_no_digit_prefix() {
+    fn test_validate_account_input_invalid_non_base58() {
         let mut app = create_app();
         app.account_input = "abc".to_string();
-        assert_eq!(
-            app.validate_account_input(),
-            Err("Address should start with a network prefix (0-9)".to_string())
-        );
+        assert!(app.validate_account_input().is_err());
     }
 
     #[test]
@@ -3928,8 +4044,6 @@ mod tests {
             "123456789012345678901234567890123456789012345678901234567890".to_string();
         let result = app.validate_account_input();
         assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.contains("Invalid address"));
     }
 
     #[test]
@@ -4009,7 +4123,6 @@ mod tests {
         let mut app = create_app();
         app.qr.showing = true;
         app.qr.pending_signed = Some(PendingTransaction {
-            description: "test".to_string(),
             signed_extrinsic: vec![],
             tx_hash: [0u8; 32],
             status: TxSubmissionStatus::ReadyToSubmit,

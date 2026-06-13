@@ -31,7 +31,7 @@ pub const HISTORY_DEPTH: u32 = 21;
 /// # Returns
 /// APY as a decimal (e.g., 0.15 for 15%)
 pub fn get_era_apy(era_reward: Balance, invested: Balance, era_duration_ms: u64) -> f64 {
-    if invested == 0 {
+    if invested == 0 || era_duration_ms == 0 {
         return 0.0;
     }
 
@@ -54,8 +54,17 @@ pub fn get_nominator_apy(
     invested: Balance,
     era_duration_ms: u64,
 ) -> f64 {
-    let nominator_share = ((total_reward as f64) * (1.0 - commission)).round() as Balance;
-    get_era_apy(nominator_share, invested, era_duration_ms)
+    if invested == 0 || era_duration_ms == 0 {
+        return 0.0;
+    }
+
+    // Keep the full fractional reward until the final APY value to avoid
+    // rounding tiny rewards down to zero prematurely.
+    let nominator_reward = total_reward as f64 * (1.0 - commission);
+    let reward_pct = nominator_reward / invested as f64;
+    let eras_in_year = MS_PER_YEAR / era_duration_ms as f64;
+
+    (1.0 + reward_pct).powf(eras_in_year) - 1.0
 }
 
 /// Moving average type for validator aggregation.
@@ -104,6 +113,29 @@ mod tests {
     #[test]
     fn test_get_era_apy_zero_invested() {
         assert_eq!(get_era_apy(1000, 0, 86_400_000), 0.0);
+    }
+
+    #[test]
+    fn test_get_era_apy_zero_era_duration() {
+        assert_eq!(get_era_apy(1000, 10_000, 0), 0.0);
+    }
+
+    #[test]
+    fn test_get_nominator_apy_zero_era_duration() {
+        assert_eq!(get_nominator_apy(1000, 0.1, 10_000, 0), 0.0);
+    }
+
+    #[test]
+    fn test_get_nominator_apy_tiny_rewards_not_rounded_to_zero() {
+        // A 1-planck reward on a 1_000-DOT stake with 10% commission should not
+        // be rounded to zero before the compounding step.
+        let era_duration_ms = 86_400_000u64;
+        let apy = get_nominator_apy(1, 0.10, 10_000_000_000_000u128, era_duration_ms);
+        assert!(
+            apy > 0.0,
+            "tiny nominator reward produced zero APY: {}",
+            apy
+        );
     }
 
     #[test]

@@ -139,6 +139,7 @@ fn suppress_light_client_chatter(mut filter: EnvFilter) -> EnvFilter {
         "sync-service=info",
         "bitswap-service=info",
         "tx-service=info",
+        "subxt-light-client-background-task=error",
         "stkopt_chain::lightclient=info",
         "stkopt_chain::queries::identity=info",
     ] {

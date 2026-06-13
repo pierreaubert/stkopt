@@ -8,6 +8,9 @@ pub use stkopt_core::config::{
     load_address_book, load_config, save_address_book, save_config,
 };
 
+// Re-export the core Network type so consumers can refer to `crate::persistence::Network`.
+pub use stkopt_core::Network;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -31,6 +34,19 @@ mod tests {
         assert!(!NetworkConfig::Polkadot.is_testnet());
         assert!(!NetworkConfig::Kusama.is_testnet());
         assert!(NetworkConfig::Westend.is_testnet());
+    }
+
+    #[test]
+    fn test_network_config_round_trips_all_variants() {
+        for network in [
+            Network::Polkadot,
+            Network::Kusama,
+            Network::Westend,
+            Network::Paseo,
+        ] {
+            let config = NetworkConfig::from(network);
+            assert_eq!(config.to_network(), Some(network));
+        }
     }
 
     #[test]

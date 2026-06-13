@@ -16,6 +16,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 futures.workspace = true
 reqwest.workspace = true
+chrono.workspace = true
+serde = { workspace = true, features = ["derive"] }
 # Force ed25519-zebra alloc feature for smoldot light client
 ed25519-zebra.workspace = true
 

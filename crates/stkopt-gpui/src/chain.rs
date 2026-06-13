@@ -6,22 +6,20 @@
 use std::collections::HashMap;
 use stkopt_chain::{
     ChainClient, ConnectionConfig, ConnectionMode as ChainConnectionMode, PeopleChainClient,
-    PoolNominations, PoolState as ChainPoolState, RewardDestination, RpcEndpoints, UnsignedPayload,
-    encode_for_qr,
+    RewardDestination, RpcEndpoints, UnsignedPayload, basic_display_validators, encode_for_qr,
+    eras_for_lookback_days, fetch_and_enrich_pools, fetch_and_enrich_validators,
+    staking_history_point, validator_apy_map,
 };
-use stkopt_core::{ConnectionStatus, Network, get_era_apy};
+use stkopt_core::{CachePolicy, ConnectionStatus, HistoryService, Network};
 use subxt::utils::AccountId32;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::app::{HistoryPoint, PoolInfo, PoolState, ValidatorInfo};
+use futures::stream::{self, StreamExt};
+use std::future::Future;
+
+use crate::app::{HistoryPoint, PoolInfo, ValidatorInfo};
 use crate::db_service::DbService;
 use stkopt_core::db::{CachedAccountStatus, CachedChainMetadata};
-
-/// Maximum realistic APY (50%). Higher values indicate data issues.
-const MAX_REALISTIC_APY: f64 = 0.50;
-
-/// Maximum reward as fraction of stake (0.5% per era).
-const MAX_REWARD_FRACTION: u128 = 200;
 
 const PEOPLE_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
@@ -53,78 +51,9 @@ async fn connect_ready_people_client(
     }
 }
 
-/// Check if an APY value is realistic (not corrupted data).
-fn is_realistic_apy(apy: f64) -> bool {
-    apy <= MAX_REALISTIC_APY
-}
-
-fn validator_apy_map(validators: &[ValidatorInfo]) -> HashMap<String, f64> {
-    validators
-        .iter()
-        .filter_map(|validator| validator.apy.map(|apy| (validator.address.clone(), apy)))
-        .collect()
-}
-
-fn pool_nomination_apy(
-    nominations: &PoolNominations,
-    validator_apy_map: &HashMap<String, f64>,
-) -> Option<f64> {
-    let mut total_apy = 0.0;
-    let mut count = 0;
-    for target in &nominations.targets {
-        if let Some(&validator_apy) = validator_apy_map.get(&target.to_string()) {
-            total_apy += validator_apy;
-            count += 1;
-        }
-    }
-
-    if count > 0 {
-        Some(total_apy / count as f64)
-    } else {
-        None
-    }
-}
-
-/// Estimate user's reward for an era, capped to avoid unrealistic values.
-fn estimate_user_reward(era_reward: u128, user_bonded: u128, total_staked: u128) -> u128 {
-    if user_bonded == 0 || total_staked == 0 {
-        return 0;
-    }
-    let estimated = (era_reward as f64 * user_bonded as f64 / total_staked as f64) as u128;
-    let max_reasonable = user_bonded / MAX_REWARD_FRACTION;
-    if estimated > max_reasonable && max_reasonable > 0 {
-        max_reasonable
-    } else {
-        estimated
-    }
-}
-
-/// Calculate a compact persisted date for an era in YYYYMMDD format.
-fn calculate_era_date(
-    era: u32,
-    current_era: u32,
-    current_era_start_ms: u64,
-    era_duration_ms: u64,
-) -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let eras_ago = current_era.saturating_sub(era) as u64;
-    let elapsed_ms = eras_ago.saturating_mul(era_duration_ms);
-    let reference_ms = if current_era_start_ms > 0 {
-        current_era_start_ms
-    } else {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
-            .unwrap_or_default()
-    };
-    let era_start_ms = reference_ms.saturating_sub(elapsed_ms);
-    let era_start_ms = era_start_ms.min(i64::MAX as u64) as i64;
-
-    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(era_start_ms)
-        .unwrap_or_else(chrono::Utc::now)
-        .format("%Y%m%d")
-        .to_string()
+fn cached_validators_have_chain_data(validators: &[ValidatorInfo]) -> bool {
+    validators.iter().any(|validator| validator.total_stake > 0)
+        && validators.iter().any(|validator| validator.apy.is_some())
 }
 
 /// Commands that can be sent to the chain worker.
@@ -153,7 +82,7 @@ pub enum ChainCommand {
     /// Fetch staking history for an account.
     FetchHistory {
         address: String,
-        eras: u32,
+        lookback_days: u32,
         reply: oneshot::Sender<Result<Vec<HistoryPoint>, String>>,
     },
     // === Transaction Payload Generation ===
@@ -246,6 +175,8 @@ pub enum ChainCommand {
 pub struct AccountData {
     pub free_balance: u128,
     pub reserved_balance: u128,
+    /// Balance locked for staking/governance that reduces the transferable amount.
+    pub frozen_balance: u128,
     pub staked_balance: Option<u128>,
     pub unbonding_balance: u128,
     pub is_nominating: bool,
@@ -253,6 +184,38 @@ pub struct AccountData {
     pub pool_id: Option<u32>,
     /// Pending rewards from nomination pool (if member of a pool).
     pub pool_pending_rewards: u128,
+    /// Pool member unbonding eras and balances (if member of a pool).
+    pub pool_unbonding_eras: Vec<(u32, u128)>,
+    /// Last recorded reward counter for pool membership.
+    pub pool_last_recorded_reward_counter: u128,
+}
+
+fn account_data_from_cache(status: &CachedAccountStatus) -> AccountData {
+    let nominations = status
+        .nominations_json
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<Vec<String>>(json).ok())
+        .unwrap_or_default();
+
+    let pool_unbonding_eras = status
+        .pool_unbonding_eras_json
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<Vec<(u32, u128)>>(json).ok())
+        .unwrap_or_default();
+
+    AccountData {
+        free_balance: status.free_balance,
+        reserved_balance: status.reserved_balance,
+        frozen_balance: status.frozen_balance,
+        staked_balance: (status.staked_amount > 0).then_some(status.staked_amount),
+        unbonding_balance: 0,
+        is_nominating: !nominations.is_empty(),
+        nominations,
+        pool_id: status.pool_id,
+        pool_pending_rewards: 0,
+        pool_unbonding_eras,
+        pool_last_recorded_reward_counter: status.pool_last_recorded_reward_counter,
+    }
 }
 
 /// Transaction payload ready for QR encoding.
@@ -279,20 +242,22 @@ async fn enrich_validators(
     client: &ChainClient,
     validators: &[stkopt_chain::ValidatorInfo],
     people_client: Option<&PeopleChainClient>,
+    db: Option<&DbService>,
+    network: Network,
 ) -> Vec<ValidatorInfo> {
     // Get active era for staking queries
     let era = match client.get_active_era().await {
         Ok(Some(era)) => era,
         Ok(None) => {
             tracing::warn!("No active era found, returning basic validator data");
-            return basic_validator_conversion(validators);
+            return basic_display_validators(validators);
         }
         Err(e) => {
             tracing::warn!(
                 "Failed to get active era: {}, returning basic validator data",
                 e
             );
-            return basic_validator_conversion(validators);
+            return basic_display_validators(validators);
         }
     };
     let era_duration_ms = era.duration_ms;
@@ -307,166 +272,68 @@ async fn enrich_validators(
         era.index
     );
 
-    // Get era stakers overview (stake data)
-    let exposures = match client.get_era_stakers_overview(query_era).await {
-        Ok(exp) => exp,
-        Err(e) => {
-            tracing::warn!(
-                "Failed to get era stakers: {}, returning basic validator data",
-                e
-            );
-            return basic_validator_conversion(validators);
-        }
-    };
-    let exposure_map: HashMap<[u8; 32], _> = exposures
-        .iter()
-        .map(|e| (*e.address.as_ref(), e.clone()))
-        .collect();
-    tracing::info!("Got {} era stakers exposures", exposure_map.len());
-
-    // Get era reward points
-    let (total_points, points_vec) = match client.get_era_reward_points(query_era).await {
-        Ok(result) => result,
-        Err(e) => {
-            tracing::warn!("Failed to get era reward points: {}", e);
-            (0, Vec::new())
-        }
-    };
-    let points_map: HashMap<[u8; 32], u32> = points_vec
-        .iter()
-        .map(|p| (*p.address.as_ref(), p.points))
-        .collect();
-    tracing::info!(
-        "Got {} validator points, total: {}",
-        points_map.len(),
-        total_points
-    );
-
-    // Get era validator reward for APY calculation
-    let era_reward = match client.get_era_validator_reward(query_era).await {
-        Ok(Some(reward)) => {
-            tracing::info!("Era {} reward: {}", query_era, reward);
-            reward
-        }
-        Ok(None) => {
-            tracing::debug!("No era reward for era {}", query_era);
-            0
-        }
-        Err(e) => {
-            tracing::warn!("Failed to get era reward: {}", e);
-            0
-        }
-    };
-
-    // Fetch identities from People chain
-    let identity_map: HashMap<String, String> = if let Some(people) = people_client {
-        let addresses: Vec<AccountId32> = validators.iter().map(|v| v.address.clone()).collect();
-        match people.get_identities(&addresses).await {
-            Ok(identities) => {
-                tracing::info!("Fetched {} identities from People chain", identities.len());
-                identities
-                    .into_iter()
-                    .filter_map(|id| id.display_name.map(|name| (id.address.to_string(), name)))
-                    .collect()
+    let identity_map: HashMap<String, String> = if let Some(db) = db {
+        match db
+            .get_validator_identities_within_age(
+                network,
+                stkopt_core::DEFAULT_IDENTITY_MAX_AGE_SECS,
+            )
+            .await
+        {
+            Ok(cached) => {
+                if !cached.is_empty() {
+                    tracing::info!("Loaded {} cached validator identities", cached.len());
+                }
+                cached
             }
             Err(e) => {
-                tracing::warn!("Failed to fetch identities: {}", e);
+                tracing::debug!("Failed to load cached validator identities: {}", e);
                 HashMap::new()
             }
         }
     } else {
-        tracing::debug!("People chain client not available, skipping identity fetch");
         HashMap::new()
     };
 
-    // Log diagnostic info for APY calculation
-    tracing::info!(
-        "APY calculation inputs: era_reward={}, total_points={}, era_duration_ms={}, exposure_count={}",
-        era_reward,
-        total_points,
+    let outcome = match fetch_and_enrich_validators(
+        client,
+        validators,
+        people_client,
+        identity_map,
+        query_era,
         era_duration_ms,
-        exposure_map.len()
-    );
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            tracing::error!("Failed to enrich validators: {}, returning basic data", e);
+            return basic_display_validators(validators);
+        }
+    };
 
-    // Build enriched validators
-    let mut enriched: Vec<ValidatorInfo> = validators
-        .iter()
-        .map(|v| {
-            let addr_bytes: [u8; 32] = *v.address.as_ref();
-
-            // Get exposure data (skip validators not active in this era)
-            let exposure = exposure_map.get(&addr_bytes);
-            let (total_stake, own_stake, nominator_count) = match exposure {
-                Some(e) => (e.total, e.own, e.nominator_count),
-                None => {
-                    // Include validators without exposure but with zeroed stake data
-                    (0, 0, 0)
-                }
-            };
-
-            let points = points_map.get(&addr_bytes).copied().unwrap_or(0);
-
-            // Calculate APY based on era points
-            let apy = if era_reward > 0 && total_points > 0 && points > 0 && total_stake > 0 {
-                let validator_share =
-                    (era_reward as f64 * points as f64 / total_points as f64) as u128;
-                let nominator_reward =
-                    ((validator_share as f64) * (1.0 - v.preferences.commission)) as u128;
-                Some(get_era_apy(nominator_reward, total_stake, era_duration_ms))
-            } else {
-                None
-            };
-
-            let address_str = v.address.to_string();
-            let name = identity_map.get(&address_str).cloned();
-
-            ValidatorInfo {
-                address: address_str,
-                name,
-                commission: v.preferences.commission,
-                blocked: v.preferences.blocked,
-                total_stake,
-                own_stake,
-                nominator_count,
-                points,
-                apy,
-            }
-        })
-        .collect();
-
-    // Sort by APY descending (validators with APY first, then by APY value)
-    enriched.sort_by(|a, b| match (a.apy, b.apy) {
-        (Some(a_apy), Some(b_apy)) => b_apy
-            .partial_cmp(&a_apy)
-            .unwrap_or(std::cmp::Ordering::Equal),
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => std::cmp::Ordering::Equal,
-    });
+    if !outcome.fresh_identities.is_empty() {
+        let fresh_count = outcome.fresh_identities.len();
+        tracing::info!(
+            "Fetched {} new validator identities from People chain",
+            fresh_count
+        );
+        if let Some(db) = db
+            && let Err(e) = db
+                .set_validator_identities_batch(network, outcome.fresh_identities)
+                .await
+        {
+            tracing::debug!("Failed to update validator identity cache: {}", e);
+        }
+    }
 
     tracing::info!(
-        "Enriched {} validators with stake/identity/APY data",
-        enriched.len()
+        "Enriched {} validators with stake/identity data; calculated APY for {} using era {}",
+        outcome.enrichment.validators.len(),
+        outcome.enrichment.validators_with_apy,
+        outcome.enrichment.apy_era
     );
-    enriched
-}
-
-/// Basic validator conversion without enrichment (fallback).
-fn basic_validator_conversion(validators: &[stkopt_chain::ValidatorInfo]) -> Vec<ValidatorInfo> {
-    validators
-        .iter()
-        .map(|v| ValidatorInfo {
-            address: v.address.to_string(),
-            name: None,
-            commission: v.preferences.commission,
-            blocked: v.preferences.blocked,
-            total_stake: 0,
-            own_stake: 0,
-            nominator_count: 0,
-            points: 0,
-            apy: None,
-        })
-        .collect()
+    outcome.enrichment.validators
 }
 
 /// Convert an unsigned payload to a transaction payload ready for QR display.
@@ -485,6 +352,14 @@ fn make_transaction_payload(
     })
 }
 
+/// Returns the number of slashing spans to provide for a withdraw payload.
+///
+/// On chain error we fall back to 0; the extrinsic will fail if the value is
+/// too low, but a fallback lets us build the payload for QR signing.
+fn slashing_spans_for_withdraw(spans: Result<u32, stkopt_chain::ChainError>) -> u32 {
+    spans.unwrap_or(0)
+}
+
 /// Transaction submission result.
 #[derive(Debug, Clone)]
 pub enum TxSubmissionResult {
@@ -501,6 +376,8 @@ pub enum TxSubmissionResult {
 pub enum ChainUpdate {
     /// Connection status changed.
     ConnectionStatus(ConnectionStatus),
+    /// Loading progress changed for one connection step.
+    LoadingProgress { step: LoadingStep, progress: f32 },
     /// Validators loaded.
     ValidatorsLoaded(Vec<ValidatorInfo>),
     /// Pools loaded.
@@ -515,6 +392,15 @@ pub enum ChainUpdate {
     TxSubmissionUpdate(TxSubmissionResult),
     /// Error occurred.
     Error(String),
+}
+
+/// Initial connection loading step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadingStep {
+    Operations,
+    Validators,
+    Pools,
+    History,
 }
 
 /// Handle to communicate with the chain worker.
@@ -577,16 +463,19 @@ impl ChainHandle {
     }
 
     /// Fetch staking history for an account.
+    ///
+    /// `lookback_days` is converted to eras using the chain's current era duration
+    /// before querying on-chain or cached data.
     pub async fn fetch_history(
         &self,
         address: String,
-        eras: u32,
+        lookback_days: u32,
     ) -> Result<Vec<HistoryPoint>, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(ChainCommand::FetchHistory {
                 address,
-                eras,
+                lookback_days,
                 reply: reply_tx,
             })
             .await
@@ -867,6 +756,68 @@ impl ChainWorker {
         }
     }
 
+    async fn set_progress(&self, step: LoadingStep, progress: f32) {
+        let _ = self
+            .update_tx
+            .send(ChainUpdate::LoadingProgress { step, progress })
+            .await;
+    }
+
+    async fn load_cached_startup_data(&self, network: Network, current_era: u32) -> (bool, bool) {
+        let mut validators_fresh = false;
+        let mut pools_fresh = false;
+
+        if let Some(ref db) = self.db {
+            match db.get_startup_cache(network, current_era).await {
+                Ok(startup) => {
+                    if startup.validators.is_displayable() && !startup.validators.data.is_empty() {
+                        let validator_apy_entries =
+                            validator_apy_map(&startup.validators.data).len();
+                        let has_chain_data =
+                            cached_validators_have_chain_data(&startup.validators.data);
+                        validators_fresh = !startup.validators.needs_refresh() && has_chain_data;
+                        let freshness = startup.validators.freshness;
+                        let validators = startup.validators.data;
+                        let count = validators.len();
+                        tracing::info!(
+                            "Using {:?} startup validator cache: {} validators for era {} ({} APY entries, chain_data={})",
+                            freshness,
+                            count,
+                            current_era,
+                            validator_apy_entries,
+                            has_chain_data
+                        );
+                        if has_chain_data {
+                            self.set_progress(LoadingStep::Validators, 1.0).await;
+                            let _ = self
+                                .update_tx
+                                .send(ChainUpdate::ValidatorsLoaded(validators))
+                                .await;
+                        }
+                    }
+
+                    if startup.pools.is_displayable() && !startup.pools.data.is_empty() {
+                        pools_fresh = !startup.pools.needs_refresh();
+                        let freshness = startup.pools.freshness;
+                        let pools = startup.pools.data;
+                        let count = pools.len();
+                        tracing::info!(
+                            "Using {:?} startup pool cache: {} pools for era {}",
+                            freshness,
+                            count,
+                            current_era
+                        );
+                        self.set_progress(LoadingStep::Pools, 1.0).await;
+                        let _ = self.update_tx.send(ChainUpdate::PoolsLoaded(pools)).await;
+                    }
+                }
+                Err(e) => tracing::debug!("Failed to load startup cache: {}", e),
+            }
+        }
+
+        (validators_fresh, pools_fresh)
+    }
+
     async fn handle_connect(&mut self, network: Network, use_light_client: bool) {
         self.network = Some(network);
         self.use_light_client = use_light_client;
@@ -907,11 +858,7 @@ impl ChainWorker {
             Ok(client) => {
                 tracing::info!("Connected to {} via {:?}", network, config.mode);
                 self.client = Some(client);
-
-                // Connect to People chain for identity queries before validator enrichment.
-                if let Some(ref client) = self.client {
-                    self.people_client = connect_ready_people_client(client, network).await;
-                }
+                self.set_progress(LoadingStep::Operations, 0.35).await;
 
                 // Fetch and persist chain metadata
                 if let Some(ref client) = self.client {
@@ -938,12 +885,9 @@ impl ChainWorker {
                         .unwrap_or(0);
 
                     // Token properties based on network
-                    let (token_symbol, token_decimals, ss58_prefix) = match network {
-                        Network::Polkadot => ("DOT".to_string(), 10, 0),
-                        Network::Kusama => ("KSM".to_string(), 12, 2),
-                        Network::Westend => ("WND".to_string(), 12, 42),
-                        Network::Paseo => ("PAS".to_string(), 10, 42),
-                    };
+                    let token_symbol = network.token_symbol().to_string();
+                    let token_decimals = network.token_decimals();
+                    let ss58_prefix = network.ss58_format();
 
                     if let Some(ref db) = self.db {
                         let cached_meta = CachedChainMetadata {
@@ -961,12 +905,35 @@ impl ChainWorker {
                         }
                     }
                 }
+                self.set_progress(LoadingStep::Operations, 1.0).await;
 
-                // Auto-fetch validators and pools after connection
-                self.fetch_validators_internal(network).await;
-                // Delay before pool fetch: light client needs time for storage iteration
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                self.fetch_pools_internal(network).await;
+                let current_era = if let Some(ref db) = self.db {
+                    db.get_chain_metadata(network)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|meta| meta.current_era)
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                let (validators_cached, pools_cached) =
+                    self.load_cached_startup_data(network, current_era).await;
+
+                // Auto-fetch only the startup data that was not already cached.
+                if !validators_cached {
+                    self.set_progress(LoadingStep::Validators, 0.1).await;
+                    if let Some(ref client) = self.client {
+                        self.people_client = connect_ready_people_client(client, network).await;
+                    }
+                    self.fetch_validators_internal(network).await;
+                }
+                if !pools_cached {
+                    self.set_progress(LoadingStep::Pools, 0.1).await;
+                    // Delay before pool fetch: light client needs time for storage iteration
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    self.fetch_pools_internal(network).await;
+                }
                 let _ = self
                     .update_tx
                     .send(ChainUpdate::ConnectionStatus(ConnectionStatus::Connected))
@@ -1019,16 +986,41 @@ impl ChainWorker {
 
     async fn fetch_validators_internal(&mut self, network: Network) {
         if let Some(ref client) = self.client {
-            match client.get_validators().await {
-                Ok(validators) => {
+            self.set_progress(LoadingStep::Validators, 0.2).await;
+            let fetch_result = if client.is_light_client() {
+                client.get_validators_light_client_with_completeness().await
+            } else {
+                client
+                    .get_validators()
+                    .await
+                    .map(|validators| stkopt_chain::ValidatorFetch {
+                        validators,
+                        complete: true,
+                    })
+            };
+            match fetch_result {
+                Ok(fetch) => {
+                    let validators = fetch.validators;
+                    self.set_progress(LoadingStep::Validators, 0.45).await;
                     tracing::info!(
                         "Fetched {} raw validators, enriching with stake/identity/APY data...",
                         validators.len()
                     );
 
+                    if self.people_client.is_none() {
+                        self.people_client = connect_ready_people_client(client, network).await;
+                    }
+
                     // Enrich validators with full data (stake, identity, APY)
-                    let enriched =
-                        enrich_validators(client, &validators, self.people_client.as_ref()).await;
+                    let enriched = enrich_validators(
+                        client,
+                        &validators,
+                        self.people_client.as_ref(),
+                        self.db.as_ref(),
+                        network,
+                    )
+                    .await;
+                    self.set_progress(LoadingStep::Validators, 0.85).await;
 
                     // Persist to DB
                     if let Some(ref db) = self.db {
@@ -1040,7 +1032,12 @@ impl ChainWorker {
                         };
 
                         if let Err(e) = db
-                            .set_cached_validators(network, era, enriched.clone())
+                            .set_cached_validators_checked(
+                                network,
+                                era,
+                                enriched.clone(),
+                                fetch.complete,
+                            )
                             .await
                         {
                             tracing::warn!("Failed to cache validators: {}", e);
@@ -1048,6 +1045,7 @@ impl ChainWorker {
                     }
 
                     tracing::info!("Sending {} enriched validators to UI", enriched.len());
+                    self.set_progress(LoadingStep::Validators, 1.0).await;
                     let _ = self
                         .update_tx
                         .send(ChainUpdate::ValidatorsLoaded(enriched))
@@ -1127,12 +1125,21 @@ impl ChainWorker {
         let account_data = AccountData {
             free_balance: bal.free,
             reserved_balance: bal.reserved,
+            frozen_balance: bal.frozen,
             staked_balance: staked,
             unbonding_balance: unbonding,
             is_nominating: !noms.is_empty(),
             nominations: noms.clone(),
             pool_id,
             pool_pending_rewards,
+            pool_unbonding_eras: pool_membership
+                .as_ref()
+                .map(|membership| membership.unbonding_eras.clone())
+                .unwrap_or_default(),
+            pool_last_recorded_reward_counter: pool_membership
+                .as_ref()
+                .map(|membership| membership.last_recorded_reward_counter)
+                .unwrap_or_default(),
         };
 
         // Persist to DB
@@ -1148,7 +1155,25 @@ impl ChainWorker {
                     serde_json::to_string(&noms).ok()
                 },
                 pool_id: account_data.pool_id,
-                pool_points: None,
+                pool_points: pool_membership.as_ref().map(|membership| membership.points),
+                unlocking_json: staking_ledger.as_ref().and_then(|ledger| {
+                    if ledger.unlocking.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&ledger.unlocking).ok()
+                    }
+                }),
+                pool_unbonding_eras_json: pool_membership.as_ref().and_then(|membership| {
+                    if membership.unbonding_eras.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&membership.unbonding_eras).ok()
+                    }
+                }),
+                pool_last_recorded_reward_counter: pool_membership
+                    .as_ref()
+                    .map(|membership| membership.last_recorded_reward_counter)
+                    .unwrap_or_default(),
             };
             if let Err(e) = db
                 .set_cached_account_status(network, address.to_string(), cached_status)
@@ -1167,6 +1192,40 @@ impl ChainWorker {
         address: String,
         reply: oneshot::Sender<Result<AccountData, String>>,
     ) {
+        if let Some(ref db) = self.db {
+            match db
+                .get_recent_cached_account_status(network, address.clone())
+                .await
+            {
+                Ok(Some(status)) => {
+                    tracing::info!("Using recent cached account status for {}", address);
+                    let _ = reply.send(Ok(account_data_from_cache(&status)));
+
+                    let mut result = self.fetch_account_once(network, &address).await;
+                    if let Err(ref e) = result
+                        && Self::is_connection_error(e)
+                        && self.try_reconnect().await
+                    {
+                        result = self.fetch_account_once(network, &address).await;
+                    }
+                    match result {
+                        Ok(account_data) => {
+                            let _ = self
+                                .update_tx
+                                .send(ChainUpdate::AccountLoaded(account_data))
+                                .await;
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to refresh cached account status: {}", e);
+                        }
+                    }
+                    return;
+                }
+                Ok(None) => {}
+                Err(e) => tracing::debug!("Failed to load cached account status: {}", e),
+            }
+        }
+
         let mut result = self.fetch_account_once(network, &address).await;
         if let Err(ref e) = result
             && Self::is_connection_error(e)
@@ -1177,15 +1236,39 @@ impl ChainWorker {
         let _ = reply.send(result);
     }
 
-    async fn fetch_validators_once(&self, network: Network) -> Result<Vec<ValidatorInfo>, String> {
+    async fn fetch_validators_once(
+        &mut self,
+        network: Network,
+    ) -> Result<Vec<ValidatorInfo>, String> {
         let Some(ref client) = self.client else {
             return Err("Not connected".to_string());
         };
-        match client.get_validators().await {
-            Ok(validators) => {
+        let fetch_result = if client.is_light_client() {
+            client.get_validators_light_client_with_completeness().await
+        } else {
+            client
+                .get_validators()
+                .await
+                .map(|validators| stkopt_chain::ValidatorFetch {
+                    validators,
+                    complete: true,
+                })
+        };
+        match fetch_result {
+            Ok(fetch) => {
+                let validators = fetch.validators;
                 tracing::info!("Fetched {} raw validators, enriching...", validators.len());
-                let enriched =
-                    enrich_validators(client, &validators, self.people_client.as_ref()).await;
+                if self.people_client.is_none() {
+                    self.people_client = connect_ready_people_client(client, network).await;
+                }
+                let enriched = enrich_validators(
+                    client,
+                    &validators,
+                    self.people_client.as_ref(),
+                    self.db.as_ref(),
+                    network,
+                )
+                .await;
 
                 // Persist to DB
                 if let Some(ref db) = self.db {
@@ -1196,7 +1279,12 @@ impl ChainWorker {
                     };
 
                     if let Err(e) = db
-                        .set_cached_validators(network, era, enriched.clone())
+                        .set_cached_validators_checked(
+                            network,
+                            era,
+                            enriched.clone(),
+                            fetch.complete,
+                        )
                         .await
                     {
                         tracing::warn!("Failed to cache validators: {}", e);
@@ -1209,9 +1297,16 @@ impl ChainWorker {
         }
     }
 
-    async fn validator_apy_map_for_pools(&self, network: Network) -> HashMap<String, f64> {
+    async fn validator_apy_map_for_pools(&mut self, network: Network) -> HashMap<String, f64> {
         if let Some(ref db) = self.db {
-            match db.get_cached_validators(network).await {
+            let current_era = db
+                .get_chain_metadata(network)
+                .await
+                .ok()
+                .flatten()
+                .map(|meta| meta.current_era)
+                .unwrap_or(0);
+            match db.get_fresh_cached_validators(network, current_era).await {
                 Ok(validators) => {
                     let cached_map = validator_apy_map(&validators);
                     if !cached_map.is_empty() {
@@ -1257,93 +1352,68 @@ impl ChainWorker {
         let _ = reply.send(result);
     }
 
-    async fn fetch_pools_once(&self, network: Network) -> Result<Vec<PoolInfo>, String> {
-        let Some(ref client) = self.client else {
-            return Err("Not connected".to_string());
+    async fn fetch_pools_once(&mut self, network: Network) -> Result<Vec<PoolInfo>, String> {
+        self.set_progress(LoadingStep::Pools, 0.2).await;
+        let pools = {
+            let Some(client) = self.client.as_ref() else {
+                return Err("Not connected".to_string());
+            };
+            client
+                .get_nomination_pools()
+                .await
+                .map_err(|error| error.to_string())?
         };
-        match client.get_nomination_pools().await {
-            Ok(pools) => {
-                // Fetch pool metadata (names)
-                let metadata_map: HashMap<u32, String> = match client.get_pool_metadata().await {
-                    Ok(metadata) => {
-                        tracing::info!("Fetched {} pool names", metadata.len());
-                        metadata.into_iter().map(|m| (m.id, m.name)).collect()
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to fetch pool metadata: {}", e);
-                        HashMap::new()
-                    }
-                };
 
-                let validator_apy_map = self.validator_apy_map_for_pools(network).await;
-                tracing::info!(
-                    "Built validator APY map with {} entries for pool APY calculation",
-                    validator_apy_map.len()
-                );
+        self.set_progress(LoadingStep::Pools, 0.45).await;
+        let validator_apy_map = self.validator_apy_map_for_pools(network).await;
+        self.set_progress(LoadingStep::Pools, 0.65).await;
+        tracing::info!(
+            "Built validator APY map with {} entries for pool APY calculation",
+            validator_apy_map.len()
+        );
 
-                let max_pools_to_query = 30.min(pools.len());
-                let pool_ids: Vec<u32> = pools
-                    .iter()
-                    .take(max_pools_to_query)
-                    .map(|pool| pool.id)
-                    .collect();
-                let nominations_map: HashMap<u32, PoolNominations> =
-                    match client.get_pool_nominations_batch(&pool_ids).await {
-                        Ok(nominations) => nominations
-                            .into_iter()
-                            .map(|nominations| (nominations.pool_id, nominations))
-                            .collect(),
-                        Err(e) => {
-                            tracing::warn!("Failed to get batched pool nominations: {}", e);
-                            HashMap::new()
-                        }
-                    };
-
-                let enriched: Vec<PoolInfo> = pools
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, p)| {
-                        let pool_apy = if idx < max_pools_to_query {
-                            nominations_map.get(&p.id).and_then(|nominations| {
-                                pool_nomination_apy(nominations, &validator_apy_map)
-                            })
-                        } else {
-                            None
-                        };
-
-                        // Use metadata name if available, otherwise default
-                        let name = metadata_map
-                            .get(&p.id)
-                            .cloned()
-                            .unwrap_or_else(|| format!("Pool #{}", p.id));
-
-                        PoolInfo {
-                            id: p.id,
-                            name,
-                            state: match p.state {
-                                ChainPoolState::Open => PoolState::Open,
-                                ChainPoolState::Blocked => PoolState::Blocked,
-                                ChainPoolState::Destroying => PoolState::Destroying,
-                            },
-                            member_count: p.member_count,
-                            total_bonded: p.points,
-                            commission: p.commission,
-                            apy: pool_apy,
-                        }
-                    })
-                    .collect();
-
-                // Persist to DB
-                if let Some(ref db) = self.db
-                    && let Err(e) = db.set_cached_pools(network, enriched.clone()).await
-                {
-                    tracing::warn!("Failed to cache pools: {:?}", e);
+        let max_pools_to_query = 30.min(pools.len());
+        let outcome = {
+            let Some(client) = self.client.as_ref() else {
+                return Err("Not connected".to_string());
+            };
+            match fetch_and_enrich_pools(
+                client,
+                &pools,
+                &validator_apy_map,
+                max_pools_to_query,
+                None,
+            )
+            .await
+            {
+                Ok(outcome) => outcome,
+                Err(e) => {
+                    tracing::error!("Failed to enrich pools: {}", e);
+                    return Err(e.to_string());
                 }
-
-                Ok(enriched)
             }
-            Err(e) => Err(e.to_string()),
+        };
+        tracing::info!("Fetched {} pool names", outcome.metadata_map.len());
+        self.set_progress(LoadingStep::Pools, 0.85).await;
+
+        if let Some(ref db) = self.db {
+            let era = db
+                .get_chain_metadata(network)
+                .await
+                .ok()
+                .flatten()
+                .map(|meta| meta.current_era)
+                .unwrap_or(0);
+            if let Err(e) = db
+                .set_cached_pools_at_era(network, era, outcome.pools.clone())
+                .await
+            {
+                tracing::warn!("Failed to cache pools: {:?}", e);
+            }
         }
+
+        self.set_progress(LoadingStep::Pools, 1.0).await;
+        Ok(outcome.pools)
     }
 
     async fn fetch_pools_internal(&mut self, network: Network) {
@@ -1475,9 +1545,10 @@ impl ChainWorker {
         reply: oneshot::Sender<Result<TransactionPayload, String>>,
     ) {
         let result = if let Some(ref client) = self.client {
-            // Use 0 slashing spans as default
+            let slashing_spans =
+                slashing_spans_for_withdraw(client.get_slashing_spans(&signer).await);
             client
-                .create_withdraw_unbonded_payload(&signer, 0, true)
+                .create_withdraw_unbonded_payload(&signer, slashing_spans, true)
                 .await
                 .map_err(|e| format!("Failed to create withdraw_unbonded payload: {}", e))
                 .and_then(|p| make_transaction_payload(p, signer))
@@ -1603,9 +1674,11 @@ impl ChainWorker {
         reply: oneshot::Sender<Result<TransactionPayload, String>>,
     ) {
         let result = if let Some(ref client) = self.client {
-            // For pool withdraw, member_account is the same as signer, 0 slashing spans
+            // For pool withdraw, member_account is the same as signer
+            let slashing_spans =
+                slashing_spans_for_withdraw(client.get_slashing_spans(&signer).await);
             client
-                .create_pool_withdraw_payload(&signer, &signer, 0, true)
+                .create_pool_withdraw_payload(&signer, &signer, slashing_spans, true)
                 .await
                 .map_err(|e| format!("Failed to create pool_withdraw payload: {}", e))
                 .and_then(|p| make_transaction_payload(p, signer))
@@ -1651,11 +1724,94 @@ impl ChainWorker {
 
     // === History Fetching Handler ===
 
+    /// Fetch a single era's staking history point.
+    ///
+    /// `get_reward` and `get_stake` are async callbacks that return the raw chain
+    /// values for the era. They are generic so this helper can be unit-tested
+    /// without a real `ChainClient`.
+    async fn fetch_history_era<RewardFut, StakeFut>(
+        era: u32,
+        current_era: u32,
+        current_era_start_ms: u64,
+        era_duration_ms: u64,
+        user_bonded: u128,
+        get_reward: impl FnOnce(u32) -> RewardFut,
+        get_stake: impl FnOnce(u32) -> StakeFut,
+    ) -> Option<HistoryPoint>
+    where
+        RewardFut: Future<Output = Result<Option<u128>, stkopt_chain::ChainError>>,
+        StakeFut: Future<Output = Result<u128, stkopt_chain::ChainError>>,
+    {
+        let era_reward = match get_reward(era).await {
+            Ok(Some(reward)) => reward,
+            Ok(None) => {
+                tracing::debug!("No reward data for era {}", era);
+                return None;
+            }
+            Err(e) => {
+                tracing::warn!("Failed to get era {} reward: {}", era, e);
+                return None;
+            }
+        };
+
+        let total_staked = match get_stake(era).await {
+            Ok(staked) if staked > 0 => staked,
+            Ok(_) => {
+                tracing::debug!("No stake data for era {}", era);
+                return None;
+            }
+            Err(e) => {
+                tracing::warn!("Failed to get era {} total staked: {}", era, e);
+                return None;
+            }
+        };
+
+        let point = staking_history_point(
+            era,
+            current_era,
+            current_era_start_ms,
+            era_duration_ms,
+            era_reward,
+            user_bonded,
+            total_staked,
+        );
+
+        // Log raw values for debugging
+        tracing::debug!(
+            "Era {} raw data: era_reward={}, total_staked={}, user_bonded={}, apy={:.4}",
+            era,
+            era_reward,
+            total_staked,
+            user_bonded,
+            point.apy
+        );
+
+        // Skip eras with unrealistic APY (likely corrupted data)
+        if !HistoryService::is_valid_cached_apy(point.apy, CachePolicy::default()) {
+            tracing::warn!(
+                "Era {} has unrealistic APY {:.2}% (reward={}, staked={}), skipping",
+                era,
+                point.apy * 100.0,
+                era_reward,
+                total_staked
+            );
+            return None;
+        }
+
+        tracing::debug!(
+            "Added history point for era {} (APY: {:.2}%)",
+            era,
+            point.apy * 100.0
+        );
+
+        Some(point)
+    }
+
     async fn handle_fetch_history(
         &mut self,
         network: Network,
         address: String,
-        num_eras: u32,
+        lookback_days: u32,
         reply: oneshot::Sender<Result<Vec<HistoryPoint>, String>>,
     ) {
         if self.client.is_none() && !self.try_reconnect().await {
@@ -1668,9 +1824,9 @@ impl ChainWorker {
         };
 
         tracing::info!(
-            "Loading staking history for {} ({} eras)",
+            "Loading staking history for {} (last {} days)",
             address,
-            num_eras
+            lookback_days
         );
 
         // Parse address to AccountId32 for chain queries
@@ -1682,16 +1838,20 @@ impl ChainWorker {
             }
         };
 
-        // Try to load cached history first
-        let mut cached_history = Vec::new();
+        // Approximate fallback limit using the default era duration in case the active era
+        // lookup fails before we know the real duration.
+        let fallback_eras = eras_for_lookback_days(lookback_days, 24 * 60 * 60 * 1000);
+
+        // Try to load fallback cached history first, in case active era lookup fails.
+        let mut fallback_cached_history = Vec::new();
         if let Some(ref db) = self.db {
             match db
-                .get_history(network, address.clone(), Some(num_eras))
+                .get_latest_history_cache(network, address.clone(), Some(fallback_eras))
                 .await
             {
                 Ok(history) if !history.is_empty() => {
                     tracing::info!("Loaded {} cached history points", history.len());
-                    cached_history = history;
+                    fallback_cached_history = history;
                 }
                 Ok(_) => {}
                 Err(e) => {
@@ -1705,29 +1865,52 @@ impl ChainWorker {
             Ok(Some(era)) => era,
             Ok(None) => {
                 // No active era, return cached data if any
-                let _ = reply.send(Ok(cached_history));
+                let _ = reply.send(Ok(fallback_cached_history));
                 return;
             }
             Err(e) => {
                 tracing::error!("Failed to get active era: {}", e);
-                let _ = reply.send(Ok(cached_history));
+                let _ = reply.send(Ok(fallback_cached_history));
                 return;
             }
         };
         let current_era = current_era_info.index;
         let current_era_start_ms = current_era_info.start_timestamp_ms;
         let era_duration_ms = current_era_info.duration_ms;
+        let num_eras = eras_for_lookback_days(lookback_days, era_duration_ms);
+        let (start_era, end_era) = HistoryService::era_window(current_era, num_eras);
 
-        for point in &mut cached_history {
-            if point.date.is_none() {
-                point.date = Some(calculate_era_date(
-                    point.era,
+        let cached_history = if let Some(ref db) = self.db {
+            match db
+                .get_history_cache_range(
+                    network,
+                    address.clone(),
+                    start_era,
+                    end_era,
                     current_era,
                     current_era_start_ms,
                     era_duration_ms,
-                ));
+                )
+                .await
+            {
+                Ok(history) if !history.is_empty() => {
+                    tracing::info!(
+                        "Loaded {} valid cached history points for eras {}..={}",
+                        history.len(),
+                        start_era,
+                        end_era
+                    );
+                    history
+                }
+                Ok(_) => Vec::new(),
+                Err(e) => {
+                    tracing::warn!("Failed to load cached history range: {}", e);
+                    Vec::new()
+                }
             }
-        }
+        } else {
+            Vec::new()
+        };
 
         // Get user's bonded amount for APY calculation
         let user_bonded = match client.get_staking_ledger(&account).await {
@@ -1735,27 +1918,13 @@ impl ChainWorker {
             _ => 0,
         };
 
-        // Determine which eras we need to fetch
-        let start_era = current_era.saturating_sub(num_eras);
-
-        // Filter out cached entries with unrealistic APY (likely bad data that should be re-fetched)
-        let (good_cached, bad_cached): (Vec<_>, Vec<_>) = cached_history
-            .into_iter()
-            .partition(|h| is_realistic_apy(h.apy));
-
-        if !bad_cached.is_empty() {
-            tracing::info!(
-                "Filtering {} cached entries with unrealistic APY, will re-fetch",
-                bad_cached.len()
-            );
-        }
-        cached_history = good_cached;
-
-        let cached_eras: std::collections::HashSet<u32> =
-            cached_history.iter().map(|h| h.era).collect();
-        let eras_to_fetch: Vec<u32> = (start_era..current_era)
-            .filter(|era| !cached_eras.contains(era))
-            .collect();
+        let eras_to_fetch: Vec<u32> = if let Some(ref db) = self.db {
+            db.get_missing_history_eras(network, address.clone(), start_era, end_era)
+                .await
+                .unwrap_or_else(|_| (start_era..current_era).collect())
+        } else {
+            (start_era..current_era).collect()
+        };
 
         if eras_to_fetch.is_empty() {
             tracing::info!("All eras already cached");
@@ -1764,83 +1933,34 @@ impl ChainWorker {
         }
 
         tracing::info!("Fetching {} missing eras from chain", eras_to_fetch.len());
-        let mut new_points = Vec::new();
 
-        // Fetch missing eras
-        for era in eras_to_fetch {
-            // Get total era reward
-            let era_reward = match client.get_era_validator_reward(era).await {
-                Ok(Some(reward)) => reward,
-                Ok(None) => {
-                    tracing::debug!("No reward data for era {}", era);
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to get era {} reward: {}", era, e);
-                    continue;
-                }
-            };
-
-            // Get total staked for this era (direct point query, no iteration)
-            let total_staked = match client.get_era_total_stake_direct(era).await {
-                Ok(staked) if staked > 0 => staked,
-                Ok(_) => {
-                    tracing::debug!("No stake data for era {}", era);
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to get era {} total staked: {}", era, e);
-                    continue;
-                }
-            };
-
-            // Calculate network-wide APY
-            let apy = stkopt_core::get_era_apy(era_reward, total_staked, era_duration_ms);
-
-            // Log raw values for debugging
-            tracing::debug!(
-                "Era {} raw data: era_reward={}, total_staked={}, user_bonded={}, apy={:.4}",
-                era,
-                era_reward,
-                total_staked,
-                user_bonded,
-                apy
-            );
-
-            // Skip eras with unrealistic APY (likely corrupted data)
-            if !is_realistic_apy(apy) {
-                tracing::warn!(
-                    "Era {} has unrealistic APY {:.2}% (reward={}, staked={}), skipping",
-                    era,
-                    apy * 100.0,
-                    era_reward,
-                    total_staked
-                );
-                continue;
-            }
-
-            // Estimate user's reward (capped to avoid unrealistic values)
-            let user_reward = estimate_user_reward(era_reward, user_bonded, total_staked);
-
-            let point = HistoryPoint {
-                era,
-                date: Some(calculate_era_date(
+        let concurrency = 8;
+        let mut fetched = stream::iter(eras_to_fetch)
+            .map(|era| async move {
+                let point = Self::fetch_history_era(
                     era,
                     current_era,
                     current_era_start_ms,
                     era_duration_ms,
-                )),
-                bonded: user_bonded,
-                reward: user_reward,
-                apy,
-            };
+                    user_bonded,
+                    |era| client.get_era_validator_reward(era),
+                    |era| client.get_era_total_stake_direct(era),
+                )
+                .await;
+                (era, point)
+            })
+            .buffer_unordered(concurrency)
+            .collect::<Vec<_>>()
+            .await;
 
-            new_points.push(point);
-            tracing::debug!(
-                "Added history point for era {} (APY: {:.2}%)",
-                era,
-                apy * 100.0
-            );
+        // Preserve era ordering when emitting/processing the parallel results.
+        fetched.sort_by_key(|(era, _)| *era);
+
+        let mut new_points = Vec::new();
+        for (_era, point) in fetched {
+            if let Some(point) = point {
+                new_points.push(point);
+            }
         }
 
         // Cache new points to database
@@ -1904,11 +2024,11 @@ pub fn spawn_chain_worker(
                 }
                 ChainCommand::FetchHistory {
                     address,
-                    eras,
+                    lookback_days,
                     reply,
                 } => {
                     worker
-                        .handle_fetch_history(current_network, address, eras, reply)
+                        .handle_fetch_history(current_network, address, lookback_days, reply)
                         .await;
                 }
                 // === Transaction Payload Generation ===
@@ -2033,16 +2153,46 @@ mod tests {
         let data = AccountData {
             free_balance: 1000,
             reserved_balance: 100,
+            frozen_balance: 50,
             staked_balance: Some(500),
             unbonding_balance: 200,
             is_nominating: true,
             nominations: vec!["validator1".to_string()],
             pool_id: None,
             pool_pending_rewards: 0,
+            pool_unbonding_eras: vec![],
+            pool_last_recorded_reward_counter: 0,
         };
         assert_eq!(data.free_balance, 1000);
+        assert_eq!(data.frozen_balance, 50);
         assert_eq!(data.unbonding_balance, 200);
         assert!(data.is_nominating);
+    }
+
+    #[test]
+    fn test_account_data_from_cache_preserves_pool_unbonding_and_reward_counter() {
+        let status = CachedAccountStatus {
+            free_balance: 1_000_000,
+            reserved_balance: 100_000,
+            frozen_balance: 50_000,
+            staked_amount: 500_000,
+            nominations_json: None,
+            pool_id: Some(7),
+            pool_points: Some(1_234_567),
+            unlocking_json: Some(
+                r#"[{"value":10000,"era":1501},{"value":20000,"era":1502}]"#.to_string(),
+            ),
+            pool_unbonding_eras_json: Some(
+                serde_json::to_string(&vec![(1601u32, 5_000u128), (1602u32, 8_000u128)]).unwrap(),
+            ),
+            pool_last_recorded_reward_counter: 99_999,
+        };
+
+        let data = account_data_from_cache(&status);
+        assert_eq!(data.free_balance, status.free_balance);
+        assert_eq!(data.pool_id, status.pool_id);
+        assert_eq!(data.pool_unbonding_eras, vec![(1601, 5_000), (1602, 8_000)]);
+        assert_eq!(data.pool_last_recorded_reward_counter, 99_999);
     }
 
     #[test]
@@ -2054,274 +2204,38 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn test_calculate_era_date_uses_yyyy_mm_dd_digits() {
-        let reference_ms = chrono::NaiveDate::from_ymd_opt(2026, 5, 31)
-            .unwrap()
-            .and_hms_opt(0, 0, 0)
-            .unwrap()
-            .and_utc()
-            .timestamp_millis() as u64;
-
-        assert_eq!(
-            calculate_era_date(100, 100, reference_ms, 86_400_000),
-            "20260531"
-        );
-        assert_eq!(
-            calculate_era_date(99, 100, reference_ms, 86_400_000),
-            "20260530"
-        );
-    }
-
-    // === is_realistic_apy ===
-
     fn account(byte: u8) -> AccountId32 {
         AccountId32::from([byte; 32])
     }
 
-    #[test]
-    fn test_pool_nomination_apy_averages_known_targets() {
-        let known_a = account(1);
-        let known_b = account(2);
-        let missing = account(3);
-        let nominations = PoolNominations {
-            pool_id: 7,
-            stash: account(9),
-            targets: vec![known_a, missing, known_b],
-        };
-        let validator_apy_map =
-            HashMap::from([(known_a.to_string(), 0.12), (known_b.to_string(), 0.06)]);
-
-        assert_eq!(
-            pool_nomination_apy(&nominations, &validator_apy_map),
-            Some(0.09)
-        );
-    }
-
-    #[test]
-    fn test_pool_nomination_apy_is_none_without_known_targets() {
-        let nominations = PoolNominations {
-            pool_id: 7,
-            stash: account(9),
-            targets: vec![account(3)],
-        };
-
-        assert_eq!(pool_nomination_apy(&nominations, &HashMap::new()), None);
-    }
-
-    #[test]
-    fn test_is_realistic_apy_zero() {
-        assert!(is_realistic_apy(0.0));
-    }
-
-    #[test]
-    fn test_is_realistic_apy_positive_within_limit() {
-        assert!(is_realistic_apy(0.25));
-    }
-
-    #[test]
-    fn test_is_realistic_apy_at_exact_boundary() {
-        assert!(is_realistic_apy(0.50));
-    }
-
-    #[test]
-    fn test_is_realistic_apy_negative() {
-        assert!(is_realistic_apy(-0.1));
-    }
-
-    #[test]
-    fn test_is_realistic_apy_above_limit() {
-        assert!(!is_realistic_apy(0.51));
-    }
-
-    #[test]
-    fn test_is_realistic_apy_very_high() {
-        assert!(!is_realistic_apy(10.0));
-    }
-
-    // === validator_apy_map ===
-
-    #[test]
-    fn test_validator_apy_map_empty() {
-        let validators: Vec<ValidatorInfo> = vec![];
-        let map = validator_apy_map(&validators);
-        assert!(map.is_empty());
-    }
-
-    #[test]
-    fn test_validator_apy_map_skips_missing_apy() {
-        let validators = vec![ValidatorInfo {
-            address: "addr1".to_string(),
+    fn display_validator(total_stake: u128, apy: Option<f64>) -> ValidatorInfo {
+        ValidatorInfo {
+            address: account(9).to_string(),
             name: None,
-            commission: 0.1,
+            commission: 0.05,
             blocked: false,
-            total_stake: 1000,
-            own_stake: 100,
-            nominator_count: 5,
+            total_stake,
+            own_stake: total_stake / 10,
+            nominator_count: 10,
             points: 100,
-            apy: None,
-        }];
-        let map = validator_apy_map(&validators);
-        assert!(map.is_empty());
+            apy,
+        }
     }
 
     #[test]
-    fn test_validator_apy_map_collects_correct_values() {
-        let validators = vec![
-            ValidatorInfo {
-                address: "addr1".to_string(),
-                name: None,
-                commission: 0.1,
-                blocked: false,
-                total_stake: 1000,
-                own_stake: 100,
-                nominator_count: 5,
-                points: 100,
-                apy: Some(0.12),
-            },
-            ValidatorInfo {
-                address: "addr2".to_string(),
-                name: None,
-                commission: 0.05,
-                blocked: false,
-                total_stake: 2000,
-                own_stake: 200,
-                nominator_count: 10,
-                points: 200,
-                apy: Some(0.08),
-            },
-        ];
-        let map = validator_apy_map(&validators);
-        assert_eq!(map.len(), 2);
-        assert_eq!(map.get("addr1"), Some(&0.12));
-        assert_eq!(map.get("addr2"), Some(&0.08));
-    }
-
-    // === estimate_user_reward ===
-
-    #[test]
-    fn test_estimate_user_reward_zero_user_bonded() {
-        assert_eq!(estimate_user_reward(1000, 0, 10000), 0);
-    }
-
-    #[test]
-    fn test_estimate_user_reward_zero_total_staked() {
-        assert_eq!(estimate_user_reward(1000, 500, 0), 0);
-    }
-
-    #[test]
-    fn test_estimate_user_reward_typical() {
-        // era_reward=1000, user=100, total=1000 => 100
-        assert_eq!(estimate_user_reward(1000, 100, 1000), 100);
-    }
-
-    #[test]
-    fn test_estimate_user_reward_capped() {
-        // user_bonded=10000, max_reasonable = 10000/200 = 50
-        // era_reward=10000, user=10000, total=1000 => estimated=100000, capped to 50
-        assert_eq!(estimate_user_reward(10000, 10000, 1000), 50);
-    }
-
-    #[test]
-    fn test_estimate_user_reward_not_capped_when_under_limit() {
-        // era_reward=50, user=1000, total=1000 => estimated=50, capped to 5
-        assert_eq!(estimate_user_reward(50, 1000, 1000), 5);
-        // era_reward=4, user=1000, total=1000 => estimated=4 (< 5)
-        assert_eq!(estimate_user_reward(4, 1000, 1000), 4);
-    }
-
-    #[test]
-    fn test_estimate_user_reward_max_reasonable_zero() {
-        // user_bonded=1, max_reasonable = 1/200 = 0 (integer division)
-        // estimated should be returned as-is because max_reasonable > 0 check fails
-        assert_eq!(estimate_user_reward(1000, 1, 1000), 1);
-    }
-
-    // === calculate_era_date ===
-
-    #[test]
-    fn test_calculate_era_date_future_era() {
-        let reference_ms = chrono::NaiveDate::from_ymd_opt(2026, 5, 31)
-            .unwrap()
-            .and_hms_opt(0, 0, 0)
-            .unwrap()
-            .and_utc()
-            .timestamp_millis() as u64;
-        // era > current_era, saturating_sub gives 0, same date
-        assert_eq!(
-            calculate_era_date(101, 100, reference_ms, 86_400_000),
-            "20260531"
-        );
-    }
-
-    #[test]
-    fn test_calculate_era_date_many_eras_ago() {
-        let reference_ms = chrono::NaiveDate::from_ymd_opt(2026, 5, 31)
-            .unwrap()
-            .and_hms_opt(0, 0, 0)
-            .unwrap()
-            .and_utc()
-            .timestamp_millis() as u64;
-        // 10 eras ago = 10 days earlier
-        assert_eq!(
-            calculate_era_date(90, 100, reference_ms, 86_400_000),
-            "20260521"
-        );
-    }
-
-    // === basic_validator_conversion ===
-
-    #[test]
-    fn test_basic_validator_conversion_empty() {
-        let validators: Vec<stkopt_chain::ValidatorInfo> = vec![];
-        let result = basic_validator_conversion(&validators);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_basic_validator_conversion_preserves_fields() {
-        let chain_validator = stkopt_chain::ValidatorInfo {
-            address: account(1),
-            preferences: stkopt_core::ValidatorPreferences {
-                commission: 0.15,
-                blocked: true,
-            },
-        };
-        let result = basic_validator_conversion(&[chain_validator]);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].address, account(1).to_string());
-        assert_eq!(result[0].commission, 0.15);
-        assert!(result[0].blocked);
-        assert_eq!(result[0].total_stake, 0);
-        assert_eq!(result[0].own_stake, 0);
-        assert_eq!(result[0].nominator_count, 0);
-        assert_eq!(result[0].points, 0);
-        assert_eq!(result[0].apy, None);
-        assert_eq!(result[0].name, None);
-    }
-
-    #[test]
-    fn test_basic_validator_conversion_multiple() {
-        let validators = vec![
-            stkopt_chain::ValidatorInfo {
-                address: account(1),
-                preferences: stkopt_core::ValidatorPreferences {
-                    commission: 0.10,
-                    blocked: false,
-                },
-            },
-            stkopt_chain::ValidatorInfo {
-                address: account(2),
-                preferences: stkopt_core::ValidatorPreferences {
-                    commission: 0.20,
-                    blocked: true,
-                },
-            },
-        ];
-        let result = basic_validator_conversion(&validators);
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0].address, account(1).to_string());
-        assert_eq!(result[1].address, account(2).to_string());
+    fn test_cached_validators_have_chain_data_requires_stake_and_apy() {
+        assert!(cached_validators_have_chain_data(&[display_validator(
+            1_000,
+            Some(0.12)
+        )]));
+        assert!(!cached_validators_have_chain_data(&[display_validator(
+            0,
+            Some(0.12)
+        )]));
+        assert!(!cached_validators_have_chain_data(&[display_validator(
+            1_000, None
+        )]));
+        assert!(!cached_validators_have_chain_data(&[]));
     }
 
     // === make_transaction_payload ===
@@ -2347,6 +2261,107 @@ mod tests {
         assert_eq!(result.signer, signer);
         assert_eq!(result.description, "Bond 10 DOT");
         assert!(!result.qr_data.is_empty());
+    }
+
+    // === slashing_spans_for_withdraw ===
+
+    #[test]
+    fn test_slashing_spans_for_withdraw_uses_value() {
+        assert_eq!(slashing_spans_for_withdraw(Ok(7)), 7);
+    }
+
+    #[test]
+    fn test_slashing_spans_for_withdraw_defaults_to_zero() {
+        assert_eq!(
+            slashing_spans_for_withdraw(Err(stkopt_chain::ChainError::Storage(
+                "no spans".to_string()
+            ))),
+            0
+        );
+    }
+
+    // === CachedChainMetadata ===
+
+    #[test]
+    fn test_paseo_cached_chain_metadata_ss58_prefix() {
+        let meta = CachedChainMetadata {
+            genesis_hash: String::new(),
+            spec_version: 0,
+            tx_version: 0,
+            ss58_prefix: Network::Paseo.ss58_format(),
+            token_symbol: Network::Paseo.token_symbol().to_string(),
+            token_decimals: Network::Paseo.token_decimals(),
+            era_duration_ms: 0,
+            current_era: 0,
+        };
+        assert_eq!(meta.ss58_prefix, 0);
+        assert_eq!(meta.token_symbol, "PAS");
+        assert_eq!(meta.token_decimals, 10);
+    }
+
+    #[test]
+    fn test_history_lookback_days_to_eras_conversion() {
+        let ms_per_day = 24 * 60 * 60 * 1000;
+        assert_eq!(stkopt_chain::eras_for_lookback_days(30, ms_per_day), 30);
+        assert_eq!(
+            stkopt_chain::eras_for_lookback_days(30, 6 * 60 * 60 * 1000),
+            120
+        );
+        assert_eq!(
+            stkopt_chain::eras_for_lookback_days(1, 7 * 60 * 60 * 1000),
+            4
+        );
+        assert_eq!(stkopt_chain::eras_for_lookback_days(0, ms_per_day), 1);
+    }
+
+    #[test]
+    fn test_startup_cache_considered_fresh_at_current_era() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let service = DbService::new_memory(runtime.handle().clone()).unwrap();
+
+        runtime.block_on(async {
+            let network = Network::Polkadot;
+            service
+                .set_chain_metadata(
+                    network,
+                    CachedChainMetadata {
+                        genesis_hash: "0x00".to_string(),
+                        spec_version: 1,
+                        tx_version: 1,
+                        ss58_prefix: network.ss58_format(),
+                        token_symbol: network.token_symbol().to_string(),
+                        token_decimals: network.token_decimals(),
+                        era_duration_ms: 24 * 60 * 60 * 1000,
+                        current_era: 1500,
+                    },
+                )
+                .await
+                .unwrap();
+
+            service
+                .set_cached_validators_checked(
+                    network,
+                    1500,
+                    vec![ValidatorInfo {
+                        address: account(1).to_string(),
+                        name: None,
+                        commission: 0.05,
+                        blocked: false,
+                        total_stake: 1_000_000,
+                        own_stake: 100_000,
+                        nominator_count: 10,
+                        points: 100,
+                        apy: Some(0.12),
+                    }],
+                    true,
+                )
+                .await
+                .unwrap();
+
+            let startup = service.get_startup_cache(network, 1500).await.unwrap();
+            assert!(startup.validators.is_displayable());
+            assert!(!startup.validators.data.is_empty());
+        });
     }
 
     // === ChainWorker::is_connection_error ===
@@ -2391,5 +2406,71 @@ mod tests {
     #[test]
     fn test_is_connection_error_empty() {
         assert!(!ChainWorker::is_connection_error(""));
+    }
+
+    // --- ChainWorker::fetch_history_era tests ---
+
+    fn run_async<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Runtime::new().unwrap().block_on(f)
+    }
+
+    #[test]
+    fn test_fetch_history_era_returns_none_when_reward_missing() {
+        let point = run_async(ChainWorker::fetch_history_era(
+            5,
+            10,
+            1_700_000_000_000,
+            24 * 60 * 60 * 1000,
+            1_000_000,
+            |_era| async { Ok::<_, stkopt_chain::ChainError>(None) },
+            |_era| async { Ok::<_, stkopt_chain::ChainError>(1_000_000_000) },
+        ));
+        assert!(point.is_none());
+    }
+
+    #[test]
+    fn test_fetch_history_era_returns_none_when_stake_zero() {
+        let point = run_async(ChainWorker::fetch_history_era(
+            5,
+            10,
+            1_700_000_000_000,
+            24 * 60 * 60 * 1000,
+            1_000_000,
+            |_era| async { Ok::<_, stkopt_chain::ChainError>(Some(10_000)) },
+            |_era| async { Ok::<_, stkopt_chain::ChainError>(0) },
+        ));
+        assert!(point.is_none());
+    }
+
+    #[test]
+    fn test_fetch_history_era_returns_point_for_valid_data() {
+        let point = run_async(ChainWorker::fetch_history_era(
+            5,
+            10,
+            1_700_000_000_000,
+            24 * 60 * 60 * 1000,
+            1_000_000,
+            |_era| async { Ok::<_, stkopt_chain::ChainError>(Some(10_000)) },
+            |_era| async { Ok::<_, stkopt_chain::ChainError>(1_000_000_000) },
+        ));
+        let point = point.expect("expected a history point");
+        assert_eq!(point.era, 5);
+        assert_eq!(point.bonded, 1_000_000);
+        assert!(point.apy.is_finite());
+        assert!(point.apy > 0.0 && point.apy <= 0.5);
+    }
+
+    #[test]
+    fn test_fetch_history_era_skips_unrealistic_apy() {
+        let point = run_async(ChainWorker::fetch_history_era(
+            5,
+            10,
+            1_700_000_000_000,
+            24 * 60 * 60 * 1000,
+            1_000,
+            |_era| async { Ok::<_, stkopt_chain::ChainError>(Some(1_000)) },
+            |_era| async { Ok::<_, stkopt_chain::ChainError>(1) },
+        ));
+        assert!(point.is_none());
     }
 }

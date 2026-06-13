@@ -69,22 +69,18 @@ impl ChainClient {
     /// Get era duration in milliseconds.
     ///
     /// Since the Polkadot 2.0 migration, Asset Hub doesn't have Babe constants.
-    /// We use network-specific known era durations:
-    /// - Polkadot/Kusama: 24 hours (6 sessions × 4 hours)
-    /// - Testnets may vary
+    /// We first try the Staking `MaxEraDuration` constant. If that is not
+    /// available we fall back to the legacy Babe-based computation, and only
+    /// use a hard-coded 24-hour default as a last resort.
     ///
-    /// Falls back to MaxEraDuration constant if available.
+    /// The on-chain value is returned as-is; it is not clamped to a default.
     pub async fn get_era_duration_ms(&self) -> Result<u64, ChainError> {
-        // First try to get MaxEraDuration from Staking constants (Asset Hub has this)
+        // First try to get MaxEraDuration from Staking constants (Asset Hub has this).
         if let Ok(max_era) = self.get_constant_u64("Staking", "MaxEraDuration").await {
-            // MaxEraDuration is 36 hours on Asset Hub, but actual eras are 24 hours
-            // Use a more conservative estimate based on typical era duration
-            // Polkadot: 6 sessions × 2400 blocks × 6s = 86400s = 24 hours
-            let polkadot_era_ms: u64 = 24 * 60 * 60 * 1000; // 24 hours
-            return Ok(polkadot_era_ms.min(max_era));
+            return Ok(max_era);
         }
 
-        // Try legacy relay chain approach (Babe-based)
+        // Try legacy relay chain approach (Babe-based).
         if let (Ok(sessions_per_era), Ok(epoch_duration), Ok(expected_block_time)) = (
             self.get_constant_u32("Staking", "SessionsPerEra").await,
             self.get_constant_u64("Babe", "EpochDuration").await,
@@ -93,7 +89,7 @@ impl ChainClient {
             return Ok(sessions_per_era as u64 * epoch_duration * expected_block_time);
         }
 
-        // Default fallback: 24 hours (standard Polkadot era)
+        // Default fallback: 24 hours (standard Polkadot era).
         tracing::warn!("Could not determine era duration from chain, using 24 hour default");
         Ok(24 * 60 * 60 * 1000)
     }

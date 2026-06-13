@@ -7,7 +7,7 @@ use gpui_ui_kit::*;
 use tokio::sync::mpsc;
 
 use crate::account::{ValidationResult, validate_address};
-use crate::app::StkoptApp;
+use crate::app::{NetworkExt, StkoptApp};
 use crate::chain::ChainUpdate;
 use crate::gpui_tokio::Tokio;
 
@@ -86,7 +86,7 @@ impl AccountSection {
 
                                         match validate_address(&input) {
                                             ValidationResult::Valid(_addr_type) => {
-                                                this.set_watched_account(input.clone());
+                                                this.set_watched_account(input.clone(), cx);
                                                 this.add_to_address_book(input.clone());
                                                 this.save_config();
                                                 this.fetch_watched_account(cx);
@@ -257,7 +257,7 @@ impl AccountSection {
                     )
                     .child(
                         div().w(px(100.0)).child(
-                            Text::new(entry.network.symbol())
+                            Text::new(entry.network.token_symbol())
                                 .size(TextSize::Xs)
                                 .color(theme.text_secondary),
                         ),
@@ -277,7 +277,7 @@ impl AccountSection {
                                     .on_click(move |_window, cx| {
                                         let addr = addr.clone();
                                         entity.update(cx, |this, cx| {
-                                            this.set_watched_account(addr.clone());
+                                            this.set_watched_account(addr.clone(), cx);
                                             this.save_config();
                                             this.fetch_watched_account(cx);
                                             this.current_section = crate::app::Section::Dashboard;
